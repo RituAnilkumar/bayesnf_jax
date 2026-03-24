@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+pyenv/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# JAX / XLA compilations cache
+.jax_cache/
+/tmp/
+
+# Model outputs — large files, not for version control
+outputs/
+*.pkl
+*.pickle
+
+# Data — keep structure but not the actual csvs
+data_for_model/oggm/*/train.csv
+data_for_model/oggm/*/logo.csv
+data_for_model/oggm/*/loyo.csv
+data_for_model/oggm/*/loygo.csv
+data_for_model/oggm/*/for_preds.csv
+data_for_model/oggm/*/full.csv
+data_for_model/hugonnet/*.csv
+data_for_model/glambie/*.csv
+
+# SLURM logs
+out_files/
+err_files/
+*.out
+*.err
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Hydra outputs
+multirun/
+.hydra/
