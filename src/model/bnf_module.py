@@ -356,21 +356,27 @@ def extract_vi_params(params: dict) -> tuple[dict, dict]:
 # ---------------------------------------------------------------------------
 # Convenience: standard normal prior (for Stage 1 pretraining)
 # ---------------------------------------------------------------------------
-def make_standard_normal_prior(params: dict) -> tuple[dict, dict]:
+def make_standard_normal_prior(mu_dict: dict, log_sigma_dict: dict) -> tuple[dict, dict]:
     """
-    Construct a standard normal prior (mu=0, log_sigma=0) matching
-    the structure of the given params dict.
+    Construct a standard normal prior (mu=0, log_sigma=0) from already-extracted
+    VI parameter dicts.
+
+    Takes the output of extract_vi_params() so the prior pytree structure exactly
+    matches (mu_dict, log_sigma_dict), ensuring compute_total_kl leaf counts align.
 
     Used in Stage 1 pretraining where the prior is N(0, 1).
 
     Args:
-        params: Full flax params dict
+        mu_dict:        Posterior mu dict — output of extract_vi_params()[0]
+        log_sigma_dict: Posterior log_sigma dict — output of extract_vi_params()[1]
 
     Returns:
-        (prior_mu, prior_log_sigma) with all zeros, matching params structure
+        (prior_mu, prior_log_sigma) with all zeros, matching each dict's structure.
+        mu=0, log_sigma=0 → sigma=exp(0)=1 → N(0,1)
     """
-    zeros = jax.tree_util.tree_map(jnp.zeros_like, params)
-    return zeros, zeros  # mu=0, log_sigma=0 → sigma=exp(0)=1
+    prior_mu        = jax.tree_util.tree_map(jnp.zeros_like, mu_dict)
+    prior_log_sigma = jax.tree_util.tree_map(jnp.zeros_like, log_sigma_dict)
+    return prior_mu, prior_log_sigma
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +423,8 @@ if __name__ == '__main__':
     print(f"Predictive std:   {jnp.std(mc_preds, axis=0)}")
 
     # KL with standard normal prior
-    prior_mu, prior_log_sigma = make_standard_normal_prior(params['params'])
     mu_dict, log_sigma_dict   = extract_vi_params(params['params'])
-    print(f"\nParameter pytree keys: {list(params['params'].keys())}")
+    prior_mu, prior_log_sigma = make_standard_normal_prior(mu_dict, log_sigma_dict)
+    kl = compute_total_kl(mu_dict, log_sigma_dict, prior_mu, prior_log_sigma)
+    print(f"\nTotal KL (should be ~0 at init): {kl}")
+    print(f"Parameter pytree keys: {list(params['params'].keys())}")

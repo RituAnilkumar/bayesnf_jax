@@ -121,8 +121,8 @@ def make_train_step(model: BayesianNeuralField, optimizer):
             preds = model.apply(params, time_index, covariates, rng_fwd)
             l_oggm = oggm_loss(preds, targets)
 
-            prior_mu, prior_log_sigma = make_standard_normal_prior(params["params"])
             mu_dict, log_sigma_dict   = extract_vi_params(params["params"])
+            prior_mu, prior_log_sigma = make_standard_normal_prior(mu_dict, log_sigma_dict)
             kl = compute_total_kl(mu_dict, log_sigma_dict, prior_mu, prior_log_sigma)
 
             return pretrain_elbo(l_oggm, kl, beta)
@@ -252,7 +252,6 @@ def run_pretrain(cfg: DictConfig) -> None:
         # Re-load all splits using same held_years
         region = cfg.model.reg_subdir
         base   = os.path.join(cfg.model.inp_dir, region)
-        from src.data_utils import make_cv_splits
         features_df = load_features(os.path.join(base, f"main_features_{region}.csv"))
         targets_df  = load_oggm(os.path.join(base, f"oggm_targets_{region}.csv"))
         merged_df   = merge_features_targets(features_df, targets_df)

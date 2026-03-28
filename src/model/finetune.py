@@ -98,11 +98,13 @@ def load_temporal_avg(cfg: DictConfig, rgi_ids_ordered: np.ndarray) -> pd.DataFr
     """
     df = _load_temporal_avg(cfg.model.temporal_avg_path)
 
-    # Assert all rgi_ids in temporal_avg are present in OGGM data
+    # Assert exact rgi_id set match between temporal_avg and OGGM
     ta_ids = set(df["rgi_id"].unique())
     og_ids = set(rgi_ids_ordered)
-    missing = ta_ids - og_ids
-    assert not missing, f"temporal_avg has rgi_ids not in OGGM data: {missing}"
+    extra   = ta_ids - og_ids
+    missing = og_ids - ta_ids
+    assert not extra,   f"temporal_avg has rgi_ids not in OGGM data: {extra}"
+    assert not missing, f"OGGM glaciers missing from temporal_avg: {missing}"
 
     # Sort to match factorize ordering
     id_to_idx = {rid: i for i, rid in enumerate(rgi_ids_ordered)}
@@ -115,13 +117,24 @@ def load_temporal_avg(cfg: DictConfig, rgi_ids_ordered: np.ndarray) -> pd.DataFr
 def load_glambie(
     cfg: DictConfig,
     oggm_years: set,
+    temporal_avg_end_year: int,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """
     Load and train/test split GLaMBIE data for the configured region.
 
+    Test split: GLaMBIE years that fall after the temporal_avg period end year.
+    These years are naturally held out because temporal_avg provides no constraint
+    on them — the model has not been trained to match any period-mean target
+    covering those years.
+
+    Train split: GLaMBIE years within the temporal_avg period.
+
     Args:
-        cfg:        Hydra config (needs cfg.model.glambie_path, cfg.model.glambie_test_years)
-        oggm_years: Set of integer years present in the OGGM training data.
+        cfg:                  Hydra config (needs cfg.model.glambie_path)
+        oggm_years:           Set of integer years present in the OGGM feature data
+                              (GLaMBIE years must be a subset — asserted here)
+        temporal_avg_end_year: Last year of the temporal_avg period (e.g. 2020).
+                              GLaMBIE years > this are used as test set.
 
     Returns:
         (glambie_train_df, glambie_test_df) — either may be None if no data.
@@ -134,22 +147,22 @@ def load_glambie(
     if df.empty:
         return None, None
 
-    # Assert GLaMBIE years are a subset of OGGM years
+    # GLaMBIE years must be a subset of OGGM feature years
     glambie_years = set(df["year"].unique())
     out_of_range  = glambie_years - oggm_years
     assert not out_of_range, \
-        f"GLaMBIE years not present in OGGM data: {out_of_range}"
+        f"GLaMBIE years not present in OGGM feature data: {out_of_range}"
 
-    # Split into train / test
-    test_years = set(cfg.model.get("glambie_test_years", []))
+    # Split: years within temporal_avg period → train; years after → test
+    train_df = df[df["year"] <= temporal_avg_end_year].reset_index(drop=True)
+    test_df  = df[df["year"] >  temporal_avg_end_year].reset_index(drop=True)
+
+    test_years = sorted(test_df["year"].unique().tolist())
     if test_years:
-        train_df = df[~df["year"].isin(test_years)].reset_index(drop=True)
-        test_df  = df[ df["year"].isin(test_years)].reset_index(drop=True)
-    else:
-        train_df, test_df = df, None
+        print(f"  GLaMBIE test years (post-temporal_avg, held out): {test_years}")
 
     return (train_df if not train_df.empty else None,
-            test_df  if (test_df is not None and not test_df.empty) else None)
+            test_df  if not test_df.empty  else None)
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +412,8 @@ def run_finetune(cfg: DictConfig) -> None:
     _, unique_glaciers = pd.factorize(oggm_df["rgi_id"], sort=True)
 
     temporal_avg_df              = load_temporal_avg(cfg, unique_glaciers)
-    glambie_train_df, glambie_test_df = load_glambie(cfg, oggm_years)
+    temporal_avg_end_year = int(temporal_avg_df["end_date"].max())
+    glambie_train_df, glambie_test_df = load_glambie(cfg, oggm_years, temporal_avg_end_year)
 
     # --- Prepare static arrays (factorize outside JIT) ---
     static_arrays = prepare_finetune_arrays(
