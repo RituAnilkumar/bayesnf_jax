@@ -33,8 +33,9 @@ def make_beta_schedule(total_epochs: int, anneal_epochs: int) -> list[float]:
     Returns:
         List of float beta values, length = total_epochs.
     """
-    # TODO: implement
-    raise NotImplementedError
+    betas = jnp.linspace(0.0, 1.0, anneal_epochs).tolist()
+    betas += [1.0] * (total_epochs - anneal_epochs)
+    return betas
 
 
 # ---------------------------------------------------------------------------
@@ -59,8 +60,7 @@ def pretrain_elbo(
     Returns:
         Scalar ELBO (to be minimised — sign convention: return positive loss)
     """
-    # TODO: implement
-    raise NotImplementedError
+    return oggm_loss_val + beta * kl_val
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +74,6 @@ def finetune_elbo(
     beta: float,
 ) -> jnp.ndarray:
     """
-    ELBO for Stage 2 finetuning.
-
     ELBO = L_temporal_avg + L_glambie - beta * KL(q || q_pretrained)
 
     Args:
@@ -87,5 +85,4 @@ def finetune_elbo(
     Returns:
         Scalar ELBO (to be minimised)
     """
-    # TODO: implement
-    raise NotImplementedError
+    return temporal_avg_loss_val + glambie_loss_val + beta * kl_val
