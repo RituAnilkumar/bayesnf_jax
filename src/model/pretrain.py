@@ -2,10 +2,10 @@
 Stage 1 pretraining loop — OGGM point-level supervision.
 
 Two run modes controlled by cfg.model.train_split:
-  - 'train': trains on train.csv, evaluates on train/loyo/logo/loygo splits.
+  - 'train': trains on train split, evaluates on loyo/logo/loygo splits.
              Produces out-of-sample metrics for performance assessment.
              loyo is the primary evaluation metric (leave-one-year-out).
-  - 'full':  trains on full.csv (all available data), skips OOS evaluation.
+  - 'full':  trains on full split (all available data), skips OOS evaluation.
              Produces pretrained_params.pkl used as the Stage 2 prior.
 
 Outputs written to cfg.model.output_dir:
@@ -24,6 +24,7 @@ import optax
 import cloudpickle
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from omegaconf import DictConfig
 
 from src.model.bnf_module import (
@@ -35,29 +36,51 @@ from src.model.bnf_module import (
 )
 from src.loss.elbo import pretrain_elbo, make_beta_schedule
 from src.loss.likelihood import oggm_loss
-from src.loss.aggregation import MM_TO_MWE
+from src.data_utils import (
+    load_features,
+    load_oggm,
+    merge_features_targets,
+    select_held_years,
+    make_cv_splits,
+    build_model_inputs,
+    FEATURE_COLS,
+)
 
 
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_oggm_split(cfg: DictConfig, split: str) -> pd.DataFrame:
+def load_oggm_split(cfg: DictConfig, split: str) -> tuple[pd.DataFrame, list[int]]:
     """
-    Load one OGGM data split CSV for the configured region.
+    Load and return one CV split of the merged (features + OGGM targets) DataFrame.
 
     Args:
-        cfg:   Hydra config (model sub-config)
+        cfg:   Hydra config
         split: One of 'train', 'loyo', 'logo', 'loygo', 'full'
 
     Returns:
-        DataFrame with at least columns: rgi_id, year, mass_balance_mm_yr
+        (split_df, held_years) — the split DataFrame and the globally held years
+        (needed so evaluate_split can use the same held_years).
     """
-    # TODO: implement — path = cfg.model.inp_dir / cfg.model.reg_subdir / f"{split}.csv"
-    # TODO: handle year column as int or date string (inherit jungle3 pattern)
-    # TODO: compute time_index = year - T_MIN
-    # TODO: apply MM_TO_MWE conversion to target column
-    raise NotImplementedError
+    region = cfg.model.reg_subdir
+    base   = os.path.join(cfg.model.inp_dir, region)
+
+    features_df = load_features(os.path.join(base, f"main_features_{region}.csv"))
+    targets_df  = load_oggm(os.path.join(base, f"oggm_targets_{region}.csv"))
+    merged_df   = merge_features_targets(features_df, targets_df)
+
+    held_years = select_held_years(merged_df["year"].unique().tolist())
+    splits     = make_cv_splits(merged_df, held_years)
+
+    return splits[split], held_years
+
+
+def _get_ft_cols(cfg: DictConfig) -> list[str]:
+    """Resolve feature columns from config, applying any rm_fts exclusions."""
+    ft_cols = list(cfg.model.model_ftcols) if cfg.model.model_ftcols else FEATURE_COLS
+    rm_fts  = list(cfg.model.rm_fts) if cfg.model.get("rm_fts") else []
+    return [c for c in ft_cols if c not in rm_fts]
 
 
 def prepare_arrays(df: pd.DataFrame, ft_cols: list[str]) -> dict:
@@ -69,8 +92,13 @@ def prepare_arrays(df: pd.DataFrame, ft_cols: list[str]) -> dict:
         covariates: jnp.array, shape (N, n_features)
         targets:    jnp.array, shape (N,)  [MWE/yr]
     """
-    # TODO: implement
-    raise NotImplementedError
+    time_index, covariates, _, _ = build_model_inputs(df, ft_cols)
+    targets = df["mass_balance_mwe"].to_numpy(dtype=np.float32)
+    return {
+        "time_index": jnp.array(time_index),
+        "covariates": jnp.array(covariates),
+        "targets":    jnp.array(targets),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -79,15 +107,31 @@ def prepare_arrays(df: pd.DataFrame, ft_cols: list[str]) -> dict:
 
 def make_train_step(model: BayesianNeuralField, optimizer):
     """
-    Factory: returns a JIT-compiled train_step function closed over model and optimizer.
+    Factory: returns a JIT-compiled train_step closed over model and optimizer.
 
-    The returned function signature:
+    Returned function signature:
         train_step(params, opt_state, rng, time_index, covariates, targets, beta)
         -> (params, opt_state, loss_scalar)
     """
-    # TODO: implement using jax.jit + jax.value_and_grad
-    # Loss = pretrain_elbo(oggm_loss(...), compute_total_kl(...), beta)
-    raise NotImplementedError
+    @jax.jit
+    def train_step(params, opt_state, rng, time_index, covariates, targets, beta):
+        def loss_fn(params):
+            rng_fwd, rng_kl = jax.random.split(rng)
+            preds = model.apply(params, time_index, covariates, rng_fwd)
+            l_oggm = oggm_loss(preds, targets)
+
+            prior_mu, prior_log_sigma = make_standard_normal_prior(params["params"])
+            mu_dict, _ = extract_vi_params(params["params"])
+            kl = compute_total_kl(mu_dict, prior_mu, prior_log_sigma)
+
+            return pretrain_elbo(l_oggm, kl, beta)
+
+        loss, grads = jax.value_and_grad(loss_fn)(params)
+        updates, opt_state_new = optimizer.update(grads, opt_state, params)
+        params_new = optax.apply_updates(params, updates)
+        return params_new, opt_state_new, loss
+
+    return train_step
 
 
 # ---------------------------------------------------------------------------
@@ -102,15 +146,25 @@ def evaluate_split(
     n_samples: int = 50,
 ) -> dict:
     """
-    Compute evaluation metrics for one data split.
-
-    Uses MC predictions (n_samples forward passes) to get the predictive mean,
-    then computes RMSE and bias against the OGGM targets.
+    Compute evaluation metrics for one data split using MC predictive mean.
 
     Returns dict with keys: rmse, bias, n_points
     """
-    # TODO: implement using model.apply(..., method=model.mc_predict)
-    raise NotImplementedError
+    mc_preds = model.apply(
+        params,
+        arrays["time_index"],
+        arrays["covariates"],
+        rng,
+        n_samples=n_samples,
+        method=model.mc_predict,
+    )  # (n_samples, N)
+    pred_mean = jnp.mean(mc_preds, axis=0)  # (N,)
+    targets   = arrays["targets"]
+
+    residuals = pred_mean - targets
+    rmse = float(jnp.sqrt(jnp.mean(residuals ** 2)))
+    bias = float(jnp.mean(residuals))
+    return {"rmse": rmse, "bias": bias, "n_points": len(targets)}
 
 
 # ---------------------------------------------------------------------------
@@ -125,35 +179,98 @@ def run_pretrain(cfg: DictConfig) -> None:
     Saves outputs to cfg.model.output_dir.
     """
     os.makedirs(cfg.model.output_dir, exist_ok=True)
+    rng = jax.random.PRNGKey(cfg.model.get("seed", 0))
+
+    # --- Feature columns ---
+    ft_cols = _get_ft_cols(cfg)
 
     # --- Data loading ---
-    # TODO: load train split (or full split)
-    # TODO: pd.factorize on rgi_id for any future use — consistent ordering
-    # TODO: prepare_arrays
+    train_split = cfg.model.train_split  # 'train' or 'full'
+    train_df, held_years = load_oggm_split(cfg, train_split)
+    train_arrays = prepare_arrays(train_df, ft_cols)
 
-    # --- Model + optimizer init ---
-    # TODO: instantiate BayesianNeuralField from cfg
-    # TODO: init params
-    # TODO: make Adam optimizer (lr from cfg)
+    # --- Model init ---
+    model = BayesianNeuralField(
+        hidden_sizes=tuple([cfg.model.model_nhidden] * cfg.model.model_nlayers),
+        n_fourier=cfg.model.n_fourier,
+    )
+    rng, rng_init, rng_fwd = jax.random.split(rng, 3)
+    params = model.init(
+        rng_init,
+        train_arrays["time_index"][:1],
+        train_arrays["covariates"][:1],
+        rng_fwd,
+    )
+
+    # --- Optimizer ---
+    optimizer  = optax.adam(cfg.model.get("lr", 1e-3))
+    opt_state  = optimizer.init(params)
 
     # --- Beta schedule ---
-    # TODO: beta_schedule = make_beta_schedule(cfg.model.model_nepochs, cfg.model.beta_anneal_epochs)
+    beta_schedule = make_beta_schedule(
+        cfg.model.model_nepochs,
+        cfg.model.beta_anneal_epochs,
+    )
 
     # --- Training loop ---
-    # TODO: loop over epochs, call train_step, log loss
+    train_step = make_train_step(model, optimizer)
+    losses = []
+
+    for epoch in range(cfg.model.model_nepochs):
+        rng, rng_step = jax.random.split(rng)
+        beta = beta_schedule[epoch]
+        params, opt_state, loss = train_step(
+            params, opt_state, rng_step,
+            train_arrays["time_index"],
+            train_arrays["covariates"],
+            train_arrays["targets"],
+            beta,
+        )
+        losses.append(float(loss))
+        if (epoch + 1) % max(1, cfg.model.model_nepochs // 10) == 0:
+            print(f"  epoch {epoch+1}/{cfg.model.model_nepochs}  loss={loss:.6f}  beta={beta:.3f}")
 
     # --- Save pretrained params ---
-    # TODO: mu_dict, log_sigma_dict = extract_vi_params(params['params'])
-    # TODO: cloudpickle.dump((mu_dict, log_sigma_dict), output_dir/pretrained_params.pkl)
+    mu_dict, log_sigma_dict = extract_vi_params(params["params"])
+    params_path = os.path.join(cfg.model.output_dir, "pretrained_params.pkl")
+    with open(params_path, "wb") as f:
+        cloudpickle.dump((mu_dict, log_sigma_dict), f)
+    print(f"Saved pretrained params → {params_path}")
 
-    # --- Save training curve ---
-    # TODO: matplotlib plot of loss vs epoch → training_loss.png
+    # --- Training loss curve ---
+    fig, ax = plt.subplots()
+    ax.plot(losses)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("ELBO loss")
+    ax.set_title("Stage 1 pretraining loss")
+    fig.savefig(os.path.join(cfg.model.output_dir, "training_loss.png"), dpi=150)
+    plt.close(fig)
 
-    # --- Evaluate splits (only when train_split='train') ---
-    # TODO: for each split in [train, loyo, logo, loygo]:
-    #         arrays = prepare_arrays(load_oggm_split(cfg, split), ...)
-    #         metrics = evaluate_split(model, params, arrays, rng)
-    #         write metrics_{split}.csv
-    # NOTE: loyo is the primary metric — log it prominently
+    # --- OOS evaluation (train_split='train' only) ---
+    if train_split != "full":
+        # Re-load all splits using same held_years
+        region = cfg.model.reg_subdir
+        base   = os.path.join(cfg.model.inp_dir, region)
+        from src.data_utils import make_cv_splits
+        features_df = load_features(os.path.join(base, f"main_features_{region}.csv"))
+        targets_df  = load_oggm(os.path.join(base, f"oggm_targets_{region}.csv"))
+        merged_df   = merge_features_targets(features_df, targets_df)
+        all_splits  = make_cv_splits(merged_df, held_years)
 
-    raise NotImplementedError
+        rows = []
+        for split_name in ["train", "loyo", "logo", "loygo"]:
+            split_df = all_splits[split_name]
+            if len(split_df) == 0:
+                continue
+            arrays = prepare_arrays(split_df, ft_cols)
+            rng, rng_eval = jax.random.split(rng)
+            metrics = evaluate_split(model, params, arrays, rng_eval, n_samples=cfg.model.model_nensemble)
+            metrics["region"] = region
+            metrics["split"]  = split_name
+            rows.append(metrics)
+            tag = " ← PRIMARY" if split_name == "loyo" else ""
+            print(f"  {split_name}: rmse={metrics['rmse']:.4f}  bias={metrics['bias']:.4f}  n={metrics['n_points']}{tag}")
+
+        pd.DataFrame(rows)[["region", "split", "rmse", "bias", "n_points"]].to_csv(
+            os.path.join(cfg.model.output_dir, "metrics_oos.csv"), index=False
+        )

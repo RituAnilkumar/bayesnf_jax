@@ -53,9 +53,21 @@ def main(cfg: DictConfig) -> None:
         run_pretrain(cfg_full)
 
     if "finetune" in stages:
+        # Derive pretrained_params_path from the pretrain output dir if not set
+        if not cfg.model.get("pretrained_params_path"):
+            import os
+            cfg.model.pretrained_params_path = os.path.join(
+                cfg.model.output_dir, "pretrained_params.pkl"
+            )
         run_finetune(cfg)
 
     if "predict" in stages:
+        # Derive finetuned_params_path from the finetune output dir if not set
+        if not cfg.model.get("finetuned_params_path"):
+            import os
+            cfg.model.finetuned_params_path = os.path.join(
+                cfg.model.output_dir, "finetuned_params.pkl"
+            )
         run_predict(cfg)
 
 

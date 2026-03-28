@@ -2,7 +2,7 @@
 Stage 2 finetuning loop — temporal-avg + GLaMBIE observational supervision.
 
 Loads pretrained_params.pkl as the Bayesian prior (Bayesian continual learning).
-All available OGGM data (full.csv) is used — no train/loyo/logo/loygo splits here.
+All available OGGM data (full split) is used — no train/loyo/logo/loygo splits here.
 
 Observation data:
   - Temporal-average per-glacier period mean (typically 2001-2020)
@@ -16,7 +16,7 @@ GLaMBIE test evaluation:
 Outputs written to cfg.model.output_dir:
   - finetuned_params.pkl          (tuple of mu_dict, log_sigma_dict)
   - training_loss.png
-  - metrics_glambie_test.csv      (held-out GLaMBIE years)
+  - metrics_glambie_test.csv      (held-out GLaMBIE years, if glambie_test_years set)
 """
 
 import os
@@ -26,6 +26,7 @@ import optax
 import cloudpickle
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from omegaconf import DictConfig
 
 from src.model.bnf_module import (
@@ -36,6 +37,18 @@ from src.model.bnf_module import (
 )
 from src.loss.elbo import finetune_elbo, make_beta_schedule
 from src.loss.likelihood import temporal_avg_loss, glambie_loss
+from src.loss.aggregation import regional_annual_mean
+from src.data_utils import (
+    load_features,
+    load_oggm,
+    merge_features_targets,
+    select_held_years,
+    make_cv_splits,
+    load_temporal_avg as _load_temporal_avg,
+    load_glambie as _load_glambie_raw,
+    build_model_inputs,
+    FEATURE_COLS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -49,56 +62,98 @@ def load_pretrained_prior(pretrained_params_path: str) -> tuple[dict, dict]:
     These become the prior distribution for Stage 2 KL.
 
     Returns:
-        (prior_mu, prior_log_sigma) — same pytree structure as model params
+        (prior_mu, prior_log_sigma) — same pytree structure as model params['params']
     """
-    # TODO: cloudpickle.load, assert tuple of length 2
-    raise NotImplementedError
+    with open(pretrained_params_path, "rb") as f:
+        prior = cloudpickle.load(f)
+    assert isinstance(prior, tuple) and len(prior) == 2, \
+        f"Expected (mu_dict, log_sigma_dict), got {type(prior)}"
+    return prior  # (mu_dict, log_sigma_dict)
 
 
-def load_oggm_full(cfg) -> pd.DataFrame:
-    """Load full.csv for the configured region."""
-    # TODO: same as pretrain.load_oggm_split but always 'full'
-    raise NotImplementedError
+def load_oggm_full(cfg: DictConfig) -> pd.DataFrame:
+    """Load the full (all rows) merged OGGM dataset for the configured region."""
+    region = cfg.model.reg_subdir
+    base   = os.path.join(cfg.model.inp_dir, region)
+
+    features_df = load_features(os.path.join(base, f"main_features_{region}.csv"))
+    targets_df  = load_oggm(os.path.join(base, f"oggm_targets_{region}.csv"))
+    merged_df   = merge_features_targets(features_df, targets_df)
+
+    held_years = select_held_years(merged_df["year"].unique().tolist())
+    splits     = make_cv_splits(merged_df, held_years)
+    return splits["full"]
 
 
-def load_temporal_avg(cfg) -> pd.DataFrame:
+def load_temporal_avg(cfg: DictConfig, rgi_ids_ordered: np.ndarray) -> pd.DataFrame:
     """
-    Load temporal-average CSV. Values are already in MWE/yr — no conversion.
+    Load temporal-average CSV and assert rgi_id ordering matches the OGGM factorize codes.
 
-    Required columns: rgi_id, start_date, end_date, avg_mb_mwe, uncertainty_mwe
+    rgi_ids_ordered must be the unique rgi_ids in the same order as produced by
+    pd.factorize on the OGGM full dataset — so temporal_avg targets index [i]
+    corresponds to glacier code i.
 
-    IMPORTANT: rgi_id ordering must be asserted to match the factorize
-    codes from the OGGM training data (same pattern as oggm_combined_loss.py).
+    Returns DataFrame sorted to match rgi_ids_ordered, columns:
+        rgi_id, start_date, end_date, avg_mb_mwe, uncertainty_mwe
     """
-    # TODO: implement; assert rgi_id alignment with OGGM factorize codes
-    raise NotImplementedError
+    df = _load_temporal_avg(cfg.model.temporal_avg_path)
+
+    # Assert all rgi_ids in temporal_avg are present in OGGM data
+    ta_ids = set(df["rgi_id"].unique())
+    og_ids = set(rgi_ids_ordered)
+    missing = ta_ids - og_ids
+    assert not missing, f"temporal_avg has rgi_ids not in OGGM data: {missing}"
+
+    # Sort to match factorize ordering
+    id_to_idx = {rid: i for i, rid in enumerate(rgi_ids_ordered)}
+    df = df[df["rgi_id"].isin(og_ids)].copy()
+    df["_order"] = df["rgi_id"].map(id_to_idx)
+    df = df.sort_values("_order").drop(columns="_order").reset_index(drop=True)
+    return df
 
 
-def load_glambie(cfg, oggm_years: set) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+def load_glambie(
+    cfg: DictConfig,
+    oggm_years: set,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """
-    Load GLaMBIE CSV for the configured region.
-
-    Splits the data into:
-      - train portion (years to be used in finetuning loss)
-      - test portion  (cfg.model.glambie_test_years, withheld for evaluation)
-
-    Handles missing file or empty source gracefully (returns None).
+    Load and train/test split GLaMBIE data for the configured region.
 
     Args:
-        cfg:        Hydra config
-        oggm_years: Set of years present in the OGGM training data
-                    (GLaMBIE years must be a subset — assert this)
+        cfg:        Hydra config (needs cfg.model.glambie_path, cfg.model.glambie_test_years)
+        oggm_years: Set of integer years present in the OGGM training data.
 
     Returns:
-        (glambie_train_df, glambie_test_df) — either may be None
+        (glambie_train_df, glambie_test_df) — either may be None if no data.
     """
-    # TODO: implement; handle missing file gracefully
-    # TODO: assert glambie_years ⊆ oggm_years
-    raise NotImplementedError
+    glambie_path = cfg.model.get("glambie_path", None)
+    if not glambie_path or not os.path.exists(glambie_path):
+        return None, None
+
+    df = _load_glambie_raw(glambie_path)  # long format: region, year, source, value_mwe, error_mwe
+    if df.empty:
+        return None, None
+
+    # Assert GLaMBIE years are a subset of OGGM years
+    glambie_years = set(df["year"].unique())
+    out_of_range  = glambie_years - oggm_years
+    assert not out_of_range, \
+        f"GLaMBIE years not present in OGGM data: {out_of_range}"
+
+    # Split into train / test
+    test_years = set(cfg.model.get("glambie_test_years", []))
+    if test_years:
+        train_df = df[~df["year"].isin(test_years)].reset_index(drop=True)
+        test_df  = df[ df["year"].isin(test_years)].reset_index(drop=True)
+    else:
+        train_df, test_df = df, None
+
+    return (train_df if not train_df.empty else None,
+            test_df  if (test_df is not None and not test_df.empty) else None)
 
 
 # ---------------------------------------------------------------------------
-# Segment code preparation (outside JIT)
+# Array preparation (outside JIT)
 # ---------------------------------------------------------------------------
 
 def prepare_finetune_arrays(
@@ -111,18 +166,72 @@ def prepare_finetune_arrays(
     Build all JAX arrays needed for the finetuning train_step.
 
     Factorize calls happen here — once, outside the training loop.
-    The returned dict of arrays is passed to make_train_step and stays static.
 
     Returns dict with keys:
-        time_index, covariates                        — full OGGM grid arrays
-        temporal_avg_glacier_ids, temporal_avg_targets,
-        temporal_avg_errs, n_glaciers                 — period-window arrays
-        glambie_year_ids, glambie_targets,             — GLaMBIE arrays (or None)
-        glambie_errs, n_glambie_obs
-        period_window_mask                             — boolean mask for start_date–end_date rows
+        time_index, covariates              — full OGGM grid
+        period_mask                         — bool mask selecting period-window rows
+        temporal_avg_glacier_ids            — int glacier codes for period rows
+        temporal_avg_targets, temporal_avg_errs, n_glaciers
+        has_glambie                         — bool
+        glambie_time_index, glambie_covariates  — rows matching GLaMBIE years
+        glambie_year_ids, n_glambie_years   — per-row year code in [0, n_glambie_years)
+        obs_year_idx                        — per-GLaMBIE-obs index into glambie years
+        glambie_means, glambie_errs         — GLaMBIE targets
     """
-    # TODO: implement
-    raise NotImplementedError
+    # Full OGGM grid arrays
+    time_index, covariates, rgi_ids_all, _ = build_model_inputs(oggm_df, ft_cols)
+
+    # Factorize glacier IDs — codes[i] gives glacier index for row i
+    glacier_codes, unique_glaciers = pd.factorize(oggm_df["rgi_id"], sort=True)
+    n_glaciers = len(unique_glaciers)
+
+    # Period window mask (temporal_avg period, same for all glaciers in our data)
+    period_start = int(temporal_avg_df["start_date"].min())
+    period_end   = int(temporal_avg_df["end_date"].max())
+    period_mask  = (oggm_df["year"] >= period_start) & (oggm_df["year"] <= period_end)
+
+    # Temporal-avg arrays (sorted to match factorize ordering above)
+    # temporal_avg_df is already sorted to match unique_glaciers (asserted upstream)
+    ta_targets = temporal_avg_df["avg_mb_mwe"].to_numpy(dtype=np.float32)
+    ta_errs    = temporal_avg_df["uncertainty_mwe"].to_numpy(dtype=np.float32)
+
+    out = {
+        "time_index":               jnp.array(time_index),
+        "covariates":               jnp.array(covariates),
+        "period_mask":              jnp.array(period_mask.to_numpy()),
+        "temporal_avg_glacier_ids": jnp.array(glacier_codes[period_mask.to_numpy()], dtype=jnp.int32),
+        "temporal_avg_targets":     jnp.array(ta_targets),
+        "temporal_avg_errs":        jnp.array(ta_errs),
+        "n_glaciers":               n_glaciers,
+        "has_glambie":              glambie_train_df is not None,
+    }
+
+    # GLaMBIE arrays
+    if glambie_train_df is not None:
+        glambie_years = sorted(glambie_train_df["year"].unique().tolist())
+        year_to_idx   = {y: i for i, y in enumerate(glambie_years)}
+        n_glambie_years = len(glambie_years)
+
+        # OGGM rows whose year appears in GLaMBIE train years
+        glambie_row_mask = oggm_df["year"].isin(glambie_years).to_numpy()
+        g_time_idx  = time_index[glambie_row_mask]
+        g_covariates = covariates[glambie_row_mask]
+        g_year_ids  = oggm_df.loc[glambie_row_mask, "year"].map(year_to_idx).to_numpy(dtype=np.int32)
+
+        # Per-observation year index (one per GLaMBIE row)
+        obs_year_idx = glambie_train_df["year"].map(year_to_idx).to_numpy(dtype=np.int32)
+
+        out.update({
+            "glambie_time_index":  jnp.array(g_time_idx),
+            "glambie_covariates":  jnp.array(g_covariates),
+            "glambie_year_ids":    jnp.array(g_year_ids),
+            "n_glambie_years":     n_glambie_years,
+            "obs_year_idx":        jnp.array(obs_year_idx),
+            "glambie_means":       jnp.array(glambie_train_df["value_mwe"].to_numpy(dtype=np.float32)),
+            "glambie_errs":        jnp.array(glambie_train_df["error_mwe"].to_numpy(dtype=np.float32)),
+        })
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -134,26 +243,70 @@ def make_train_step(
     optimizer,
     prior_mu: dict,
     prior_log_sigma: dict,
-    static_arrays: dict,
+    sa: dict,  # static_arrays
 ):
     """
     Factory: returns a JIT-compiled finetune train_step.
 
-    The prior (prior_mu, prior_log_sigma) is closed over — it is static
-    and never updated during Stage 2 training.
+    The prior and all data arrays are closed over — static during Stage 2 training.
 
-    Signature of returned function:
+    Returned function signature:
         train_step(params, opt_state, rng, beta)
         -> (params, opt_state, loss_scalar)
     """
-    # TODO: implement
-    # Loss = finetune_elbo(
-    #     temporal_avg_loss(...),
-    #     glambie_loss(...),  # 0.0 if no GLaMBIE
-    #     compute_total_kl(params, prior_mu, prior_log_sigma),
-    #     beta
-    # )
-    raise NotImplementedError
+    has_glambie = sa["has_glambie"]
+
+    @jax.jit
+    def train_step(params, opt_state, rng, beta):
+        def loss_fn(params):
+            rng_period, rng_glambie = jax.random.split(rng)
+
+            # --- Temporal-avg loss ---
+            period_preds = model.apply(
+                params,
+                sa["time_index"][sa["period_mask"]],
+                sa["covariates"][sa["period_mask"]],
+                rng_period,
+            )
+            l_ta = temporal_avg_loss(
+                period_preds,
+                sa["temporal_avg_glacier_ids"],
+                sa["n_glaciers"],
+                sa["temporal_avg_targets"],
+                sa["temporal_avg_errs"],
+            )
+
+            # --- GLaMBIE loss ---
+            if has_glambie:
+                glambie_preds = model.apply(
+                    params,
+                    sa["glambie_time_index"],
+                    sa["glambie_covariates"],
+                    rng_glambie,
+                )
+                l_glambie = glambie_loss(
+                    glambie_preds,
+                    sa["glambie_year_ids"],
+                    sa["n_glambie_years"],
+                    sa["obs_year_idx"],
+                    sa["glambie_means"],
+                    sa["glambie_errs"],
+                )
+            else:
+                l_glambie = jnp.array(0.0)
+
+            # --- KL against pretrained prior ---
+            mu_dict, _ = extract_vi_params(params["params"])
+            kl = compute_total_kl(mu_dict, prior_mu, prior_log_sigma)
+
+            return finetune_elbo(l_ta, l_glambie, kl, beta)
+
+        loss, grads = jax.value_and_grad(loss_fn)(params)
+        updates, opt_state_new = optimizer.update(grads, opt_state, params)
+        params_new = optax.apply_updates(params, updates)
+        return params_new, opt_state_new, loss
+
+    return train_step
 
 
 # ---------------------------------------------------------------------------
@@ -168,16 +321,53 @@ def evaluate_glambie_test(
     ft_cols: list[str],
     rng: jax.Array,
     n_samples: int = 100,
-) -> dict:
+) -> pd.DataFrame:
     """
     Evaluate finetuned model against held-out GLaMBIE test years.
 
-    Predicts regional annual means and compares against glambie_test_df.
-
-    Returns dict with keys: rmse, bias, n_obs (per source)
+    For each test year, computes the MC predictive regional mean and compares
+    against the GLaMBIE observation. Returns a DataFrame of per-observation metrics.
     """
-    # TODO: implement
-    raise NotImplementedError
+    test_years = sorted(glambie_test_df["year"].unique().tolist())
+    year_to_idx = {y: i for i, y in enumerate(test_years)}
+
+    # Filter OGGM rows to test years
+    test_mask = oggm_df["year"].isin(test_years)
+    test_df   = oggm_df[test_mask].reset_index(drop=True)
+
+    time_idx, covariates, _, _ = build_model_inputs(test_df, ft_cols)
+    year_ids = test_df["year"].map(year_to_idx).to_numpy(dtype=np.int32)
+
+    # MC predictions → (n_samples, N)
+    mc_preds = model.apply(
+        params,
+        jnp.array(time_idx),
+        jnp.array(covariates),
+        rng,
+        n_samples=n_samples,
+        method=model.mc_predict,
+    )
+
+    # Regional annual mean per sample → (n_samples, n_years)
+    def sample_regional_mean(preds_i):
+        return regional_annual_mean(preds_i, jnp.array(year_ids), len(test_years))
+
+    regional_means = jax.vmap(sample_regional_mean)(mc_preds)  # (n_samples, n_years)
+    pred_mean = jnp.mean(regional_means, axis=0)  # (n_years,)
+
+    rows = []
+    for _, obs in glambie_test_df.iterrows():
+        y_idx    = year_to_idx[obs["year"]]
+        pred_val = float(pred_mean[y_idx])
+        rows.append({
+            "year":       obs["year"],
+            "source":     obs["source"],
+            "glambie_mwe": obs["value_mwe"],
+            "pred_mwe":   pred_val,
+            "residual":   pred_val - obs["value_mwe"],
+        })
+
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -188,21 +378,101 @@ def run_finetune(cfg: DictConfig) -> None:
     """
     Full Stage 2 finetuning run.
 
-    Loads pretrained prior, trains on Hugonnet + GLaMBIE,
+    Loads pretrained prior, trains on temporal-avg + GLaMBIE,
     evaluates on held-out GLaMBIE test years, saves outputs.
     """
     os.makedirs(cfg.model.output_dir, exist_ok=True)
+    rng = jax.random.PRNGKey(cfg.model.get("seed", 0))
 
-    # TODO: load_pretrained_prior
-    # TODO: load_oggm_full, load_temporal_avg, load_glambie
-    # TODO: prepare_finetune_arrays (factorize outside JIT)
-    # TODO: init model + optimizer (same architecture as Stage 1)
-    # TODO: initialise params from prior mu (warm start from pretrained posterior mean)
-    # TODO: make_beta_schedule
-    # TODO: make_train_step (closed over prior)
-    # TODO: training loop
-    # TODO: extract_vi_params → save finetuned_params.pkl
-    # TODO: save training_loss.png
-    # TODO: evaluate_glambie_test → save metrics_glambie_test.csv
+    ft_cols = list(cfg.model.model_ftcols) if cfg.model.model_ftcols else FEATURE_COLS
+    rm_fts  = list(cfg.model.rm_fts) if cfg.model.get("rm_fts") else []
+    ft_cols = [c for c in ft_cols if c not in rm_fts]
 
-    raise NotImplementedError
+    # --- Load prior ---
+    prior_mu, prior_log_sigma = load_pretrained_prior(cfg.model.pretrained_params_path)
+
+    # --- Load data ---
+    oggm_df     = load_oggm_full(cfg)
+    oggm_years  = set(oggm_df["year"].unique().tolist())
+
+    # Get unique glaciers in factorize order (sort=True matches prepare_finetune_arrays)
+    _, unique_glaciers = pd.factorize(oggm_df["rgi_id"], sort=True)
+
+    temporal_avg_df              = load_temporal_avg(cfg, unique_glaciers)
+    glambie_train_df, glambie_test_df = load_glambie(cfg, oggm_years)
+
+    # --- Prepare static arrays (factorize outside JIT) ---
+    static_arrays = prepare_finetune_arrays(
+        oggm_df, temporal_avg_df, glambie_train_df, ft_cols
+    )
+
+    # --- Model init (warm-start from pretrained posterior mean) ---
+    model = BayesianNeuralField(
+        hidden_sizes=tuple([cfg.model.model_nhidden] * cfg.model.model_nlayers),
+        n_fourier=cfg.model.n_fourier,
+    )
+    rng, rng_init, rng_fwd = jax.random.split(rng, 3)
+    # Initialise with dummy input to get params structure, then overwrite with prior
+    dummy_params = model.init(
+        rng_init,
+        static_arrays["time_index"][:1],
+        static_arrays["covariates"][:1],
+        rng_fwd,
+    )
+    # Reconstruct full params dict from pretrained (mu, log_sigma)
+    def _merge(d_mu, d_ls):
+        result = {**d_mu}
+        for k, v in d_ls.items():
+            if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+                result[k] = _merge(result[k], v)
+            else:
+                result[k] = v
+        return result
+    params = {"params": _merge(prior_mu, prior_log_sigma)}
+
+    # --- Optimizer ---
+    optimizer = optax.adam(cfg.model.get("lr", 1e-3))
+    opt_state = optimizer.init(params)
+
+    # --- Beta schedule + train step ---
+    beta_schedule = make_beta_schedule(cfg.model.model_nepochs, cfg.model.beta_anneal_epochs)
+    train_step    = make_train_step(model, optimizer, prior_mu, prior_log_sigma, static_arrays)
+
+    # --- Training loop ---
+    losses = []
+    for epoch in range(cfg.model.model_nepochs):
+        rng, rng_step = jax.random.split(rng)
+        beta = beta_schedule[epoch]
+        params, opt_state, loss = train_step(params, opt_state, rng_step, beta)
+        losses.append(float(loss))
+        if (epoch + 1) % max(1, cfg.model.model_nepochs // 10) == 0:
+            print(f"  epoch {epoch+1}/{cfg.model.model_nepochs}  loss={loss:.6f}  beta={beta:.3f}")
+
+    # --- Save finetuned params ---
+    mu_dict, log_sigma_dict = extract_vi_params(params["params"])
+    params_path = os.path.join(cfg.model.output_dir, "finetuned_params.pkl")
+    with open(params_path, "wb") as f:
+        cloudpickle.dump((mu_dict, log_sigma_dict), f)
+    print(f"Saved finetuned params → {params_path}")
+
+    # --- Training loss curve ---
+    fig, ax = plt.subplots()
+    ax.plot(losses)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("ELBO loss")
+    ax.set_title("Stage 2 finetuning loss")
+    fig.savefig(os.path.join(cfg.model.output_dir, "training_loss.png"), dpi=150)
+    plt.close(fig)
+
+    # --- GLaMBIE test evaluation ---
+    if glambie_test_df is not None:
+        rng, rng_eval = jax.random.split(rng)
+        metrics_df = evaluate_glambie_test(
+            model, params, oggm_df, glambie_test_df, ft_cols,
+            rng_eval, n_samples=cfg.model.model_nensemble,
+        )
+        metrics_path = os.path.join(cfg.model.output_dir, "metrics_glambie_test.csv")
+        metrics_df.to_csv(metrics_path, index=False)
+        rmse = float(np.sqrt((metrics_df["residual"] ** 2).mean()))
+        bias = float(metrics_df["residual"].mean())
+        print(f"GLaMBIE test: rmse={rmse:.4f}  bias={bias:.4f}  n={len(metrics_df)}")
