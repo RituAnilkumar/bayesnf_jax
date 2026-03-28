@@ -12,17 +12,19 @@ fourier_seed: 42
 
 # --- Training ---
 model_nepochs: 2000
-model_lr: 1.0e-3
+lr: 1.0e-3
 beta_anneal_epochs: 400       # 20% of model_nepochs
+seed: 0
 
 # --- Inference ---
 model_nensemble: 100
 
 # --- Data ---
-inp_dir: data_for_model/oggm
+inp_dir: data_for_model
 train_split: full
 
-# --- Monthly feature columns ---
+# --- Monthly feature columns (match actual CSV column names exactly) ---
+# TODO: replace with actual monthly column names once monthly CSVs are available
 model_ftcols:
   - CenLat
   - CenLon
@@ -32,14 +34,23 @@ model_ftcols:
   - Aspect
   - Zmin
   - Zmax
-  # TODO: add monthly climate feature column names (e.g. tas_jan ... tas_dec, pr_jan ... pr_dec)
-  # These must match column names in the OGGM CSVs exactly.
+  - t2m_abl_mean
+  - t2m_abl_std
+  - t2m_acc_mean
+  - t2m_acc_std
+  - tp_abl_sum
+  - tp_acc_sum
+  - ssrd_abl_sum
+  - ssrd_acc_sum
 
 rm_fts: []
 
+# --- Output directory ---
+output_dir: ???
+
 # --- Per-region fields (must be overridden in r{nn}.yaml) ---
 reg_subdir: ???
-hugonnet_path: ???
+temporal_avg_path: ???
 glambie_path: ???
 pretrained_params_path: ???
 finetuned_params_path: ???

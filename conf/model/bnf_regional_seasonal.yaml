@@ -12,18 +12,18 @@ fourier_seed: 42
 
 # --- Training ---
 model_nepochs: 2000
-model_lr: 1.0e-3
+lr: 1.0e-3
 beta_anneal_epochs: 400       # 20% of model_nepochs — beta ramps 0→1 over this window
+seed: 0
 
 # --- Inference ---
 model_nensemble: 100          # MC samples at prediction time
 
 # --- Data ---
-inp_dir: data_for_model/oggm
+inp_dir: data_for_model
 train_split: full             # 'train' for CV run, 'full' for final pretrained model
 
-# --- Seasonal feature columns ---
-# Geometry and spatial features (common across input types)
+# --- Seasonal feature columns (match actual CSV column names exactly) ---
 model_ftcols:
   - CenLat
   - CenLon
@@ -33,14 +33,23 @@ model_ftcols:
   - Aspect
   - Zmin
   - Zmax
-  # TODO: add seasonal climate feature column names (e.g. tas_djf, tas_jja, pr_ann, rsds_ann)
-  # These must match column names in the OGGM CSVs exactly.
+  - t2m_abl_mean
+  - t2m_abl_std
+  - t2m_acc_mean
+  - t2m_acc_std
+  - tp_abl_sum
+  - tp_acc_sum
+  - ssrd_abl_sum
+  - ssrd_acc_sum
 
 rm_fts: []                    # feature columns to drop at runtime (if any)
 
+# --- Output directory (written by Hydra, referenced in code) ---
+output_dir: ???               # set by hydra.run.dir via chdir:true — overridden per config
+
 # --- Per-region fields (must be overridden in r{nn}.yaml) ---
 reg_subdir: ???
-hugonnet_path: ???
+temporal_avg_path: ???
 glambie_path: ???
 pretrained_params_path: ???
 finetuned_params_path: ???
