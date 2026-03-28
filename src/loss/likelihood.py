@@ -38,35 +38,35 @@ def oggm_loss(
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 — Hugonnet per-glacier 20-year mean likelihood
+# Stage 2 — temporal-average per-glacier mean likelihood
 # ---------------------------------------------------------------------------
 
-def hugonnet_loss(
-    preds: jax.Array,           # shape (N,)  predictions for 2000-2019 rows [MWE/yr]
+def temporal_avg_loss(
+    preds: jax.Array,           # shape (N,)  predictions for period rows [MWE/yr]
     glacier_ids: jax.Array,     # shape (N,)  integer glacier codes
     n_glaciers: int,             # number of distinct glaciers (static)
-    dmdtda: jax.Array,          # shape (n_glaciers,)  Hugonnet targets [MWE/yr]
-    err_dmdtda: jax.Array,      # shape (n_glaciers,)  Hugonnet uncertainties [MWE/yr]
+    avg_mb: jax.Array,          # shape (n_glaciers,)  temporal-avg targets [MWE/yr]
+    uncertainty: jax.Array,     # shape (n_glaciers,)  temporal-avg uncertainties [MWE/yr]
 ) -> jax.Array:
     """
-    Inverse-variance weighted MSE between predicted 20yr glacier means
-    and Hugonnet dmdtda observations.
+    Inverse-variance weighted MSE between predicted per-glacier period means
+    and temporal-average observations (typically 2001-2020).
 
-    L_hugonnet = (1/N_glaciers) * sum_i [
-        (pred_20yr_i - dmdtda_i)^2 / err_dmdtda_i^2
+    L_temporal_avg = (1/N_glaciers) * sum_i [
+        (pred_period_mean_i - avg_mb_i)^2 / uncertainty_i^2
     ]
 
-    where pred_20yr_i = mean of preds for glacier i over rows in 2000-2019.
+    where pred_period_mean_i = mean of preds for glacier i over start_date–end_date rows.
 
-    Hugonnet inputs must be pre-converted from kg/m²/yr to MWE/yr (÷1000).
+    Inputs are already in MWE/yr — no unit conversion needed.
     rgi_id ordering must match the factorize codes in glacier_ids (assert upstream).
 
     Args:
-        preds:        Predictions for the Hugonnet window rows, shape (N,)
+        preds:        Predictions for the period window rows, shape (N,)
         glacier_ids:  Integer glacier codes from pd.factorize, shape (N,)
         n_glaciers:   Number of distinct glaciers
-        dmdtda:       Hugonnet 20yr mean targets, shape (n_glaciers,)  [MWE/yr]
-        err_dmdtda:   Hugonnet uncertainties, shape (n_glaciers,)      [MWE/yr]
+        avg_mb:       Temporal-avg targets, shape (n_glaciers,)       [MWE/yr]
+        uncertainty:  Temporal-avg uncertainties, shape (n_glaciers,) [MWE/yr]
 
     Returns:
         Scalar inverse-variance weighted MSE.

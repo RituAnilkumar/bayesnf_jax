@@ -1,11 +1,11 @@
 """
-Stage 2 finetuning loop — Hugonnet + GLaMBIE observational supervision.
+Stage 2 finetuning loop — temporal-avg + GLaMBIE observational supervision.
 
 Loads pretrained_params.pkl as the Bayesian prior (Bayesian continual learning).
 All available OGGM data (full.csv) is used — no train/loyo/logo/loygo splits here.
 
 Observation data:
-  - Hugonnet per-glacier 20yr mean (2000-2019)
+  - Temporal-average per-glacier period mean (typically 2001-2020)
   - GLaMBIE regional annual means (gravimetry + altimetry, where available)
 
 GLaMBIE test evaluation:
@@ -35,8 +35,7 @@ from src.model.bnf_module import (
     T_MIN,
 )
 from src.loss.elbo import finetune_elbo, make_beta_schedule
-from src.loss.likelihood import hugonnet_loss, glambie_loss
-from src.loss.aggregation import MM_TO_MWE, KGM2_TO_MWE
+from src.loss.likelihood import temporal_avg_loss, glambie_loss
 
 
 # ---------------------------------------------------------------------------
@@ -62,12 +61,11 @@ def load_oggm_full(cfg) -> pd.DataFrame:
     raise NotImplementedError
 
 
-def load_hugonnet(cfg) -> pd.DataFrame:
+def load_temporal_avg(cfg) -> pd.DataFrame:
     """
-    Load Hugonnet CSV and convert dmdtda / err_dmdtda to MWE/yr.
+    Load temporal-average CSV. Values are already in MWE/yr — no conversion.
 
-    Required columns: rgi_id, dmdtda, err_dmdtda
-    Conversion: ÷ 1000 (kg/m²/yr → MWE/yr)
+    Required columns: rgi_id, start_date, end_date, avg_mb_mwe, uncertainty_mwe
 
     IMPORTANT: rgi_id ordering must be asserted to match the factorize
     codes from the OGGM training data (same pattern as oggm_combined_loss.py).
@@ -105,7 +103,7 @@ def load_glambie(cfg, oggm_years: set) -> tuple[pd.DataFrame | None, pd.DataFram
 
 def prepare_finetune_arrays(
     oggm_df: pd.DataFrame,
-    hugonnet_df: pd.DataFrame,
+    temporal_avg_df: pd.DataFrame,
     glambie_train_df: pd.DataFrame | None,
     ft_cols: list[str],
 ) -> dict:
@@ -116,12 +114,12 @@ def prepare_finetune_arrays(
     The returned dict of arrays is passed to make_train_step and stays static.
 
     Returns dict with keys:
-        time_index, covariates                    — full OGGM grid arrays
-        hugonnet_glacier_ids, hugonnet_targets,   — Hugonnet-window arrays
-        hugonnet_errs, n_glaciers
-        glambie_year_ids, glambie_targets,         — GLaMBIE arrays (or None)
+        time_index, covariates                        — full OGGM grid arrays
+        temporal_avg_glacier_ids, temporal_avg_targets,
+        temporal_avg_errs, n_glaciers                 — period-window arrays
+        glambie_year_ids, glambie_targets,             — GLaMBIE arrays (or None)
         glambie_errs, n_glambie_obs
-        hugg_window_mask                           — boolean mask for 2000-2019 rows
+        period_window_mask                             — boolean mask for start_date–end_date rows
     """
     # TODO: implement
     raise NotImplementedError
@@ -150,7 +148,7 @@ def make_train_step(
     """
     # TODO: implement
     # Loss = finetune_elbo(
-    #     hugonnet_loss(...),
+    #     temporal_avg_loss(...),
     #     glambie_loss(...),  # 0.0 if no GLaMBIE
     #     compute_total_kl(params, prior_mu, prior_log_sigma),
     #     beta
@@ -196,7 +194,7 @@ def run_finetune(cfg: DictConfig) -> None:
     os.makedirs(cfg.model.output_dir, exist_ok=True)
 
     # TODO: load_pretrained_prior
-    # TODO: load_oggm_full, load_hugonnet, load_glambie
+    # TODO: load_oggm_full, load_temporal_avg, load_glambie
     # TODO: prepare_finetune_arrays (factorize outside JIT)
     # TODO: init model + optimizer (same architecture as Stage 1)
     # TODO: initialise params from prior mu (warm start from pretrained posterior mean)

@@ -2,7 +2,7 @@
 ELBO assembly and beta annealing schedule.
 
 Stage 1 ELBO:  L_oggm  - beta * KL(q || N(0,1))
-Stage 2 ELBO:  L_hugonnet + L_glambie - beta * KL(q || q_pretrained)
+Stage 2 ELBO:  L_temporal_avg + L_glambie - beta * KL(q || q_pretrained)
 
 Beta is annealed linearly from 0 → 1 over the first `beta_anneal_epochs`
 epochs (default 20% of total epochs). This prevents posterior collapse
@@ -68,21 +68,21 @@ def pretrain_elbo(
 # ---------------------------------------------------------------------------
 
 def finetune_elbo(
-    hugonnet_loss_val,  # scalar
-    glambie_loss_val,   # scalar (0.0 if no GLaMBIE data)
-    kl_val,             # scalar
+    temporal_avg_loss_val,  # scalar
+    glambie_loss_val,       # scalar (0.0 if no GLaMBIE data)
+    kl_val,                 # scalar
     beta: float,
 ) -> jnp.ndarray:
     """
     ELBO for Stage 2 finetuning.
 
-    ELBO = L_hugonnet + L_glambie - beta * KL(q || q_pretrained)
+    ELBO = L_temporal_avg + L_glambie - beta * KL(q || q_pretrained)
 
     Args:
-        hugonnet_loss_val: Scalar Hugonnet inverse-variance MSE
-        glambie_loss_val:  Scalar GLaMBIE inverse-variance MSE (0.0 if absent)
-        kl_val:            Scalar KL divergence against pretrained posterior
-        beta:              Current annealing coefficient in [0, 1]
+        temporal_avg_loss_val: Scalar temporal-avg inverse-variance MSE
+        glambie_loss_val:      Scalar GLaMBIE inverse-variance MSE (0.0 if absent)
+        kl_val:                Scalar KL divergence against pretrained posterior
+        beta:                  Current annealing coefficient in [0, 1]
 
     Returns:
         Scalar ELBO (to be minimised)
