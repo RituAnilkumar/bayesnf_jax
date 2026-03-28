@@ -1,0 +1,9 @@
+# @package _global_
+# Region r08 overrides for seasonal input type
+
+model:
+  reg_subdir: r08
+  temporal_avg_path: data_for_model/r08/temporal_avg_targets_r08.csv
+  glambie_path: data_for_model/r08/glambie_targets_r08.csv
+  pretrained_params_path: outputs/pretrain/r08_seasonal_full/pretrained_params.pkl
+  finetuned_params_path: outputs/finetune/r08_seasonal/finetuned_params.pkl

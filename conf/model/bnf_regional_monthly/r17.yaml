@@ -1,0 +1,9 @@
+# @package _global_
+# Region r17 overrides for monthly input type
+
+model:
+  reg_subdir: r17
+  temporal_avg_path: data_for_model/r17/temporal_avg_targets_r17.csv
+  glambie_path: data_for_model/r17/glambie_targets_r17.csv
+  pretrained_params_path: outputs/pretrain/r17_monthly_full/pretrained_params.pkl
+  finetuned_params_path: outputs/finetune/r17_monthly/finetuned_params.pkl

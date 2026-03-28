@@ -3,8 +3,7 @@
 
 model:
   reg_subdir: r02
-  hugonnet_path: data_for_model/hugonnet/r02_hugonnet.csv
-  glambie_path: data_for_model/glambie/r02_glambie.csv
+  temporal_avg_path: data_for_model/r02/temporal_avg_targets_r02.csv
+  glambie_path: data_for_model/r02/glambie_targets_r02.csv
   pretrained_params_path: outputs/pretrain/r02_monthly_full/pretrained_params.pkl
   finetuned_params_path: outputs/finetune/r02_monthly/finetuned_params.pkl
-  glambie_test_years: []
