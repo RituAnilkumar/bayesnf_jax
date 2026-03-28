@@ -296,8 +296,8 @@ def make_train_step(
                 l_glambie = jnp.array(0.0)
 
             # --- KL against pretrained prior ---
-            mu_dict, _ = extract_vi_params(params["params"])
-            kl = compute_total_kl(mu_dict, prior_mu, prior_log_sigma)
+            mu_dict, log_sigma_dict = extract_vi_params(params["params"])
+            kl = compute_total_kl(mu_dict, log_sigma_dict, prior_mu, prior_log_sigma)
 
             return finetune_elbo(l_ta, l_glambie, kl, beta)
 

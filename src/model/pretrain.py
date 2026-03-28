@@ -68,6 +68,7 @@ def load_oggm_split(cfg: DictConfig, split: str) -> tuple[pd.DataFrame, list[int
 
     features_df = load_features(os.path.join(base, f"main_features_{region}.csv"))
     targets_df  = load_oggm(os.path.join(base, f"oggm_targets_{region}.csv"))
+
     merged_df   = merge_features_targets(features_df, targets_df)
 
     held_years = select_held_years(merged_df["year"].unique().tolist())
@@ -121,8 +122,8 @@ def make_train_step(model: BayesianNeuralField, optimizer):
             l_oggm = oggm_loss(preds, targets)
 
             prior_mu, prior_log_sigma = make_standard_normal_prior(params["params"])
-            mu_dict, _ = extract_vi_params(params["params"])
-            kl = compute_total_kl(mu_dict, prior_mu, prior_log_sigma)
+            mu_dict, log_sigma_dict   = extract_vi_params(params["params"])
+            kl = compute_total_kl(mu_dict, log_sigma_dict, prior_mu, prior_log_sigma)
 
             return pretrain_elbo(l_oggm, kl, beta)
 

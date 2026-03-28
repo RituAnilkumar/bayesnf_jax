@@ -294,42 +294,31 @@ def kl_gaussian(
 
 
 def compute_total_kl(
-    params: dict,
+    mu_q: dict,
+    log_sigma_q: dict,
     prior_mu: dict,
     prior_log_sigma: dict,
 ) -> jax.Array:
     """
-    Compute total KL divergence over all VI parameters in the model.
-
-    Traverses the params pytree and pairs each (w_mu, w_log_sigma) with
-    the corresponding prior parameters.
+    Compute total KL divergence KL(q || p) over all VI parameters in the model.
 
     Args:
-        params:           Current variational parameters (flax params dict)
-        prior_mu:         Prior means (same pytree structure as params)
-        prior_log_sigma:  Prior log-sigmas (same pytree structure as params)
+        mu_q:             Posterior means — output of extract_vi_params()[0]
+        log_sigma_q:      Posterior log-sigmas — output of extract_vi_params()[1]
+        prior_mu:         Prior means (same pytree structure)
+        prior_log_sigma:  Prior log-sigmas (same pytree structure)
 
     Returns:
         Scalar total KL
     """
-    # Flatten pytrees to lists of leaves with matching structure
-    leaves_q    = jax.tree_util.tree_leaves(params)
-    leaves_p_mu = jax.tree_util.tree_leaves(prior_mu)
-    leaves_p_ls = jax.tree_util.tree_leaves(prior_log_sigma)
+    leaves_mu_q  = jax.tree_util.tree_leaves(mu_q)
+    leaves_ls_q  = jax.tree_util.tree_leaves(log_sigma_q)
+    leaves_p_mu  = jax.tree_util.tree_leaves(prior_mu)
+    leaves_p_ls  = jax.tree_util.tree_leaves(prior_log_sigma)
 
     total_kl = jnp.array(0.0)
-    # Parameters come in pairs: (mu, log_sigma) interleaved by flax's param ordering
-    # We iterate over matching leaves assuming pytree structure is identical
-    # Each VIDense layer contributes: w_mu, w_log_sigma, b_mu, b_log_sigma
-    # We compute KL for mu-paired leaves (mu_q vs mu_p) and log_sigma-paired leaves
-    for q_leaf, p_mu_leaf, p_ls_leaf in zip(leaves_q, leaves_p_mu, leaves_p_ls):
-        # Each leaf is either a mu or log_sigma array — KL treats them as a
-        # Gaussian parameter pair at the array level.
-        # Since flax stores mu and log_sigma as separate named params,
-        # we compute KL only on mu leaves paired with their log_sigma leaves.
-        # compute_total_kl is called with the full params dict split into
-        # mu and log_sigma sub-dicts by extract_vi_params() below.
-        total_kl = total_kl + kl_gaussian(q_leaf, p_ls_leaf, p_mu_leaf, p_ls_leaf)
+    for mu_q_l, ls_q_l, p_mu_l, p_ls_l in zip(leaves_mu_q, leaves_ls_q, leaves_p_mu, leaves_p_ls):
+        total_kl = total_kl + kl_gaussian(mu_q_l, ls_q_l, p_mu_l, p_ls_l)
 
     return total_kl
 
