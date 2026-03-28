@@ -1,0 +1,13 @@
+# Stage 1 pretrain config — base defaults
+# Override region via: model=bnf_regional_seasonal/r01
+# Override input type via: model=bnf_regional_monthly/r01
+
+defaults:
+  - model: bnf_regional_seasonal
+  - _self_
+
+hydra:
+  run:
+    dir: outputs/pretrain/${model.reg_subdir}_${model.input_type}_${model.train_split}
+  job:
+    chdir: true

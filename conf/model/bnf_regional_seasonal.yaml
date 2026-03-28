@@ -1,0 +1,51 @@
+# Base config for seasonal input type
+# All regions share these architecture and training defaults.
+# Per-region fields (reg_subdir, paths) are set in bnf_regional_seasonal/r{nn}.yaml
+
+input_type: seasonal
+
+# --- Architecture (fixed across all regions) ---
+model_nlayers: 2
+model_nhidden: 64
+n_fourier: 8
+fourier_seed: 42
+
+# --- Training ---
+model_nepochs: 2000
+model_lr: 1.0e-3
+beta_anneal_epochs: 400       # 20% of model_nepochs — beta ramps 0→1 over this window
+
+# --- Inference ---
+model_nensemble: 100          # MC samples at prediction time
+
+# --- Data ---
+inp_dir: data_for_model/oggm
+train_split: full             # 'train' for CV run, 'full' for final pretrained model
+
+# --- Seasonal feature columns ---
+# Geometry and spatial features (common across input types)
+model_ftcols:
+  - CenLat
+  - CenLon
+  - Area
+  - Zmed
+  - Slope
+  - Aspect
+  - Zmin
+  - Zmax
+  # TODO: add seasonal climate feature column names (e.g. tas_djf, tas_jja, pr_ann, rsds_ann)
+  # These must match column names in the OGGM CSVs exactly.
+
+rm_fts: []                    # feature columns to drop at runtime (if any)
+
+# --- Per-region fields (must be overridden in r{nn}.yaml) ---
+reg_subdir: ???
+hugonnet_path: ???
+glambie_path: ???
+pretrained_params_path: ???
+finetuned_params_path: ???
+
+# --- GLaMBIE test split ---
+# Years withheld from finetuning and used to evaluate the finetuned model.
+# Must be a subset of years in glambie_path. Set per-region as needed.
+glambie_test_years: []

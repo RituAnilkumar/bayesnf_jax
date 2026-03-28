@@ -1,0 +1,19 @@
+# Full pipeline config — runs pretrain_full → finetune → predict by default
+# To include CV evaluation: pipeline.stages=[pretrain_cv,pretrain_full,finetune,predict]
+
+defaults:
+  - model: bnf_regional_seasonal
+  - _self_
+
+pipeline:
+  # Stages to run in order. Valid values: pretrain_cv, pretrain_full, finetune, predict
+  stages:
+    - pretrain_full
+    - finetune
+    - predict
+
+hydra:
+  run:
+    dir: outputs/pipeline/${model.reg_subdir}_${model.input_type}
+  job:
+    chdir: true

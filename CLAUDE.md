@@ -68,10 +68,12 @@ bayesnf_jax/
 │   │       ├── loygo.csv
 │   │       ├── for_preds.csv
 │   │       └── full.csv
-│   ├── hugonnet/
-│   │   └── r{nn}_hugonnet.csv  # cols: rgi_id, dmdtda, err_dmdtda
+│   ├── temporal_avg/
+│   │   └── temporal_avg_targets_r{nn}.csv  # cols: rgi_id, start_date, end_date, avg_mb_mwe, uncertainty_mwe
 │   └── glambie/
-│       └── r{nn}_glambie.csv   # cols: year, source, mass_balance_mean_mwe, err_mwe
+│       └── glambie_targets_r{nn}.csv       # wide format: region, start_date, end_date,
+│                                           #   combined_gt/errors, altimetry_gt/errors, gravimetry_gt/errors
+│                                           #   (suffix _gt is historical; values are MWE/yr)
 │
 └── outputs/
     ├── pretrain/
@@ -114,7 +116,7 @@ architectural components are needed.
 - Follows BayesNF convention: fixed (non-learned) random frequency matrix
 - Frequencies log-uniformly spaced between 1/159 and 1/2 cycles/yr
 - Default n_fourier=8 (BayesNF default)
-- Temporal index = year - 1941 (T_MIN=1941, T_MAX=2100, T_RANGE=159)
+- Temporal index = year - 1940 (T_MIN=1940, T_MAX=2100, T_RANGE=160)
 - This index must be consistent across training, historical inference,
   and future scenario prediction — never redefine it relative to training data
 
@@ -161,14 +163,13 @@ architectural components are needed.
 - KL: KL(finetuned posterior || pretrained posterior), analytic
 - Three likelihood terms, all in MWE/yr:
 
-  L_hugonnet = (1/N_glaciers) * sum_i [
-      (pred_20yr_i - dmdtda_i)² / err_dmdtda_i²
+  L_temporal_avg = (1/N_glaciers) * sum_i [
+      (pred_period_mean_i - avg_mb_mwe_i)² / uncertainty_mwe_i²
   ]
   where:
-  - pred_20yr_i = mean of per-year predictions for glacier i over 2000-2019
-    computed via segment_sum / count_sum
-  - dmdtda_i from Hugonnet in kg/m²/yr → divide by 1000 to get MWE/yr
-  - err_dmdtda_i similarly divided by 1000
+  - pred_period_mean_i = mean of per-year predictions for glacier i over
+    start_date–end_date (typically 2001-2020), via segment_sum / count_sum
+  - avg_mb_mwe_i, uncertainty_mwe_i are already in MWE/yr — no unit conversion
 
   L_glambie = (1/N_obs) * sum_k [
       (pred_ann_mean_t(k) - glambie_mean_t(k))² / err_glambie_mean_t(k)²
@@ -183,7 +184,7 @@ architectural components are needed.
   - N_obs = total number of (year, source) observations, NOT unique years
     (so years with both gravimetry and altimetry count as 2)
 
-  ELBO = L_hugonnet + L_glambie - beta * KL(finetuned || pretrained)
+  ELBO = L_temporal_avg + L_glambie - beta * KL(finetuned || pretrained)
 
 - No manual loss weighting beyond uncertainty weighting and unit normalisation
 - GLaMBIE may be absent for some regions (e.g. High Mountain Asia has no
@@ -210,7 +211,7 @@ Follow the same Hydra override pattern as jungle3:
   model.model_nepochs, model.model_nensemble (= N MC samples at inference)
   model.model_ftcols, model.rm_fts
   model.pretrained_params_path  (Stage 2 only)
-  model.hugonnet_path           (Stage 2 only)
+  model.temporal_avg_path       (Stage 2 only)
   model.glambie_path            (Stage 2 only)
   model.beta_anneal_epochs      (epochs over which beta is annealed 0→1)
 
@@ -219,22 +220,24 @@ Follow the same Hydra override pattern as jungle3:
 ## Data conventions
 
 - OGGM targets: mm/yr → divide by 1000 → MWE/yr before any loss computation
-- Hugonnet dmdtda: kg/m²/yr → divide by 1000 → MWE/yr
-- Hugonnet err_dmdtda: same scaling
-- GLaMBIE: regional Gt/yr sum → divide by N_glaciers → regional mean MWE/yr
-- GLaMBIE err: same scaling
+- Temporal avg avg_mb_mwe: already MWE/yr — no conversion
+- Temporal avg uncertainty_mwe: already MWE/yr — no conversion
+- GLaMBIE: values already MWE/yr (column suffix _gt is historical, ignore it)
+- GLaMBIE source selection: prefer altimetry + gravimetry; combined is fallback
+  only when both altimetry and gravimetry are NaN for a given row
 - Year column in OGGM data may be int (annual) or date string (seasonal) —
   handle both as in jungle3/src/model/bayesnf_oggm.py
-- Hugonnet period is always 2000-01-01_2020-01-01 (20yr mean, 2000-2019)
-- GLaMBIE source column values: 'gravimetry', 'altimetry'
+- Temporal avg period is 2001-2020 per glacier (start_date/end_date columns)
+- GLaMBIE source values (after load_glambie reshape): 'altimetry', 'gravimetry', 'combined'
+- GLaMBIE year derived from floor(end_date) — end_date is a fractional year
 
 ---
 
 ## Key invariants — always check these
 
-1. Hugonnet rgi_id ordering must match the segment_sum gid_codes ordering
+1. Temporal-avg rgi_id ordering must match the segment_sum gid_codes ordering
    (use pd.factorize on the training data, then assert alignment with
-   Hugonnet — same pattern as oggm_combined_loss.py)
+   temporal_avg — same pattern as oggm_combined_loss.py)
 2. GLaMBIE years must be a subset of the years present in the training data
 3. Temporal index (year - 1941) must be applied consistently in all data
    loading, training, and inference code — never use raw year integers as

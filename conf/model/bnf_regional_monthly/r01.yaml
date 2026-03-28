@@ -1,0 +1,10 @@
+# @package _global_
+# Region r01 overrides for monthly input type
+
+model:
+  reg_subdir: r01
+  hugonnet_path: data_for_model/hugonnet/r01_hugonnet.csv
+  glambie_path: data_for_model/glambie/r01_glambie.csv
+  pretrained_params_path: outputs/pretrain/r01_monthly_full/pretrained_params.pkl
+  finetuned_params_path: outputs/finetune/r01_monthly/finetuned_params.pkl
+  glambie_test_years: []

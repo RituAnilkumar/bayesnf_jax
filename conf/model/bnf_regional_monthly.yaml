@@ -1,0 +1,48 @@
+# Base config for monthly input type
+# All regions share these architecture and training defaults.
+# Per-region fields (reg_subdir, paths) are set in bnf_regional_monthly/r{nn}.yaml
+
+input_type: monthly
+
+# --- Architecture (fixed across all regions) ---
+model_nlayers: 2
+model_nhidden: 64
+n_fourier: 8
+fourier_seed: 42
+
+# --- Training ---
+model_nepochs: 2000
+model_lr: 1.0e-3
+beta_anneal_epochs: 400       # 20% of model_nepochs
+
+# --- Inference ---
+model_nensemble: 100
+
+# --- Data ---
+inp_dir: data_for_model/oggm
+train_split: full
+
+# --- Monthly feature columns ---
+model_ftcols:
+  - CenLat
+  - CenLon
+  - Area
+  - Zmed
+  - Slope
+  - Aspect
+  - Zmin
+  - Zmax
+  # TODO: add monthly climate feature column names (e.g. tas_jan ... tas_dec, pr_jan ... pr_dec)
+  # These must match column names in the OGGM CSVs exactly.
+
+rm_fts: []
+
+# --- Per-region fields (must be overridden in r{nn}.yaml) ---
+reg_subdir: ???
+hugonnet_path: ???
+glambie_path: ???
+pretrained_params_path: ???
+finetuned_params_path: ???
+
+# --- GLaMBIE test split ---
+glambie_test_years: []

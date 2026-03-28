@@ -1,0 +1,14 @@
+#!/bin/bash
+#SBATCH --job-name=finetune_r01_s
+#SBATCH --time=04:00:00
+#SBATCH --mem=32G
+#SBATCH --cpus-per-task=4
+#SBATCH --gres=gpu:1
+#SBATCH --output=slurm_calls/logs/%x_%j.out
+#SBATCH --error=slurm_calls/logs/%x_%j.err
+
+cd $SLURM_SUBMIT_DIR
+
+# Requires: outputs/pretrain/r01_seasonal_full/pretrained_params.pkl
+python main_finetune.py \
+    +model/bnf_regional_seasonal=r01

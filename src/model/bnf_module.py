@@ -8,9 +8,9 @@ Architecture:
     - One model instance per RGI region
 
 Temporal index convention:
-    time_index = year - T_MIN, where T_MIN = 1941
+    time_index = year - T_MIN, where T_MIN = 1940
     This ensures consistent indexing across training (2000-2019),
-    historical inference (1941-present), and future scenarios (to ~2100).
+    historical inference (1940-present), and future scenarios (to ~2100).
 
 Fourier encoding:
     Fixed random frequency matrix W drawn once at model initialisation
@@ -38,9 +38,9 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Global temporal index constants
 # ---------------------------------------------------------------------------
-T_MIN: int = 1941          # year index 0
-T_MAX: int = 2100          # year index 159 — covers future scenarios
-T_RANGE: int = T_MAX - T_MIN  # 159
+T_MIN: int = 1940          # year index 0
+T_MAX: int = 2100          # year index 160 — covers future scenarios
+T_RANGE: int = T_MAX - T_MIN  # 160
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +403,7 @@ if __name__ == '__main__':
     batch_size   = 10
     n_covariates = 8  # CenLon, CenLat, Slope, Area, Aspect, Zmed, Zmin, Zmax
 
-    time_index = jnp.array([59, 60, 61, 62, 63, 64, 65, 66, 67, 68])  # years 2000-2009
+    time_index = jnp.array([60, 61, 62, 63, 64, 65, 66, 67, 68, 69])  # years 2000-2009
     covariates = jax.random.normal(rng, shape=(batch_size, n_covariates))
 
     # Initialise parameters

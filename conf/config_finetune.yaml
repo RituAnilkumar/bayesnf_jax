@@ -1,0 +1,12 @@
+# Stage 2 finetune config — base defaults
+# Override region via: model=bnf_regional_seasonal/r01
+
+defaults:
+  - model: bnf_regional_seasonal
+  - _self_
+
+hydra:
+  run:
+    dir: outputs/finetune/${model.reg_subdir}_${model.input_type}
+  job:
+    chdir: true
