@@ -174,7 +174,7 @@ def run_predict(cfg: DictConfig) -> None:
     writes preds_full.csv and preds_quantiles.csv to cfg.model.output_dir.
     """
     os.makedirs(cfg.model.output_dir, exist_ok=True)
-    rng = jax.random.PRNGKey(cfg.model.get("seed", 0))
+    rng = jax.random.PRNGKey(cfg.model.seed)
 
     # --- Feature columns ---
     ft_cols = list(cfg.model.model_ftcols) if cfg.model.model_ftcols else FEATURE_COLS

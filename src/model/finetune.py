@@ -382,7 +382,7 @@ def run_finetune(cfg: DictConfig) -> None:
     evaluates on held-out GLaMBIE test years, saves outputs.
     """
     os.makedirs(cfg.model.output_dir, exist_ok=True)
-    rng = jax.random.PRNGKey(cfg.model.get("seed", 0))
+    rng = jax.random.PRNGKey(cfg.model.seed)
 
     ft_cols = list(cfg.model.model_ftcols) if cfg.model.model_ftcols else FEATURE_COLS
     rm_fts  = list(cfg.model.rm_fts) if cfg.model.get("rm_fts") else []
@@ -431,7 +431,7 @@ def run_finetune(cfg: DictConfig) -> None:
     params = {"params": _merge(prior_mu, prior_log_sigma)}
 
     # --- Optimizer ---
-    optimizer = optax.adam(cfg.model.get("lr", 1e-3))
+    optimizer = optax.adam(cfg.model.lr)
     opt_state = optimizer.init(params)
 
     # --- Beta schedule + train step ---

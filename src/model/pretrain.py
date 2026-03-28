@@ -180,7 +180,7 @@ def run_pretrain(cfg: DictConfig) -> None:
     Saves outputs to cfg.model.output_dir.
     """
     os.makedirs(cfg.model.output_dir, exist_ok=True)
-    rng = jax.random.PRNGKey(cfg.model.get("seed", 0))
+    rng = jax.random.PRNGKey(cfg.model.seed)
 
     # --- Feature columns ---
     ft_cols = _get_ft_cols(cfg)
@@ -204,7 +204,7 @@ def run_pretrain(cfg: DictConfig) -> None:
     )
 
     # --- Optimizer ---
-    optimizer  = optax.adam(cfg.model.get("lr", 1e-3))
+    optimizer  = optax.adam(cfg.model.lr)
     opt_state  = optimizer.init(params)
 
     # --- Beta schedule ---
