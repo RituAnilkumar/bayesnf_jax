@@ -224,7 +224,8 @@ Follow the same Hydra override pattern as jungle3:
 - Temporal avg uncertainty_mwe: already MWE/yr — no conversion
 - GLaMBIE: values already MWE/yr (column suffix _gt is historical, ignore it)
 - GLaMBIE source selection: prefer altimetry + gravimetry; combined is fallback
-  only when both altimetry and gravimetry are NaN for a given row
+  only when the entire file has zero valid altimetry and zero valid gravimetry rows
+  (one valid primary observation anywhere disables combined for the whole file)
 - Year column in OGGM data may be int (annual) or date string (seasonal) —
   handle both as in jungle3/src/model/bayesnf_oggm.py
 - Temporal avg period is 2001-2020 per glacier (start_date/end_date columns)

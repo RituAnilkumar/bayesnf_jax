@@ -102,9 +102,11 @@ def load_glambie(path: str) -> pd.DataFrame:
     """
     Load GLaMBIE regional targets, reshaping from wide to long format.
 
-    Source selection per row:
+    Source selection:
       - Use altimetry and/or gravimetry wherever the value + error are both non-NaN.
-      - Fall back to combined ONLY if both altimetry and gravimetry are NaN for that row.
+      - Fall back to combined for ALL rows only if the entire file contains zero
+        valid altimetry and zero valid gravimetry datapoints. A single valid primary
+        observation anywhere in the file disables the combined fallback entirely.
       - Rows with no valid source are dropped.
 
     Year is derived from end_date by flooring the fractional year to an integer.
@@ -120,38 +122,38 @@ def load_glambie(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
     df["year"] = np.floor(df["end_date"]).astype(int)
 
+    # Decide once whether any primary source data exists across the whole file.
+    # Combined is only used as a last resort when the entire file has zero
+    # altimetry and zero gravimetry datapoints.
+    any_primary = (
+        (df["altimetry_gt"].notna() & df["altimetry_gt_errors"].notna()).any()
+        or
+        (df["gravimetry_gt"].notna() & df["gravimetry_gt_errors"].notna()).any()
+    )
+
     records = []
     for _, row in df.iterrows():
-        alt_val  = row.get("altimetry_gt")
-        alt_err  = row.get("altimetry_gt_errors")
-        grav_val = row.get("gravimetry_gt")
-        grav_err = row.get("gravimetry_gt_errors")
-        comb_val = row.get("combined_gt")
-        comb_err = row.get("combined_gt_errors")
+        alt_ok  = pd.notna(row.get("altimetry_gt"))  and pd.notna(row.get("altimetry_gt_errors"))
+        grav_ok = pd.notna(row.get("gravimetry_gt")) and pd.notna(row.get("gravimetry_gt_errors"))
 
-        alt_ok  = pd.notna(alt_val)  and pd.notna(alt_err)
-        grav_ok = pd.notna(grav_val) and pd.notna(grav_err)
-
-        if alt_ok or grav_ok:
-            if alt_ok:
-                records.append({
-                    "region": row["region"], "year": row["year"],
-                    "source": "altimetry",
-                    "value_mwe": alt_val, "error_mwe": alt_err,
-                })
-            if grav_ok:
-                records.append({
-                    "region": row["region"], "year": row["year"],
-                    "source": "gravimetry",
-                    "value_mwe": grav_val, "error_mwe": grav_err,
-                })
-        elif pd.notna(comb_val) and pd.notna(comb_err):
+        if alt_ok:
+            records.append({
+                "region": row["region"], "year": row["year"],
+                "source": "altimetry",
+                "value_mwe": row["altimetry_gt"], "error_mwe": row["altimetry_gt_errors"],
+            })
+        if grav_ok:
+            records.append({
+                "region": row["region"], "year": row["year"],
+                "source": "gravimetry",
+                "value_mwe": row["gravimetry_gt"], "error_mwe": row["gravimetry_gt_errors"],
+            })
+        if not any_primary and pd.notna(row.get("combined_gt")) and pd.notna(row.get("combined_gt_errors")):
             records.append({
                 "region": row["region"], "year": row["year"],
                 "source": "combined",
-                "value_mwe": comb_val, "error_mwe": comb_err,
+                "value_mwe": row["combined_gt"], "error_mwe": row["combined_gt_errors"],
             })
-        # else: no valid source for this row — skip
 
     return pd.DataFrame(
         records,
