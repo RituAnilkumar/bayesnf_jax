@@ -6,6 +6,19 @@ Responsibilities:
 - Load temporal-average targets (already MWE/yr, per-glacier 2001-2020 means)
 - Load and reshape GLaMBIE targets (wide → long, source selection logic)
 - Build model-ready feature arrays (drop GLIMSId, compute time index)
+- Generate CV splits (loyo, logo, loygo, train, full) from the full dataset
+
+CV split definitions:
+  held_years    — 10% of years, chosen globally (same across all regions)
+  held_glaciers — 10% of glaciers, chosen per region
+  loygo         — rows where year in held_years AND glacier in held_glaciers
+  loyo          — rows where year in held_years AND glacier NOT in held_glaciers
+  logo          — rows where year NOT in held_years AND glacier in held_glaciers
+  train         — rows where year NOT in held_years AND glacier NOT in held_glaciers
+  full          — all rows
+
+Pass held_years from select_held_years() to make_cv_splits() for all regions to
+ensure the same years are held out everywhere.
 
 All temporal indices are computed as  year - T_MIN  (consistent with bnf_module).
 """
@@ -144,6 +157,105 @@ def load_glambie(path: str) -> pd.DataFrame:
         records,
         columns=["region", "year", "source", "value_mwe", "error_mwe"],
     )
+
+
+# ---------------------------------------------------------------------------
+# CV split generation
+# ---------------------------------------------------------------------------
+
+def select_held_years(
+    all_years: list[int],
+    frac: float = 0.1,
+    seed: int = 42,
+) -> list[int]:
+    """
+    Select a globally consistent set of held-out years for loyo evaluation.
+
+    Call this once with the union of years across all regions, then pass the
+    result to make_cv_splits() for every region so the same years are held out
+    everywhere.
+
+    Args:
+        all_years: Sorted list of all integer years present in the dataset.
+        frac:      Fraction of years to hold out (default 0.1 = 10%).
+        seed:      RNG seed — fix this across the project for reproducibility.
+
+    Returns:
+        Sorted list of held-out year integers.
+    """
+    rng = np.random.default_rng(seed)
+    years = np.array(sorted(set(all_years)))
+    n_held = max(1, int(round(len(years) * frac)))
+    held = rng.choice(years, size=n_held, replace=False)
+    return sorted(held.tolist())
+
+
+def make_cv_splits(
+    merged_df: pd.DataFrame,
+    held_years: list[int],
+    held_glacier_frac: float = 0.1,
+    seed: int = 42,
+) -> dict[str, pd.DataFrame]:
+    """
+    Generate CV splits from a merged (features + OGGM targets) DataFrame.
+
+    Args:
+        merged_df:          DataFrame with at least columns: rgi_id, year.
+                            Typically the result of merging load_features() and
+                            load_oggm() on (rgi_id, year).
+        held_years:         Output of select_held_years() — same list for all regions.
+        held_glacier_frac:  Fraction of glaciers to hold out for logo (default 0.1).
+        seed:               RNG seed for glacier selection.
+
+    Returns:
+        Dict with keys 'train', 'loyo', 'logo', 'loygo', 'full'.
+        Each value is a subset of merged_df (same columns, reset index).
+
+    Split definitions:
+        loygo = held_years ∩ held_glaciers  (both held out)
+        loyo  = held_years only             (year held, glacier not)
+        logo  = held_glaciers only          (glacier held, year not)
+        train = neither held
+        full  = all rows (no filtering)
+    """
+    rng = np.random.default_rng(seed)
+    all_glaciers = np.array(sorted(merged_df["rgi_id"].unique()))
+    n_held_g = max(1, int(round(len(all_glaciers) * held_glacier_frac)))
+    held_glaciers = set(rng.choice(all_glaciers, size=n_held_g, replace=False).tolist())
+    held_years_set = set(held_years)
+
+    year_held    = merged_df["year"].isin(held_years_set)
+    glacier_held = merged_df["rgi_id"].isin(held_glaciers)
+
+    return {
+        "full":  merged_df.reset_index(drop=True),
+        "train": merged_df[ ~year_held & ~glacier_held].reset_index(drop=True),
+        "loygo": merged_df[  year_held &  glacier_held].reset_index(drop=True),
+        "loyo":  merged_df[  year_held & ~glacier_held].reset_index(drop=True),
+        "logo":  merged_df[ ~year_held &  glacier_held].reset_index(drop=True),
+    }
+
+
+def merge_features_targets(
+    features_df: pd.DataFrame,
+    targets_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Inner-join features and OGGM targets on (rgi_id, year).
+
+    Args:
+        features_df: Output of load_features()
+        targets_df:  Output of load_oggm()
+
+    Returns:
+        Merged DataFrame with all feature columns plus mass_balance_mwe.
+        time_index is taken from features_df (both should agree).
+    """
+    return features_df.merge(
+        targets_df[["rgi_id", "year", "mass_balance_mwe"]],
+        on=["rgi_id", "year"],
+        how="inner",
+    ).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
