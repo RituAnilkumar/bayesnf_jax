@@ -15,10 +15,8 @@ import jax.numpy as jnp
 # ---------------------------------------------------------------------------
 # Unit conversion constants
 # ---------------------------------------------------------------------------
-MM_TO_MWE: float = 1e-3      # OGGM outputs mm/yr  → MWE/yr
-KGM2_TO_MWE: float = 1e-3    # Hugonnet kg/m²/yr   → MWE/yr
-# GLaMBIE: Gt/yr regional sum → MWE/yr regional mean handled in data loading
-# by dividing by N_glaciers (done once before training, not a constant here)
+MM_TO_MWE: float = 1e-3      # OGGM outputs mm/yr → MWE/yr
+# All other inputs (temporal_avg, GLaMBIE) are already in MWE/yr after data_utils loading
 
 
 # ---------------------------------------------------------------------------
@@ -37,15 +35,16 @@ def segment_mean(
     Stays inside JIT — no Python control flow over dynamic shapes.
 
     Args:
-        values:      1-D array of shape (N,)
-        segment_ids: 1-D integer array of shape (N,), values in [0, num_segments)
+        values:       1-D array of shape (N,)
+        segment_ids:  1-D integer array of shape (N,), values in [0, num_segments)
         num_segments: total number of segments (static)
 
     Returns:
         Array of shape (num_segments,) with per-segment means.
     """
-    # TODO: implement using jax.ops.segment_sum
-    raise NotImplementedError
+    sums   = jax.ops.segment_sum(values,      segment_ids, num_segments)
+    counts = jax.ops.segment_sum(jnp.ones_like(values), segment_ids, num_segments)
+    return sums / counts
 
 
 def glacier_annual_mean(
@@ -56,8 +55,8 @@ def glacier_annual_mean(
     """
     Average per-glacier predictions across all time steps present.
 
-    Used for the Hugonnet 20-year mean: given predictions for all
-    (glacier × year) rows in the 2000-2019 window, return the per-glacier
+    Used for the temporal-avg loss: given predictions for all
+    (glacier × year) rows in the period window, return the per-glacier
     temporal mean.
 
     Args:
@@ -68,8 +67,7 @@ def glacier_annual_mean(
     Returns:
         Per-glacier mean predictions, shape (n_glaciers,)  [MWE/yr]
     """
-    # TODO: segment_mean over glacier_ids
-    raise NotImplementedError
+    return segment_mean(preds, glacier_ids, n_glaciers)
 
 
 def regional_annual_mean(
@@ -91,5 +89,4 @@ def regional_annual_mean(
     Returns:
         Per-year regional mean predictions, shape (n_years,)  [MWE/yr]
     """
-    # TODO: segment_mean over year_ids
-    raise NotImplementedError
+    return segment_mean(preds, year_ids, n_years)

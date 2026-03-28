@@ -33,8 +33,7 @@ def oggm_loss(
     Returns:
         Scalar MSE loss.
     """
-    # TODO: implement
-    raise NotImplementedError
+    return jnp.mean((preds - targets) ** 2)
 
 
 # ---------------------------------------------------------------------------
@@ -71,8 +70,8 @@ def temporal_avg_loss(
     Returns:
         Scalar inverse-variance weighted MSE.
     """
-    # TODO: implement using glacier_annual_mean from aggregation.py
-    raise NotImplementedError
+    pred_means = glacier_annual_mean(preds, glacier_ids, n_glaciers)  # (n_glaciers,)
+    return jnp.mean(((pred_means - avg_mb) / uncertainty) ** 2)
 
 
 # ---------------------------------------------------------------------------
@@ -80,36 +79,38 @@ def temporal_avg_loss(
 # ---------------------------------------------------------------------------
 
 def glambie_loss(
-    preds: jax.Array,           # shape (N,)  predictions for GLaMBIE year rows [MWE/yr]
-    year_ids: jax.Array,        # shape (N,)  integer year codes (per GLaMBIE obs)
-    n_years_per_source: list,   # [n_years_gravimetry, n_years_altimetry] (static)
-    glambie_means: jax.Array,   # shape (N_obs,)  GLaMBIE regional mean targets [MWE/yr]
-    glambie_errs: jax.Array,    # shape (N_obs,)  GLaMBIE uncertainties [MWE/yr]
+    preds: jax.Array,         # shape (N,)    predictions for GLaMBIE year rows [MWE/yr]
+    year_ids: jax.Array,      # shape (N,)    integer year codes in [0, n_years)
+    n_years: int,              # number of distinct years covered (static)
+    obs_year_idx: jax.Array,  # shape (N_obs,) index into [0, n_years) per observation
+    glambie_means: jax.Array, # shape (N_obs,) GLaMBIE regional mean targets [MWE/yr]
+    glambie_errs: jax.Array,  # shape (N_obs,) GLaMBIE uncertainties [MWE/yr]
 ) -> jax.Array:
     """
     Inverse-variance weighted MSE between predicted regional annual means
     and GLaMBIE observations.
 
-    Gravimetry and altimetry are treated as independent residuals.
-    N_obs = total (year, source) pairs — years with both sources count as 2.
+    Gravimetry and altimetry are treated as independent residuals — each is
+    a separate row in obs_year_idx / glambie_means / glambie_errs.
+    N_obs = total (year, source) pairs; years with both sources count as 2.
 
     L_glambie = (1/N_obs) * sum_k [
-        (pred_ann_mean_t(k) - glambie_mean_t(k))^2 / err_glambie_t(k)^2
+        (pred_regional_mean_t(k) - glambie_mean_t(k))^2 / glambie_err_t(k)^2
     ]
 
-    GLaMBIE inputs must be pre-converted from regional Gt/yr sum to
-    regional mean MWE/yr (÷ N_glaciers in region). Missing source for a
-    region returns 0.0 gracefully.
-
     Args:
-        preds:              Predictions for rows matching GLaMBIE years, shape (N,)
-        year_ids:           Integer year codes (aligned per source), shape (N,)
-        n_years_per_source: Static list of year counts per source
-        glambie_means:      GLaMBIE targets, shape (N_obs,)   [MWE/yr]
-        glambie_errs:       GLaMBIE uncertainties, shape (N_obs,)  [MWE/yr]
+        preds:         Predictions for rows whose year appears in GLaMBIE, shape (N,)
+        year_ids:      Integer year codes for each prediction row, shape (N,)
+                       maps each row to a year index in [0, n_years)
+        n_years:       Number of distinct years (static)
+        obs_year_idx:  Year index for each GLaMBIE observation, shape (N_obs,)
+                       aligns glambie_means[k] with pred_regional_means[obs_year_idx[k]]
+        glambie_means: GLaMBIE targets, shape (N_obs,)        [MWE/yr]
+        glambie_errs:  GLaMBIE uncertainties, shape (N_obs,)  [MWE/yr]
 
     Returns:
-        Scalar inverse-variance weighted MSE, or 0.0 if no GLaMBIE data.
+        Scalar inverse-variance weighted MSE, or 0.0 if N_obs == 0.
     """
-    # TODO: implement; handle missing sources gracefully
-    raise NotImplementedError
+    pred_regional_means = regional_annual_mean(preds, year_ids, n_years)  # (n_years,)
+    pred_at_obs = pred_regional_means[obs_year_idx]                        # (N_obs,)
+    return jnp.mean(((pred_at_obs - glambie_means) / glambie_errs) ** 2)
