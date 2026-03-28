@@ -6,7 +6,7 @@ input_type: seasonal
 
 # --- Architecture (fixed across all regions) ---
 model_nlayers: 2
-model_nhidden: 64
+model_nhidden: 64   # width of each hidden layer
 n_fourier: 8
 fourier_seed: 42
 
@@ -54,7 +54,6 @@ glambie_path: ???
 pretrained_params_path: ???
 finetuned_params_path: ???
 
-# --- GLaMBIE test split ---
-# Years withheld from finetuning and used to evaluate the finetuned model.
-# Must be a subset of years in glambie_path. Set per-region as needed.
-glambie_test_years: []
+# --- GLaMBIE validation ---
+# Test years are automatically derived as GLaMBIE years > temporal_avg end year.
+# No manual configuration needed.

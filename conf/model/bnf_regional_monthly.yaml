@@ -55,5 +55,6 @@ glambie_path: ???
 pretrained_params_path: ???
 finetuned_params_path: ???
 
-# --- GLaMBIE test split ---
-glambie_test_years: []
+# --- GLaMBIE validation ---
+# Test years are automatically derived as GLaMBIE years > temporal_avg end year.
+# No manual configuration needed.
