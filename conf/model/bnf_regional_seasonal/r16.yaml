@@ -1,9 +1,9 @@
-# @package _global_
-# Region r16 overrides for seasonal input type
+defaults:
+  - bnf_regional_seasonal
 
-model:
-  reg_subdir: r16
-  temporal_avg_path: data_for_model/r16/temporal_avg_targets_r16.csv
-  glambie_path: data_for_model/r16/glambie_targets_r16.csv
-  pretrained_params_path: outputs/pretrain/r16_seasonal_full/pretrained_params.pkl
-  finetuned_params_path: outputs/finetune/r16_seasonal/finetuned_params.pkl
+# Region r16 overrides for seasonal input type
+reg_subdir: r16
+temporal_avg_path: data_for_model/r16/temporal_avg_targets_r16.csv
+glambie_path: data_for_model/r16/glambie_targets_r16.csv
+pretrained_params_path: outputs/pretrain/r16_seasonal_full/pretrained_params.pkl
+finetuned_params_path: outputs/finetune/r16_seasonal/finetuned_params.pkl
