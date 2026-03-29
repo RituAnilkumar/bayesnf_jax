@@ -5,10 +5,6 @@ defaults:
   - model: bnf_regional_seasonal
   - _self_
 
-model:
-  output_dir: .    # resolved to hydra.run.dir by chdir:true
-  train_split: full
-
 hydra:
   run:
     dir: outputs/finetune/${model.reg_subdir}_${model.input_type}

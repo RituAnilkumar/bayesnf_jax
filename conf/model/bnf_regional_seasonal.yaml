@@ -45,7 +45,7 @@ model_ftcols:
 rm_fts: []                    # feature columns to drop at runtime (if any)
 
 # --- Output directory (written by Hydra, referenced in code) ---
-output_dir: ???               # set by hydra.run.dir via chdir:true — overridden per config
+output_dir: .                 # set by hydra.run.dir via chdir:true
 
 # --- Per-region fields (must be overridden in r{nn}.yaml) ---
 reg_subdir: ???
