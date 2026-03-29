@@ -25,6 +25,7 @@ import cloudpickle
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from hydra.utils import get_original_cwd
 from omegaconf import DictConfig
 
 from src.model.bnf_module import (
@@ -64,7 +65,7 @@ def load_oggm_split(cfg: DictConfig, split: str) -> tuple[pd.DataFrame, list[int
         (needed so evaluate_split can use the same held_years).
     """
     region = cfg.model.reg_subdir
-    base   = os.path.join(cfg.model.inp_dir, region)
+    base   = os.path.join(get_original_cwd(), cfg.model.inp_dir, region)
 
     features_df = load_features(os.path.join(base, f"main_features_{region}.csv"))
     targets_df  = load_oggm(os.path.join(base, f"oggm_targets_{region}.csv"))
@@ -251,7 +252,7 @@ def run_pretrain(cfg: DictConfig) -> None:
     if train_split != "full":
         # Re-load all splits using same held_years
         region = cfg.model.reg_subdir
-        base   = os.path.join(cfg.model.inp_dir, region)
+        base   = os.path.join(get_original_cwd(), cfg.model.inp_dir, region)
         features_df = load_features(os.path.join(base, f"main_features_{region}.csv"))
         targets_df  = load_oggm(os.path.join(base, f"oggm_targets_{region}.csv"))
         merged_df   = merge_features_targets(features_df, targets_df)

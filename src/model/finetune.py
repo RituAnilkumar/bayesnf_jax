@@ -27,6 +27,7 @@ import cloudpickle
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from hydra.utils import get_original_cwd
 from omegaconf import DictConfig
 
 from src.model.bnf_module import (
@@ -74,7 +75,7 @@ def load_pretrained_prior(pretrained_params_path: str) -> tuple[dict, dict]:
 def load_oggm_full(cfg: DictConfig) -> pd.DataFrame:
     """Load the full (all rows) merged OGGM dataset for the configured region."""
     region = cfg.model.reg_subdir
-    base   = os.path.join(cfg.model.inp_dir, region)
+    base   = os.path.join(get_original_cwd(), cfg.model.inp_dir, region)
 
     features_df = load_features(os.path.join(base, f"main_features_{region}.csv"))
     targets_df  = load_oggm(os.path.join(base, f"oggm_targets_{region}.csv"))
@@ -400,6 +401,15 @@ def run_finetune(cfg: DictConfig) -> None:
     ft_cols = list(cfg.model.model_ftcols) if cfg.model.model_ftcols else FEATURE_COLS
     rm_fts  = list(cfg.model.rm_fts) if cfg.model.get("rm_fts") else []
     ft_cols = [c for c in ft_cols if c not in rm_fts]
+
+    # --- Resolve relative paths against original cwd (Hydra chdir moves us to output dir) ---
+    orig = get_original_cwd()
+    from omegaconf import OmegaConf
+    cfg_mutable = OmegaConf.to_container(cfg, resolve=True)
+    for key in ("pretrained_params_path", "temporal_avg_path", "glambie_path"):
+        if key in cfg_mutable["model"] and cfg_mutable["model"][key]:
+            cfg_mutable["model"][key] = os.path.join(orig, cfg_mutable["model"][key])
+    cfg = OmegaConf.create(cfg_mutable)
 
     # --- Load prior ---
     prior_mu, prior_log_sigma = load_pretrained_prior(cfg.model.pretrained_params_path)
