@@ -176,7 +176,10 @@ def evaluate_split(
     residuals = pred_mean - targets
     rmse = float(jnp.sqrt(jnp.mean(residuals ** 2)))
     bias = float(jnp.mean(residuals))
-    return {"rmse": rmse, "bias": bias, "n_points": len(targets)}
+    ss_res = float(jnp.sum(residuals ** 2))
+    ss_tot = float(jnp.sum((targets - jnp.mean(targets)) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    return {"rmse": rmse, "bias": bias, "r2": r2, "n_points": len(targets)}
 
 
 # ---------------------------------------------------------------------------
@@ -291,8 +294,8 @@ def run_pretrain(cfg: DictConfig) -> None:
             metrics["split"]  = split_name
             rows.append(metrics)
             tag = " ← PRIMARY" if split_name == "loyo" else ""
-            print(f"  {split_name}: rmse={metrics['rmse']:.4f}  bias={metrics['bias']:.4f}  n={metrics['n_points']}{tag}")
+            print(f"  {split_name}: rmse={metrics['rmse']:.4f}  bias={metrics['bias']:.4f}  r2={metrics['r2']:.4f}  n={metrics['n_points']}{tag}")
 
-        pd.DataFrame(rows)[["region", "split", "rmse", "bias", "n_points"]].to_csv(
+        pd.DataFrame(rows)[["region", "split", "rmse", "bias", "r2", "n_points"]].to_csv(
             os.path.join(cfg.model.output_dir, "metrics_oos.csv"), index=False
         )

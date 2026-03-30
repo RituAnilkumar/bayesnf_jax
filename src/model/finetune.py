@@ -519,4 +519,7 @@ def run_finetune(cfg: DictConfig) -> None:
         metrics_df.to_csv(metrics_path, index=False)
         rmse = float(np.sqrt((metrics_df["residual"] ** 2).mean()))
         bias = float(metrics_df["residual"].mean())
-        print(f"GLaMBIE test: rmse={rmse:.4f}  bias={bias:.4f}  n={len(metrics_df)}")
+        ss_res = (metrics_df["residual"] ** 2).sum()
+        ss_tot = ((metrics_df["glambie_mwe"] - metrics_df["glambie_mwe"].mean()) ** 2).sum()
+        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+        print(f"GLaMBIE test: rmse={rmse:.4f}  bias={bias:.4f}  r2={r2:.4f}  n={len(metrics_df)}")
