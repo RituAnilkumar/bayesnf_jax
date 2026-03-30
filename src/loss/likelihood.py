@@ -20,20 +20,30 @@ from .aggregation import glacier_annual_mean, regional_annual_mean
 def oggm_loss(
     preds: jax.Array,   # shape (N,)  model predictions [MWE/yr]
     targets: jax.Array, # shape (N,)  OGGM targets [MWE/yr], pre-divided by 1000
+    delta: float = 0.5, # Huber transition point [MWE/yr] — MSE below, MAE above
 ) -> jax.Array:
     """
-    MSE loss over all (glacier × year) point predictions.
+    Huber loss over all (glacier × year) point predictions.
 
-    L_oggm = (1 / N) * sum_ij (pred_ij - oggm_ij)^2
+    Behaves as MSE for |residual| < delta and MAE (with a constant offset) for
+    larger residuals, limiting the influence of divergent OGGM outliers while
+    preserving well-conditioned gradients near zero.
+
+    delta=0.5 MWE/yr is a reasonable default: typical inter-annual variability
+    is ~0.1-0.3 MWE/yr, so residuals above 0.5 are genuine outliers.
 
     Args:
         preds:   Model predictions, shape (N,)   [MWE/yr]
         targets: OGGM mass balance targets, shape (N,)  [MWE/yr]
+        delta:   Huber transition point in MWE/yr.
 
     Returns:
-        Scalar MSE loss.
+        Scalar Huber loss.
     """
-    return jnp.mean((preds - targets) ** 2)
+    r = preds - targets
+    return jnp.mean(jnp.where(jnp.abs(r) <= delta,
+                               0.5 * r ** 2,
+                               delta * (jnp.abs(r) - 0.5 * delta)))
 
 
 # ---------------------------------------------------------------------------
