@@ -44,6 +44,8 @@ from src.data_utils import (
     select_held_years,
     make_cv_splits,
     build_model_inputs,
+    fit_scaler,
+    apply_scaler,
     FEATURE_COLS,
 )
 
@@ -85,9 +87,15 @@ def _get_ft_cols(cfg: DictConfig) -> list[str]:
     return [c for c in ft_cols if c not in rm_fts]
 
 
-def prepare_arrays(df: pd.DataFrame, ft_cols: list[str]) -> dict:
+def prepare_arrays(df: pd.DataFrame, ft_cols: list[str], scaler=None) -> dict:
     """
     Convert a loaded OGGM DataFrame into JAX arrays ready for training.
+
+    Args:
+        df:      Merged OGGM DataFrame.
+        ft_cols: Feature column names.
+        scaler:  Fitted StandardScaler to apply to covariates, or None for raw values.
+                 Must be the scaler fitted on the training split only.
 
     Returns dict with keys:
         time_index: jnp.array, shape (N,)
@@ -95,6 +103,8 @@ def prepare_arrays(df: pd.DataFrame, ft_cols: list[str]) -> dict:
         targets:    jnp.array, shape (N,)  [MWE/yr]
     """
     time_index, covariates, _, _ = build_model_inputs(df, ft_cols)
+    if scaler is not None:
+        covariates = apply_scaler(covariates, scaler)
     targets = df["mass_balance_mwe"].to_numpy(dtype=np.float32)
     return {
         "time_index": jnp.array(time_index),
@@ -189,7 +199,18 @@ def run_pretrain(cfg: DictConfig) -> None:
     # --- Data loading ---
     train_split = cfg.model.train_split  # 'train' or 'full'
     train_df, held_years = load_oggm_split(cfg, train_split)
-    train_arrays = prepare_arrays(train_df, ft_cols)
+
+    # Fit scaler on training covariates only (no leakage from eval splits)
+    _, raw_covariates, _, _ = build_model_inputs(train_df, ft_cols)
+    scaler = fit_scaler(raw_covariates)
+
+    # Save scaler alongside pretrained_params so finetune/predict apply identical scaling
+    scaler_path = os.path.join(cfg.model.output_dir, "scaler.pkl")
+    with open(scaler_path, "wb") as f:
+        cloudpickle.dump(scaler, f)
+    print(f"Saved feature scaler → {scaler_path}")
+
+    train_arrays = prepare_arrays(train_df, ft_cols, scaler=scaler)
 
     # --- Model init ---
     model = BayesianNeuralField(
@@ -263,7 +284,7 @@ def run_pretrain(cfg: DictConfig) -> None:
             split_df = all_splits[split_name]
             if len(split_df) == 0:
                 continue
-            arrays = prepare_arrays(split_df, ft_cols)
+            arrays = prepare_arrays(split_df, ft_cols, scaler=scaler)
             rng, rng_eval = jax.random.split(rng)
             metrics = evaluate_split(model, params, arrays, rng_eval, n_samples=cfg.model.model_nensemble)
             metrics["region"] = region

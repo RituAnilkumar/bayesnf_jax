@@ -48,6 +48,7 @@ from src.data_utils import (
     load_temporal_avg as _load_temporal_avg,
     load_glambie as _load_glambie_raw,
     build_model_inputs,
+    apply_scaler,
     FEATURE_COLS,
 )
 
@@ -175,6 +176,7 @@ def prepare_finetune_arrays(
     temporal_avg_df: pd.DataFrame,
     glambie_train_df: pd.DataFrame | None,
     ft_cols: list[str],
+    scaler=None,
 ) -> dict:
     """
     Build all JAX arrays needed for the finetuning train_step.
@@ -194,6 +196,8 @@ def prepare_finetune_arrays(
     """
     # Full OGGM grid arrays
     time_index, covariates, rgi_ids_all, _ = build_model_inputs(oggm_df, ft_cols)
+    if scaler is not None:
+        covariates = apply_scaler(covariates, scaler)
 
     # Factorize glacier IDs — codes[i] gives glacier index for row i
     glacier_codes, unique_glaciers = pd.factorize(oggm_df["rgi_id"], sort=True)
@@ -335,6 +339,7 @@ def evaluate_glambie_test(
     ft_cols: list[str],
     rng: jax.Array,
     n_samples: int = 100,
+    scaler=None,
 ) -> pd.DataFrame:
     """
     Evaluate finetuned model against held-out GLaMBIE test years.
@@ -350,6 +355,8 @@ def evaluate_glambie_test(
     test_df   = oggm_df[test_mask].reset_index(drop=True)
 
     time_idx, covariates, _, _ = build_model_inputs(test_df, ft_cols)
+    if scaler is not None:
+        covariates = apply_scaler(covariates, scaler)
     year_ids = test_df["year"].map(year_to_idx).to_numpy(dtype=np.int32)
 
     # MC predictions → (n_samples, N)
@@ -411,8 +418,21 @@ def run_finetune(cfg: DictConfig) -> None:
             cfg_mutable["model"][key] = os.path.join(orig, cfg_mutable["model"][key])
     cfg = OmegaConf.create(cfg_mutable)
 
-    # --- Load prior ---
+    # --- Load prior and scaler ---
     prior_mu, prior_log_sigma = load_pretrained_prior(cfg.model.pretrained_params_path)
+
+    scaler_path = os.path.join(os.path.dirname(cfg.model.pretrained_params_path), "scaler.pkl")
+    if os.path.exists(scaler_path):
+        with open(scaler_path, "rb") as f:
+            scaler = cloudpickle.load(f)
+        print(f"Loaded feature scaler from {scaler_path}")
+        # Also write scaler to finetune output dir so predict can find it automatically
+        finetune_scaler_path = os.path.join(cfg.model.output_dir, "scaler.pkl")
+        with open(finetune_scaler_path, "wb") as f:
+            cloudpickle.dump(scaler, f)
+    else:
+        scaler = None
+        print(f"WARNING: scaler.pkl not found at {scaler_path} — covariates will be unscaled")
 
     # --- Load data ---
     oggm_df     = load_oggm_full(cfg)
@@ -427,7 +447,7 @@ def run_finetune(cfg: DictConfig) -> None:
 
     # --- Prepare static arrays (factorize outside JIT) ---
     static_arrays = prepare_finetune_arrays(
-        oggm_df, temporal_avg_df, glambie_train_df, ft_cols
+        oggm_df, temporal_avg_df, glambie_train_df, ft_cols, scaler=scaler
     )
 
     # --- Model init (warm-start from pretrained posterior mean) ---
@@ -493,7 +513,7 @@ def run_finetune(cfg: DictConfig) -> None:
         rng, rng_eval = jax.random.split(rng)
         metrics_df = evaluate_glambie_test(
             model, params, oggm_df, glambie_test_df, ft_cols,
-            rng_eval, n_samples=cfg.model.model_nensemble,
+            rng_eval, n_samples=cfg.model.model_nensemble, scaler=scaler,
         )
         metrics_path = os.path.join(cfg.model.output_dir, "metrics_glambie_test.csv")
         metrics_df.to_csv(metrics_path, index=False)

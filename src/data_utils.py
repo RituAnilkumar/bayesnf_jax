@@ -25,8 +25,44 @@ All temporal indices are computed as  year - T_MIN  (consistent with bnf_module)
 
 import numpy as np
 import pandas as pd
+from sklearn.preprocessing import StandardScaler
 
 from src.model.bnf_module import T_MIN
+
+# ---------------------------------------------------------------------------
+# Feature scaling
+# ---------------------------------------------------------------------------
+
+def fit_scaler(covariates: np.ndarray) -> StandardScaler:
+    """
+    Fit a StandardScaler on training-split covariates.
+
+    Must be called on the training split only (never on eval/full splits)
+    to avoid data leakage. Save the returned scaler to disk alongside
+    pretrained_params.pkl so finetune and predict stages apply identical scaling.
+
+    Args:
+        covariates: shape (N, n_features) float32 numpy array
+
+    Returns:
+        Fitted StandardScaler instance.
+    """
+    return StandardScaler().fit(covariates)
+
+
+def apply_scaler(covariates: np.ndarray, scaler: StandardScaler) -> np.ndarray:
+    """
+    Apply a fitted StandardScaler to a covariate array.
+
+    Args:
+        covariates: shape (N, n_features) float32 numpy array
+        scaler:     Fitted StandardScaler from fit_scaler()
+
+    Returns:
+        Scaled covariates, same shape, float32.
+    """
+    return scaler.transform(covariates).astype(np.float32)
+
 
 # ---------------------------------------------------------------------------
 # Feature columns — fixed order used across all training/inference code

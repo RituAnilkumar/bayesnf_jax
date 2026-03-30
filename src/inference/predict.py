@@ -18,9 +18,11 @@ import numpy as np
 from omegaconf import DictConfig
 
 from src.model.bnf_module import BayesianNeuralField, T_MIN
+import cloudpickle
 from src.data_utils import (
     load_features,
     build_model_inputs,
+    apply_scaler,
     FEATURE_COLS,
 )
 
@@ -185,9 +187,23 @@ def run_predict(cfg: DictConfig) -> None:
     mu_dict, log_sigma_dict = load_finetuned_params(cfg.model.finetuned_params_path)
     params = build_params_from_posterior(mu_dict, log_sigma_dict)
 
+    # --- Load scaler (written by finetune alongside finetuned_params.pkl) ---
+    scaler_path = os.path.join(
+        os.path.dirname(cfg.model.finetuned_params_path), "scaler.pkl"
+    )
+    if os.path.exists(scaler_path):
+        with open(scaler_path, "rb") as f:
+            scaler = cloudpickle.load(f)
+        print(f"Loaded feature scaler from {scaler_path}")
+    else:
+        scaler = None
+        print(f"WARNING: scaler.pkl not found at {scaler_path} — covariates will be unscaled")
+
     # --- Load prediction grid ---
     pred_grid = load_pred_grid(cfg, ft_cols)
     time_index, covariates, _, _ = build_model_inputs(pred_grid, ft_cols)
+    if scaler is not None:
+        covariates = apply_scaler(covariates, scaler)
 
     # --- Model ---
     model = BayesianNeuralField(
