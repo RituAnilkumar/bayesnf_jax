@@ -149,11 +149,15 @@ def load_glambie(
     if df.empty:
         return None, None
 
-    # GLaMBIE years must be a subset of OGGM feature years
+    # Keep only GLaMBIE years present in OGGM feature data — others have no
+    # glacier predictions to aggregate against, so they can't be evaluated.
     glambie_years = set(df["year"].unique())
     out_of_range  = glambie_years - oggm_years
-    assert not out_of_range, \
-        f"GLaMBIE years not present in OGGM feature data: {out_of_range}"
+    if out_of_range:
+        print(f"  GLaMBIE years dropped (not in OGGM feature data): {sorted(out_of_range)}")
+        df = df[df["year"].isin(oggm_years)].reset_index(drop=True)
+    if df.empty:
+        return None, None
 
     # Split: years within temporal_avg period → train; years after → test
     train_df = df[df["year"] <= temporal_avg_end_year].reset_index(drop=True)
@@ -350,6 +354,7 @@ def make_train_step(
 def evaluate_glambie_test(
     model: BayesianNeuralField,
     params: dict,
+    *,
     oggm_df: pd.DataFrame,
     glambie_test_df: pd.DataFrame,
     ft_cols: list[str],
@@ -511,6 +516,9 @@ def run_finetune(cfg: DictConfig) -> None:
         return result
     params = {"params": _merge(prior_mu, prior_log_sigma)}
 
+    # Keep a copy of the pretrained params for baseline evaluation after finetuning
+    prior_params = params
+
     # --- Optimizer ---
     optimizer = optax.adam(cfg.model.lr)
     opt_state = optimizer.init(params)
@@ -556,17 +564,29 @@ def run_finetune(cfg: DictConfig) -> None:
 
     # --- GLaMBIE test evaluation ---
     if glambie_test_df is not None:
-        rng, rng_eval = jax.random.split(rng)
-        metrics_df = evaluate_glambie_test(
-            model, params, oggm_df, glambie_test_df, ft_cols,
-            rng_eval, n_samples=cfg.model.model_nensemble,
-            scaler=scaler, target_scaler=target_scaler,
+        eval_kwargs = dict(
+            oggm_df=oggm_df, glambie_test_df=glambie_test_df, ft_cols=ft_cols,
+            n_samples=cfg.model.model_nensemble, scaler=scaler, target_scaler=target_scaler,
         )
+
+        # Pretrain baseline (prior params — no finetuning applied)
+        rng, rng_pre = jax.random.split(rng)
+        pre_df = evaluate_glambie_test(model, prior_params, rng=rng_pre, **eval_kwargs)
+        pre_df["stage"] = "pretrain"
+
+        # Finetuned model
+        rng, rng_fin = jax.random.split(rng)
+        fin_df = evaluate_glambie_test(model, params, rng=rng_fin, **eval_kwargs)
+        fin_df["stage"] = "finetune"
+
+        metrics_df = pd.concat([pre_df, fin_df], ignore_index=True)
         metrics_path = os.path.join(cfg.model.output_dir, "metrics_glambie_test.csv")
         metrics_df.to_csv(metrics_path, index=False)
-        rmse = float(np.sqrt((metrics_df["residual"] ** 2).mean()))
-        bias = float(metrics_df["residual"].mean())
-        ss_res = (metrics_df["residual"] ** 2).sum()
-        ss_tot = ((metrics_df["glambie_mwe"] - metrics_df["glambie_mwe"].mean()) ** 2).sum()
-        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
-        print(f"GLaMBIE test: rmse={rmse:.4f}  bias={bias:.4f}  r2={r2:.4f}  n={len(metrics_df)}")
+
+        for stage, sdf in metrics_df.groupby("stage"):
+            rmse = float(np.sqrt((sdf["residual"] ** 2).mean()))
+            bias = float(sdf["residual"].mean())
+            ss_res = (sdf["residual"] ** 2).sum()
+            ss_tot = ((sdf["glambie_mwe"] - sdf["glambie_mwe"].mean()) ** 2).sum()
+            r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+            print(f"GLaMBIE test [{stage}]: rmse={rmse:.4f}  bias={bias:.4f}  r2={r2:.4f}  n={len(sdf)}")
