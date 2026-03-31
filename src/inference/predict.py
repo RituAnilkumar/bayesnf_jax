@@ -15,7 +15,8 @@ import jax.numpy as jnp
 import cloudpickle
 import pandas as pd
 import numpy as np
-from omegaconf import DictConfig
+from hydra.utils import get_original_cwd
+from omegaconf import DictConfig, OmegaConf
 
 from src.model.bnf_module import BayesianNeuralField, T_MIN
 import cloudpickle
@@ -177,6 +178,14 @@ def run_predict(cfg: DictConfig) -> None:
     """
     os.makedirs(cfg.model.output_dir, exist_ok=True)
     rng = jax.random.PRNGKey(cfg.model.seed)
+
+    # --- Resolve relative paths against original cwd (Hydra chdir moves us to output dir) ---
+    orig = get_original_cwd()
+    cfg_mutable = OmegaConf.to_container(cfg, resolve=True)
+    for key in ("finetuned_params_path", "inp_dir"):
+        if key in cfg_mutable["model"] and cfg_mutable["model"][key]:
+            cfg_mutable["model"][key] = os.path.join(orig, cfg_mutable["model"][key])
+    cfg = OmegaConf.create(cfg_mutable)
 
     # --- Feature columns ---
     ft_cols = list(cfg.model.model_ftcols) if cfg.model.model_ftcols else FEATURE_COLS
