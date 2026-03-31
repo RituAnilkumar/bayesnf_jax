@@ -33,6 +33,23 @@ from src.model.bnf_module import T_MIN
 # Feature scaling
 # ---------------------------------------------------------------------------
 
+def fit_target_scaler(targets: np.ndarray) -> tuple[float, float]:
+    """
+    Compute (mean, std) from training targets for output normalisation.
+
+    Save the returned tuple to target_scaler.pkl alongside pretrained_params.pkl.
+    Apply as:  y_scaled = (y - mean) / std
+    Invert as: y_physical = y_scaled * std + mean
+
+    Args:
+        targets: shape (N,) float32 numpy array of OGGM targets [MWE/yr]
+
+    Returns:
+        (mean, std) as Python floats.
+    """
+    return float(targets.mean()), float(targets.std())
+
+
 def fit_scaler(covariates: np.ndarray) -> StandardScaler:
     """
     Fit a StandardScaler on training-split covariates.

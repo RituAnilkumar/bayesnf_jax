@@ -262,11 +262,21 @@ def make_train_step(
     prior_mu: dict,
     prior_log_sigma: dict,
     sa: dict,  # static_arrays
+    n_data: int,
+    target_mean: float = 0.0,
+    target_std: float = 1.0,
 ):
     """
     Factory: returns a JIT-compiled finetune train_step.
 
-    The prior and all data arrays are closed over — static during Stage 2 training.
+    The prior, data arrays, n_data, and target scaling constants are all closed
+    over — static during Stage 2 training.
+
+    target_mean / target_std: from pretrain target_scaler.pkl. Model outputs
+    are in scaled units; these are used to unscale to physical MWE/yr before
+    the temporal_avg and glambie losses (which expect physical units).
+
+    n_data normalises KL to the per-observation scale of the likelihood terms.
 
     Returned function signature:
         train_step(params, opt_state, rng, beta)
@@ -279,13 +289,14 @@ def make_train_step(
         def loss_fn(params):
             rng_period, rng_glambie = jax.random.split(rng)
 
-            # --- Temporal-avg loss ---
-            period_preds = model.apply(
+            # --- Temporal-avg loss (unscale model output → physical MWE/yr) ---
+            period_preds_scaled = model.apply(
                 params,
                 sa["time_index"][sa["period_mask"]],
                 sa["covariates"][sa["period_mask"]],
                 rng_period,
             )
+            period_preds = period_preds_scaled * target_std + target_mean
             l_ta = temporal_avg_loss(
                 period_preds,
                 sa["temporal_avg_glacier_ids"],
@@ -294,14 +305,15 @@ def make_train_step(
                 sa["temporal_avg_errs"],
             )
 
-            # --- GLaMBIE loss ---
+            # --- GLaMBIE loss (unscale model output → physical MWE/yr) ---
             if has_glambie:
-                glambie_preds = model.apply(
+                glambie_preds_scaled = model.apply(
                     params,
                     sa["glambie_time_index"],
                     sa["glambie_covariates"],
                     rng_glambie,
                 )
+                glambie_preds = glambie_preds_scaled * target_std + target_mean
                 l_glambie = glambie_loss(
                     glambie_preds,
                     sa["glambie_year_ids"],
@@ -317,7 +329,7 @@ def make_train_step(
             mu_dict, log_sigma_dict = extract_vi_params(params["params"])
             kl = compute_total_kl(mu_dict, log_sigma_dict, prior_mu, prior_log_sigma)
 
-            return finetune_elbo(l_ta, l_glambie, kl, beta)
+            return finetune_elbo(l_ta, l_glambie, kl, beta, n_data)
 
         loss, grads = jax.value_and_grad(loss_fn)(params)
         updates, opt_state_new = optimizer.update(grads, opt_state, params)
@@ -340,6 +352,7 @@ def evaluate_glambie_test(
     rng: jax.Array,
     n_samples: int = 100,
     scaler=None,
+    target_scaler: tuple[float, float] | None = None,
 ) -> pd.DataFrame:
     """
     Evaluate finetuned model against held-out GLaMBIE test years.
@@ -376,10 +389,16 @@ def evaluate_glambie_test(
     regional_means = jax.vmap(sample_regional_mean)(mc_preds)  # (n_samples, n_years)
     pred_mean = jnp.mean(regional_means, axis=0)  # (n_years,)
 
+    # Unscale regional mean predictions to physical MWE/yr
+    pred_mean_np = np.array(pred_mean)
+    if target_scaler is not None:
+        t_mean_v, t_std_v = target_scaler
+        pred_mean_np = pred_mean_np * t_std_v + t_mean_v
+
     rows = []
     for _, obs in glambie_test_df.iterrows():
         y_idx    = year_to_idx[obs["year"]]
-        pred_val = float(pred_mean[y_idx])
+        pred_val = float(pred_mean_np[y_idx])
         rows.append({
             "year":       obs["year"],
             "source":     obs["source"],
@@ -421,18 +440,29 @@ def run_finetune(cfg: DictConfig) -> None:
     # --- Load prior and scaler ---
     prior_mu, prior_log_sigma = load_pretrained_prior(cfg.model.pretrained_params_path)
 
-    scaler_path = os.path.join(os.path.dirname(cfg.model.pretrained_params_path), "scaler.pkl")
+    pretrain_dir = os.path.dirname(cfg.model.pretrained_params_path)
+
+    scaler_path = os.path.join(pretrain_dir, "scaler.pkl")
     if os.path.exists(scaler_path):
         with open(scaler_path, "rb") as f:
             scaler = cloudpickle.load(f)
         print(f"Loaded feature scaler from {scaler_path}")
-        # Also write scaler to finetune output dir so predict can find it automatically
-        finetune_scaler_path = os.path.join(cfg.model.output_dir, "scaler.pkl")
-        with open(finetune_scaler_path, "wb") as f:
+        with open(os.path.join(cfg.model.output_dir, "scaler.pkl"), "wb") as f:
             cloudpickle.dump(scaler, f)
     else:
         scaler = None
         print(f"WARNING: scaler.pkl not found at {scaler_path} — covariates will be unscaled")
+
+    target_scaler_path = os.path.join(pretrain_dir, "target_scaler.pkl")
+    if os.path.exists(target_scaler_path):
+        with open(target_scaler_path, "rb") as f:
+            target_scaler = cloudpickle.load(f)  # (mean, std)
+        print(f"Loaded target scaler from {target_scaler_path}  (mean={target_scaler[0]:.4f}, std={target_scaler[1]:.4f})")
+        with open(os.path.join(cfg.model.output_dir, "target_scaler.pkl"), "wb") as f:
+            cloudpickle.dump(target_scaler, f)
+    else:
+        target_scaler = None
+        print(f"WARNING: target_scaler.pkl not found at {target_scaler_path} — predictions will be unscaled")
 
     # --- Load data ---
     oggm_df     = load_oggm_full(cfg)
@@ -479,8 +509,17 @@ def run_finetune(cfg: DictConfig) -> None:
     opt_state = optimizer.init(params)
 
     # --- Beta schedule + train step ---
+    n_finetune_obs = static_arrays["n_glaciers"]
+    if static_arrays["has_glambie"]:
+        n_finetune_obs += int(static_arrays["obs_year_idx"].shape[0])
+
+    t_mean, t_std = target_scaler if target_scaler is not None else (0.0, 1.0)
+
     beta_schedule = make_beta_schedule(cfg.model.model_nepochs, cfg.model.beta_anneal_epochs)
-    train_step    = make_train_step(model, optimizer, prior_mu, prior_log_sigma, static_arrays)
+    train_step    = make_train_step(
+        model, optimizer, prior_mu, prior_log_sigma, static_arrays,
+        n_data=n_finetune_obs, target_mean=t_mean, target_std=t_std,
+    )
 
     # --- Training loop ---
     losses = []
@@ -513,7 +552,8 @@ def run_finetune(cfg: DictConfig) -> None:
         rng, rng_eval = jax.random.split(rng)
         metrics_df = evaluate_glambie_test(
             model, params, oggm_df, glambie_test_df, ft_cols,
-            rng_eval, n_samples=cfg.model.model_nensemble, scaler=scaler,
+            rng_eval, n_samples=cfg.model.model_nensemble,
+            scaler=scaler, target_scaler=target_scaler,
         )
         metrics_path = os.path.join(cfg.model.output_dir, "metrics_glambie_test.csv")
         metrics_df.to_csv(metrics_path, index=False)

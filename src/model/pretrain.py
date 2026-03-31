@@ -46,6 +46,7 @@ from src.data_utils import (
     build_model_inputs,
     fit_scaler,
     apply_scaler,
+    fit_target_scaler,
     FEATURE_COLS,
 )
 
@@ -87,25 +88,34 @@ def _get_ft_cols(cfg: DictConfig) -> list[str]:
     return [c for c in ft_cols if c not in rm_fts]
 
 
-def prepare_arrays(df: pd.DataFrame, ft_cols: list[str], scaler=None) -> dict:
+def prepare_arrays(
+    df: pd.DataFrame,
+    ft_cols: list[str],
+    scaler=None,
+    target_scaler: tuple[float, float] | None = None,
+) -> dict:
     """
     Convert a loaded OGGM DataFrame into JAX arrays ready for training.
 
     Args:
-        df:      Merged OGGM DataFrame.
-        ft_cols: Feature column names.
-        scaler:  Fitted StandardScaler to apply to covariates, or None for raw values.
-                 Must be the scaler fitted on the training split only.
+        df:             Merged OGGM DataFrame.
+        ft_cols:        Feature column names.
+        scaler:         Fitted StandardScaler for covariates, or None.
+        target_scaler:  (mean, std) tuple from fit_target_scaler(), or None.
+                        When provided, targets are standardised to ~N(0,1).
 
     Returns dict with keys:
         time_index: jnp.array, shape (N,)
         covariates: jnp.array, shape (N, n_features)
-        targets:    jnp.array, shape (N,)  [MWE/yr]
+        targets:    jnp.array, shape (N,)  [scaled if target_scaler provided]
     """
     time_index, covariates, _, _ = build_model_inputs(df, ft_cols)
     if scaler is not None:
         covariates = apply_scaler(covariates, scaler)
     targets = df["mass_balance_mwe"].to_numpy(dtype=np.float32)
+    if target_scaler is not None:
+        t_mean, t_std = target_scaler
+        targets = ((targets - t_mean) / t_std).astype(np.float32)
     return {
         "time_index": jnp.array(time_index),
         "covariates": jnp.array(covariates),
@@ -117,9 +127,11 @@ def prepare_arrays(df: pd.DataFrame, ft_cols: list[str], scaler=None) -> dict:
 # Training step (JIT-compiled)
 # ---------------------------------------------------------------------------
 
-def make_train_step(model: BayesianNeuralField, optimizer):
+def make_train_step(model: BayesianNeuralField, optimizer, n_data: int):
     """
-    Factory: returns a JIT-compiled train_step closed over model and optimizer.
+    Factory: returns a JIT-compiled train_step closed over model, optimizer, and n_data.
+
+    n_data is used to normalise KL to the per-data-point scale of the likelihood.
 
     Returned function signature:
         train_step(params, opt_state, rng, time_index, covariates, targets, beta)
@@ -136,7 +148,7 @@ def make_train_step(model: BayesianNeuralField, optimizer):
             prior_mu, prior_log_sigma = make_standard_normal_prior(mu_dict, log_sigma_dict)
             kl = compute_total_kl(mu_dict, log_sigma_dict, prior_mu, prior_log_sigma)
 
-            return pretrain_elbo(l_oggm, kl, beta)
+            return pretrain_elbo(l_oggm, kl, beta, n_data)
 
         loss, grads = jax.value_and_grad(loss_fn)(params)
         updates, opt_state_new = optimizer.update(grads, opt_state, params)
@@ -156,11 +168,16 @@ def evaluate_split(
     arrays: dict,
     rng: jax.Array,
     n_samples: int = 50,
+    target_scaler: tuple[float, float] | None = None,
 ) -> dict:
     """
     Compute evaluation metrics for one data split using MC predictive mean.
 
-    Returns dict with keys: rmse, bias, n_points
+    Metrics are always returned in physical units (MWE/yr). If target_scaler
+    is provided, both predictions and targets are unscaled before computing
+    residuals so that rmse/bias/r2 are interpretable.
+
+    Returns dict with keys: rmse, bias, r2, n_points
     """
     mc_preds = model.apply(
         params,
@@ -172,6 +189,11 @@ def evaluate_split(
     )  # (n_samples, N)
     pred_mean = jnp.mean(mc_preds, axis=0)  # (N,)
     targets   = arrays["targets"]
+
+    if target_scaler is not None:
+        t_mean, t_std = target_scaler
+        pred_mean = pred_mean * t_std + t_mean
+        targets   = targets   * t_std + t_mean
 
     residuals = pred_mean - targets
     rmse = float(jnp.sqrt(jnp.mean(residuals ** 2)))
@@ -203,17 +225,24 @@ def run_pretrain(cfg: DictConfig) -> None:
     train_split = cfg.model.train_split  # 'train' or 'full'
     train_df, held_years = load_oggm_split(cfg, train_split)
 
-    # Fit scaler on training covariates only (no leakage from eval splits)
+    # Fit feature and target scalers on training data only (no leakage from eval splits)
     _, raw_covariates, _, _ = build_model_inputs(train_df, ft_cols)
     scaler = fit_scaler(raw_covariates)
 
-    # Save scaler alongside pretrained_params so finetune/predict apply identical scaling
+    raw_targets = train_df["mass_balance_mwe"].to_numpy(dtype=np.float32)
+    target_scaler = fit_target_scaler(raw_targets)  # (mean, std)
+
     scaler_path = os.path.join(cfg.model.output_dir, "scaler.pkl")
     with open(scaler_path, "wb") as f:
         cloudpickle.dump(scaler, f)
     print(f"Saved feature scaler → {scaler_path}")
 
-    train_arrays = prepare_arrays(train_df, ft_cols, scaler=scaler)
+    target_scaler_path = os.path.join(cfg.model.output_dir, "target_scaler.pkl")
+    with open(target_scaler_path, "wb") as f:
+        cloudpickle.dump(target_scaler, f)
+    print(f"Saved target scaler  → {target_scaler_path}  (mean={target_scaler[0]:.4f}, std={target_scaler[1]:.4f})")
+
+    train_arrays = prepare_arrays(train_df, ft_cols, scaler=scaler, target_scaler=target_scaler)
 
     # --- Model init ---
     model = BayesianNeuralField(
@@ -239,7 +268,8 @@ def run_pretrain(cfg: DictConfig) -> None:
     )
 
     # --- Training loop ---
-    train_step = make_train_step(model, optimizer)
+    n_data = len(train_arrays["targets"])
+    train_step = make_train_step(model, optimizer, n_data)
     losses = []
 
     for epoch in range(cfg.model.model_nepochs):
@@ -287,9 +317,9 @@ def run_pretrain(cfg: DictConfig) -> None:
             split_df = all_splits[split_name]
             if len(split_df) == 0:
                 continue
-            arrays = prepare_arrays(split_df, ft_cols, scaler=scaler)
+            arrays = prepare_arrays(split_df, ft_cols, scaler=scaler, target_scaler=target_scaler)
             rng, rng_eval = jax.random.split(rng)
-            metrics = evaluate_split(model, params, arrays, rng_eval, n_samples=cfg.model.model_nensemble)
+            metrics = evaluate_split(model, params, arrays, rng_eval, n_samples=cfg.model.model_nensemble, target_scaler=target_scaler)
             metrics["region"] = region
             metrics["split"]  = split_name
             rows.append(metrics)

@@ -46,21 +46,27 @@ def pretrain_elbo(
     oggm_loss_val,   # scalar
     kl_val,          # scalar
     beta: float,
+    n_data: int,
 ) -> jnp.ndarray:
     """
     ELBO for Stage 1 pretraining.
 
-    ELBO = L_oggm - beta * KL(q || N(0,1))
+    ELBO = L_oggm + (beta / n_data) * KL(q || N(0,1))
+
+    KL is divided by n_data to match the per-data-point scale of L_oggm
+    (which is a mean over N points). Without this, KL — a sum over all
+    variational parameters — dominates once beta annealing completes.
 
     Args:
-        oggm_loss_val: Scalar OGGM MSE loss (lower = better)
-        kl_val:        Scalar KL divergence against standard normal prior
+        oggm_loss_val: Scalar OGGM Huber loss (mean over data points)
+        kl_val:        Scalar KL divergence against standard normal prior (sum over params)
         beta:          Current annealing coefficient in [0, 1]
+        n_data:        Number of training data points (normalises KL to per-point scale)
 
     Returns:
-        Scalar ELBO (to be minimised — sign convention: return positive loss)
+        Scalar ELBO (to be minimised)
     """
-    return oggm_loss_val + beta * kl_val
+    return oggm_loss_val + beta * (kl_val / n_data)
 
 
 # ---------------------------------------------------------------------------
@@ -72,17 +78,22 @@ def finetune_elbo(
     glambie_loss_val,       # scalar (0.0 if no GLaMBIE data)
     kl_val,                 # scalar
     beta: float,
+    n_data: int,
 ) -> jnp.ndarray:
     """
-    ELBO = L_temporal_avg + L_glambie - beta * KL(q || q_pretrained)
+    ELBO = L_temporal_avg + L_glambie + (beta / n_data) * KL(q || q_pretrained)
+
+    KL is divided by n_data (n_glaciers + n_glambie_obs) for the same reason
+    as in pretrain_elbo: KL is a sum over parameters, losses are means over obs.
 
     Args:
         temporal_avg_loss_val: Scalar temporal-avg inverse-variance MSE
         glambie_loss_val:      Scalar GLaMBIE inverse-variance MSE (0.0 if absent)
         kl_val:                Scalar KL divergence against pretrained posterior
         beta:                  Current annealing coefficient in [0, 1]
+        n_data:                Number of observations (n_glaciers + n_glambie_obs)
 
     Returns:
         Scalar ELBO (to be minimised)
     """
-    return temporal_avg_loss_val + glambie_loss_val + beta * kl_val
+    return temporal_avg_loss_val + glambie_loss_val + beta * (kl_val / n_data)

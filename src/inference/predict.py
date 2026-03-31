@@ -187,10 +187,10 @@ def run_predict(cfg: DictConfig) -> None:
     mu_dict, log_sigma_dict = load_finetuned_params(cfg.model.finetuned_params_path)
     params = build_params_from_posterior(mu_dict, log_sigma_dict)
 
-    # --- Load scaler (written by finetune alongside finetuned_params.pkl) ---
-    scaler_path = os.path.join(
-        os.path.dirname(cfg.model.finetuned_params_path), "scaler.pkl"
-    )
+    # --- Load scalers (written by finetune alongside finetuned_params.pkl) ---
+    finetune_dir = os.path.dirname(cfg.model.finetuned_params_path)
+
+    scaler_path = os.path.join(finetune_dir, "scaler.pkl")
     if os.path.exists(scaler_path):
         with open(scaler_path, "rb") as f:
             scaler = cloudpickle.load(f)
@@ -198,6 +198,15 @@ def run_predict(cfg: DictConfig) -> None:
     else:
         scaler = None
         print(f"WARNING: scaler.pkl not found at {scaler_path} — covariates will be unscaled")
+
+    target_scaler_path = os.path.join(finetune_dir, "target_scaler.pkl")
+    if os.path.exists(target_scaler_path):
+        with open(target_scaler_path, "rb") as f:
+            target_scaler = cloudpickle.load(f)  # (mean, std)
+        print(f"Loaded target scaler from {target_scaler_path}")
+    else:
+        target_scaler = None
+        print(f"WARNING: target_scaler.pkl not found at {target_scaler_path} — predictions will not be unscaled")
 
     # --- Load prediction grid ---
     pred_grid = load_pred_grid(cfg, ft_cols)
@@ -221,6 +230,11 @@ def run_predict(cfg: DictConfig) -> None:
         rng_pred,
         n_samples=cfg.model.model_nensemble,
     )  # (n_samples, N)
+
+    # --- Unscale predictions to physical MWE/yr ---
+    if target_scaler is not None:
+        t_mean, t_std = target_scaler
+        mc_preds = mc_preds * t_std + t_mean
 
     # --- Quantiles and output ---
     quantiles = extract_quantiles(mc_preds)
