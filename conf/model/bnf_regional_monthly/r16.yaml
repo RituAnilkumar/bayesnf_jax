@@ -3,7 +3,7 @@
 
 model:
   reg_subdir: r16
-  temporal_avg_path: data_for_model/r16/temporal_avg_targets_r16.csv
+  temporal_avg_path: data_for_model/r16/dmdtda_hugo.csv
   glambie_path: data_for_model/r16/glambie_targets_r16.csv
   pretrained_params_path: outputs/pretrain/r16_monthly_full/pretrained_params.pkl
   finetuned_params_path: outputs/finetune/r16_monthly/finetuned_params.pkl

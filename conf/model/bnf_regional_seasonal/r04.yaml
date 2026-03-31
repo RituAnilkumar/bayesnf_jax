@@ -3,7 +3,7 @@ defaults:
 
 # Region r04 overrides for seasonal input type
 reg_subdir: r04
-temporal_avg_path: data_for_model/r04/temporal_avg_targets_r04.csv
+temporal_avg_path: data_for_model/r04/dmdtda_hugo.csv
 glambie_path: data_for_model/r04/glambie_targets_r04.csv
 pretrained_params_path: outputs/pretrain/r04_seasonal_full/pretrained_params.pkl
 finetuned_params_path: outputs/finetune/r04_seasonal/finetuned_params.pkl

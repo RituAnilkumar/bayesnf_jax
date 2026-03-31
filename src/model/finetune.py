@@ -45,7 +45,7 @@ from src.data_utils import (
     merge_features_targets,
     select_held_years,
     make_cv_splits,
-    load_temporal_avg as _load_temporal_avg,
+    load_dmdtda as _load_temporal_avg,
     load_glambie as _load_glambie_raw,
     build_model_inputs,
     apply_scaler,

@@ -23,6 +23,7 @@ ensure the same years are held out everywhere.
 All temporal indices are computed as  year - T_MIN  (consistent with bnf_module).
 """
 
+import os
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
@@ -132,11 +133,81 @@ def load_features(
 
 
 # ---------------------------------------------------------------------------
-# Temporal-average targets (Stage 2 — finetune, replaces Hugonnet)
+# Temporal-average targets (Stage 2 — finetune) — Hugonnet dmdtda format
+# ---------------------------------------------------------------------------
+
+def _parse_hugonnet_period(period: str) -> tuple[int, int]:
+    """
+    Parse a Hugonnet period string to (start_year, end_year) integers.
+
+    Format: 'YYYY-MM-DD_YYYY-MM-DD', e.g. '2000-01-01_2020-01-01'
+    Returns the year of each date as integers: (2000, 2020).
+    The end year is the calendar year of the end date — the finetune period
+    mask uses >= start_year and <= end_year so OGGM rows are correctly
+    selected (OGGM typically ends at end_year-1 if end date is Jan 1).
+    """
+    parts = period.split("_")
+    start_year = int(parts[0].split("-")[0])
+    end_year   = int(parts[1].split("-")[0])
+    return start_year, end_year
+
+
+def load_dmdtda(path: str) -> pd.DataFrame:
+    """
+    Load per-glacier Hugonnet dmdtda targets from a region-level CSV.
+
+    Expected input: output of extract_hugonnet_region(), with columns:
+        rgiid, period, dmdtda, err_dmdtda  (plus area, reg, is_cor — ignored)
+
+    dmdtda is already in MWE/yr (dm/dt/da = mass change rate per unit area).
+    err_dmdtda is the 1-sigma uncertainty in MWE/yr.
+
+    Returns columns: rgi_id, start_date, end_date, avg_mb_mwe, uncertainty_mwe
+    (same interface as the old load_temporal_avg so finetune.py is unchanged).
+    """
+    df = pd.read_csv(path)
+    df["rgi_id"] = df["rgiid"]
+    df["start_date"], df["end_date"] = zip(*df["period"].map(_parse_hugonnet_period))
+    df["avg_mb_mwe"]     = df["dmdtda"].astype(np.float32)
+    df["uncertainty_mwe"] = df["err_dmdtda"].astype(np.float32)
+    return df[["rgi_id", "start_date", "end_date", "avg_mb_mwe", "uncertainty_mwe"]]
+
+
+def extract_hugonnet_region(
+    hugonnet_path: str,
+    reg: int,
+    out_path: str,
+    period: str = "2000-01-01_2020-01-01",
+) -> pd.DataFrame:
+    """
+    Extract a single-region, single-period slice from the full Hugonnet CSV
+    and save it as a region-level dmdtda file.
+
+    Args:
+        hugonnet_path: Path to hugonnet_dmdt.csv (full file, all regions/periods).
+        reg:           RGI region integer (e.g. 6 for Iceland/r06).
+        out_path:      Where to write the filtered CSV (e.g. data_for_model/r06/dmdtda_hugo.csv).
+        period:        Period string to filter on (default '2000-01-01_2020-01-01').
+
+    Returns:
+        The filtered DataFrame (also written to out_path).
+    """
+    df = pd.read_csv(hugonnet_path)
+    mask = (df["reg"] == reg) & (df["period"] == period)
+    out  = df[mask].reset_index(drop=True)
+    if out.empty:
+        raise ValueError(f"No Hugonnet rows found for reg={reg}, period='{period}'")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    out.to_csv(out_path, index=False)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Temporal-average targets — legacy format (kept for backward compatibility)
 # ---------------------------------------------------------------------------
 def load_temporal_avg(path: str) -> pd.DataFrame:
     """
-    Load per-glacier temporal-average mass balance targets.
+    Load per-glacier temporal-average mass balance targets (legacy format).
 
     Values are already in MWE/yr. Covers the period 2001-2020 per glacier.
 
