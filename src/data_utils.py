@@ -165,10 +165,10 @@ def load_glambie(path: str) -> pd.DataFrame:
     Year is derived from end_date by flooring the fractional year to an integer.
 
     Input columns: region, start_date, end_date,
-                   combined_gt, combined_gt_errors,
-                   altimetry_gt, altimetry_gt_errors,
-                   gravimetry_gt, gravimetry_gt_errors
-    (column suffix '_gt' is historical; values are in MWE/yr)
+                   combined_mwe, combined_mwe_errors,
+                   altimetry_mwe, altimetry_mwe_errors,
+                   gravimetry_mwe, gravimetry_mwe_errors
+    (values are in MWE/yr)
 
     Returns columns: region, year, source, value_mwe, error_mwe
     """
@@ -179,33 +179,33 @@ def load_glambie(path: str) -> pd.DataFrame:
     # Combined is only used as a last resort when the entire file has zero
     # altimetry and zero gravimetry datapoints.
     any_primary = (
-        (df["altimetry_gt"].notna() & df["altimetry_gt_errors"].notna()).any()
+        (df["altimetry_mwe"].notna() & df["altimetry_mwe_errors"].notna()).any()
         or
-        (df["gravimetry_gt"].notna() & df["gravimetry_gt_errors"].notna()).any()
+        (df["gravimetry_mwe"].notna() & df["gravimetry_mwe_errors"].notna()).any()
     )
 
     records = []
     for _, row in df.iterrows():
-        alt_ok  = pd.notna(row.get("altimetry_gt"))  and pd.notna(row.get("altimetry_gt_errors"))
-        grav_ok = pd.notna(row.get("gravimetry_gt")) and pd.notna(row.get("gravimetry_gt_errors"))
+        alt_ok  = pd.notna(row.get("altimetry_mwe"))  and pd.notna(row.get("altimetry_mwe_errors"))
+        grav_ok = pd.notna(row.get("gravimetry_mwe")) and pd.notna(row.get("gravimetry_mwe_errors"))
 
         if alt_ok:
             records.append({
                 "region": row["region"], "year": row["year"],
                 "source": "altimetry",
-                "value_mwe": row["altimetry_gt"], "error_mwe": row["altimetry_gt_errors"],
+                "value_mwe": row["altimetry_mwe"], "error_mwe": row["altimetry_mwe_errors"],
             })
         if grav_ok:
             records.append({
                 "region": row["region"], "year": row["year"],
                 "source": "gravimetry",
-                "value_mwe": row["gravimetry_gt"], "error_mwe": row["gravimetry_gt_errors"],
+                "value_mwe": row["gravimetry_mwe"], "error_mwe": row["gravimetry_mwe_errors"],
             })
-        if not any_primary and pd.notna(row.get("combined_gt")) and pd.notna(row.get("combined_gt_errors")):
+        if not any_primary and pd.notna(row.get("combined_mwe")) and pd.notna(row.get("combined_mwe_errors")):
             records.append({
                 "region": row["region"], "year": row["year"],
                 "source": "combined",
-                "value_mwe": row["combined_gt"], "error_mwe": row["combined_gt_errors"],
+                "value_mwe": row["combined_mwe"], "error_mwe": row["combined_mwe_errors"],
             })
 
     return pd.DataFrame(

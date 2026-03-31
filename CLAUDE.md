@@ -222,7 +222,7 @@ Follow the same Hydra override pattern as jungle3:
 - OGGM targets: mm/yr → divide by 1000 → MWE/yr before any loss computation
 - Temporal avg avg_mb_mwe: already MWE/yr — no conversion
 - Temporal avg uncertainty_mwe: already MWE/yr — no conversion
-- GLaMBIE: values already MWE/yr (column suffix _gt is historical, ignore it)
+- GLaMBIE: values already MWE/yr (columns: combined_mwe/combined_mwe_errors, altimetry_mwe/altimetry_mwe_errors, gravimetry_mwe/gravimetry_mwe_errors)
 - GLaMBIE source selection: prefer altimetry + gravimetry; combined is fallback
   only when the entire file has zero valid altimetry and zero valid gravimetry rows
   (one valid primary observation anywhere disables combined for the whole file)
