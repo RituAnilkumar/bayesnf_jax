@@ -232,9 +232,11 @@ def prepare_finetune_arrays(
 
         # OGGM rows whose year appears in GLaMBIE train years
         glambie_row_mask = oggm_df["year"].isin(glambie_years).to_numpy()
-        g_time_idx  = time_index[glambie_row_mask]
+        g_time_idx   = time_index[glambie_row_mask]
         g_covariates = covariates[glambie_row_mask]
-        g_year_ids  = oggm_df.loc[glambie_row_mask, "year"].map(year_to_idx).to_numpy(dtype=np.int32)
+        g_year_ids   = oggm_df.loc[glambie_row_mask, "year"].map(year_to_idx).to_numpy(dtype=np.int32)
+        # Area weights for area-weighted regional mean (MWE/yr requires area weighting)
+        g_areas      = oggm_df.loc[glambie_row_mask, "Area"].to_numpy(dtype=np.float32)
 
         # Per-observation year index (one per GLaMBIE row)
         obs_year_idx = glambie_train_df["year"].map(year_to_idx).to_numpy(dtype=np.int32)
@@ -243,6 +245,7 @@ def prepare_finetune_arrays(
             "glambie_time_index":  jnp.array(g_time_idx),
             "glambie_covariates":  jnp.array(g_covariates),
             "glambie_year_ids":    jnp.array(g_year_ids),
+            "glambie_areas":       jnp.array(g_areas),
             "n_glambie_years":     n_glambie_years,
             "obs_year_idx":        jnp.array(obs_year_idx),
             "glambie_means":       jnp.array(glambie_train_df["value_mwe"].to_numpy(dtype=np.float32)),
@@ -321,6 +324,7 @@ def make_train_step(
                     sa["obs_year_idx"],
                     sa["glambie_means"],
                     sa["glambie_errs"],
+                    sa["glambie_areas"],
                 )
             else:
                 l_glambie = jnp.array(0.0)
@@ -370,7 +374,8 @@ def evaluate_glambie_test(
     time_idx, covariates, _, _ = build_model_inputs(test_df, ft_cols)
     if scaler is not None:
         covariates = apply_scaler(covariates, scaler)
-    year_ids = test_df["year"].map(year_to_idx).to_numpy(dtype=np.int32)
+    year_ids  = test_df["year"].map(year_to_idx).to_numpy(dtype=np.int32)
+    areas     = test_df["Area"].to_numpy(dtype=np.float32)
 
     # MC predictions → (n_samples, N)
     mc_preds = model.apply(
@@ -382,9 +387,11 @@ def evaluate_glambie_test(
         method=model.mc_predict,
     )
 
-    # Regional annual mean per sample → (n_samples, n_years)
+    # Area-weighted regional annual mean per sample → (n_samples, n_years)
+    jnp_year_ids = jnp.array(year_ids)
+    jnp_areas    = jnp.array(areas)
     def sample_regional_mean(preds_i):
-        return regional_annual_mean(preds_i, jnp.array(year_ids), len(test_years))
+        return regional_annual_mean(preds_i, jnp_year_ids, len(test_years), jnp_areas)
 
     regional_means = jax.vmap(sample_regional_mean)(mc_preds)  # (n_samples, n_years)
     pred_mean = jnp.mean(regional_means, axis=0)  # (n_years,)

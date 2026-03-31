@@ -89,16 +89,21 @@ def temporal_avg_loss(
 # ---------------------------------------------------------------------------
 
 def glambie_loss(
-    preds: jax.Array,         # shape (N,)    predictions for GLaMBIE year rows [MWE/yr]
-    year_ids: jax.Array,      # shape (N,)    integer year codes in [0, n_years)
-    n_years: int,              # number of distinct years covered (static)
-    obs_year_idx: jax.Array,  # shape (N_obs,) index into [0, n_years) per observation
-    glambie_means: jax.Array, # shape (N_obs,) GLaMBIE regional mean targets [MWE/yr]
-    glambie_errs: jax.Array,  # shape (N_obs,) GLaMBIE uncertainties [MWE/yr]
+    preds: jax.Array,             # shape (N,)    predictions for GLaMBIE year rows [MWE/yr]
+    year_ids: jax.Array,          # shape (N,)    integer year codes in [0, n_years)
+    n_years: int,                  # number of distinct years covered (static)
+    obs_year_idx: jax.Array,      # shape (N_obs,) index into [0, n_years) per observation
+    glambie_means: jax.Array,     # shape (N_obs,) GLaMBIE regional mean targets [MWE/yr]
+    glambie_errs: jax.Array,      # shape (N_obs,) GLaMBIE uncertainties [MWE/yr]
+    glacier_areas: jax.Array,     # shape (N,)    glacier area per row [km²]
 ) -> jax.Array:
     """
     Inverse-variance weighted MSE between predicted regional annual means
     and GLaMBIE observations.
+
+    Regional mean is area-weighted: regional_mwe_t = sum_i(pred_it * area_i) / sum_i(area_i).
+    This is necessary because MWE/yr is mass per unit area — larger glaciers must
+    contribute proportionally more to the regional mean.
 
     Gravimetry and altimetry are treated as independent residuals — each is
     a separate row in obs_year_idx / glambie_means / glambie_errs.
@@ -109,18 +114,17 @@ def glambie_loss(
     ]
 
     Args:
-        preds:         Predictions for rows whose year appears in GLaMBIE, shape (N,)
-        year_ids:      Integer year codes for each prediction row, shape (N,)
-                       maps each row to a year index in [0, n_years)
-        n_years:       Number of distinct years (static)
-        obs_year_idx:  Year index for each GLaMBIE observation, shape (N_obs,)
-                       aligns glambie_means[k] with pred_regional_means[obs_year_idx[k]]
-        glambie_means: GLaMBIE targets, shape (N_obs,)        [MWE/yr]
-        glambie_errs:  GLaMBIE uncertainties, shape (N_obs,)  [MWE/yr]
+        preds:          Predictions for rows whose year appears in GLaMBIE, shape (N,)
+        year_ids:       Integer year codes for each prediction row, shape (N,)
+        n_years:        Number of distinct years (static)
+        obs_year_idx:   Year index for each GLaMBIE observation, shape (N_obs,)
+        glambie_means:  GLaMBIE targets, shape (N_obs,)        [MWE/yr]
+        glambie_errs:   GLaMBIE uncertainties, shape (N_obs,)  [MWE/yr]
+        glacier_areas:  Glacier area per row, shape (N,)       [km²]
 
     Returns:
-        Scalar inverse-variance weighted MSE, or 0.0 if N_obs == 0.
+        Scalar inverse-variance weighted MSE.
     """
-    pred_regional_means = regional_annual_mean(preds, year_ids, n_years)  # (n_years,)
-    pred_at_obs = pred_regional_means[obs_year_idx]                        # (N_obs,)
+    pred_regional_means = regional_annual_mean(preds, year_ids, n_years, glacier_areas)  # (n_years,)
+    pred_at_obs = pred_regional_means[obs_year_idx]                                       # (N_obs,)
     return jnp.mean(((pred_at_obs - glambie_means) / glambie_errs) ** 2)
