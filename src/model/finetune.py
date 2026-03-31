@@ -213,25 +213,31 @@ def prepare_finetune_arrays(
     glacier_codes, unique_glaciers = pd.factorize(oggm_df["rgi_id"], sort=True)
     n_glaciers = len(unique_glaciers)
 
-    # Period window mask (temporal_avg period, same for all glaciers in our data)
-    period_start = int(temporal_avg_df["start_date"].min())
-    period_end   = int(temporal_avg_df["end_date"].max())
-    period_mask  = (oggm_df["year"] >= period_start) & (oggm_df["year"] <= period_end)
-
-    # Temporal-avg arrays (sorted to match factorize ordering above)
-    # temporal_avg_df is already sorted to match unique_glaciers (asserted upstream)
-    ta_targets = temporal_avg_df["avg_mb_mwe"].to_numpy(dtype=np.float32)
-    ta_errs    = temporal_avg_df["uncertainty_mwe"].to_numpy(dtype=np.float32)
+    # Multi-period Hugonnet temporal-avg arrays.
+    # temporal_avg_df is grouped by (start_date, end_date) — one group per Hugonnet period.
+    # temporal_avg_df is already sorted by glacier factorize order (asserted upstream).
+    # Period mask uses exclusive end (year < end_year) so decadal periods don't overlap
+    # at their boundary year (e.g. year 2010 appears only in 2010-2020, not 2000-2010).
+    hugonnet_periods = []
+    for (pstart, pend), period_df in temporal_avg_df.groupby(["start_date", "end_date"]):
+        pmask   = (oggm_df["year"] >= pstart) & (oggm_df["year"] < pend)
+        p_gids  = glacier_codes[pmask.to_numpy()]
+        p_tgt   = period_df["avg_mb_mwe"].to_numpy(dtype=np.float32)
+        p_errs  = period_df["uncertainty_mwe"].to_numpy(dtype=np.float32)
+        hugonnet_periods.append({
+            "period_mask": jnp.array(pmask.to_numpy()),
+            "glacier_ids": jnp.array(p_gids, dtype=jnp.int32),
+            "ta_targets":  jnp.array(p_tgt),
+            "ta_errs":     jnp.array(p_errs),
+        })
 
     out = {
-        "time_index":               jnp.array(time_index),
-        "covariates":               jnp.array(covariates),
-        "period_mask":              jnp.array(period_mask.to_numpy()),
-        "temporal_avg_glacier_ids": jnp.array(glacier_codes[period_mask.to_numpy()], dtype=jnp.int32),
-        "temporal_avg_targets":     jnp.array(ta_targets),
-        "temporal_avg_errs":        jnp.array(ta_errs),
-        "n_glaciers":               n_glaciers,
-        "has_glambie":              glambie_train_df is not None,
+        "time_index":         jnp.array(time_index),
+        "covariates":         jnp.array(covariates),
+        "hugonnet_periods":   hugonnet_periods,
+        "n_hugonnet_periods": len(hugonnet_periods),
+        "n_glaciers":         n_glaciers,
+        "has_glambie":        glambie_train_df is not None,
     }
 
     # GLaMBIE arrays
@@ -302,21 +308,25 @@ def make_train_step(
         def loss_fn(params):
             rng_period, rng_glambie = jax.random.split(rng)
 
-            # --- Temporal-avg loss (unscale model output → physical MWE/yr) ---
-            period_preds_scaled = model.apply(
-                params,
-                sa["time_index"][sa["period_mask"]],
-                sa["covariates"][sa["period_mask"]],
-                rng_period,
-            )
-            period_preds = period_preds_scaled * target_std + target_mean
-            l_ta = temporal_avg_loss(
-                period_preds,
-                sa["temporal_avg_glacier_ids"],
-                sa["n_glaciers"],
-                sa["temporal_avg_targets"],
-                sa["temporal_avg_errs"],
-            )
+            # --- Temporal-avg loss — sum over all Hugonnet periods ---
+            # Python loop unrolled at JIT trace time (fixed number of periods).
+            # Same rng_period reused across periods: consistent weight sample per step.
+            l_ta = jnp.array(0.0)
+            for period in sa["hugonnet_periods"]:
+                period_preds_scaled = model.apply(
+                    params,
+                    sa["time_index"][period["period_mask"]],
+                    sa["covariates"][period["period_mask"]],
+                    rng_period,
+                )
+                period_preds = period_preds_scaled * target_std + target_mean
+                l_ta += temporal_avg_loss(
+                    period_preds,
+                    period["glacier_ids"],
+                    sa["n_glaciers"],
+                    period["ta_targets"],
+                    period["ta_errs"],
+                )
 
             # --- GLaMBIE loss (unscale model output → physical MWE/yr) ---
             if has_glambie:
@@ -538,7 +548,9 @@ def run_finetune(cfg: DictConfig) -> None:
     opt_state = optimizer.init(params)
 
     # --- Beta schedule + train step ---
-    n_finetune_obs = static_arrays["n_glaciers"]
+    # n_data for KL normalisation: count each Hugonnet period as n_glaciers observations,
+    # plus the GLaMBIE (year, source) observation count.
+    n_finetune_obs = static_arrays["n_glaciers"] * static_arrays["n_hugonnet_periods"]
     if static_arrays["has_glambie"]:
         n_finetune_obs += int(static_arrays["obs_year_idx"].shape[0])
 

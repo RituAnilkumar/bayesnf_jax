@@ -177,24 +177,33 @@ def extract_hugonnet_region(
     hugonnet_path: str,
     reg: int,
     out_path: str,
-    period: str = "2000-01-01_2020-01-01",
+    period: str | list[str] | None = None,
+    exclude_correlated: bool = True,
 ) -> pd.DataFrame:
     """
-    Extract a single-region, single-period slice from the full Hugonnet CSV
-    and save it as a region-level dmdtda file.
+    Extract a single-region slice from the full Hugonnet CSV and save it.
 
     Args:
-        hugonnet_path: Path to hugonnet_dmdt.csv (full file, all regions/periods).
-        reg:           RGI region integer (e.g. 6 for Iceland/r06).
-        out_path:      Where to write the filtered CSV (e.g. data_for_model/r06/dmdtda_hugo.csv).
-        period:        Period string to filter on (default '2000-01-01_2020-01-01').
+        hugonnet_path:       Path to hugonnet_dmdt.csv (full file, all regions/periods).
+        reg:                 RGI region integer (e.g. 6 for Iceland/r06).
+        out_path:            Where to write the filtered CSV.
+        period:              Period string, list of period strings, or None for ALL periods.
+                             Default None extracts all available periods for the region.
+        exclude_correlated:  If True (default), drop rows with is_cor=True (interpolated
+                             glaciers with no direct geodetic observation for that period).
 
     Returns:
         The filtered DataFrame (also written to out_path).
     """
     df = pd.read_csv(hugonnet_path)
-    mask = (df["reg"] == reg) & (df["period"] == period)
-    out  = df[mask].reset_index(drop=True)
+    mask = df["reg"] == reg
+    if period is not None:
+        if isinstance(period, str):
+            period = [period]
+        mask = mask & df["period"].isin(period)
+    if exclude_correlated and "is_cor" in df.columns:
+        mask = mask & ~df["is_cor"]
+    out = df[mask].reset_index(drop=True)
     if out.empty:
         raise ValueError(f"No Hugonnet rows found for reg={reg}, period='{period}'")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
