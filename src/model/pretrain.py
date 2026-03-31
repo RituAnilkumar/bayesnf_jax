@@ -274,6 +274,24 @@ def run_pretrain(cfg: DictConfig) -> None:
         cfg.model.beta_anneal_epochs,
     )
 
+    # --- Early stopping setup (only when train_split != 'full' and patience > 0) ---
+    patience       = int(cfg.model.get("early_stopping_patience", 20))
+    eval_interval  = int(cfg.model.get("early_stopping_interval", 100))
+    use_early_stop = (train_split != "full") and (patience > 0)
+
+    # Pre-load loyo arrays for val if early stopping is active
+    if use_early_stop:
+        region = cfg.model.reg_subdir
+        base   = os.path.join(get_original_cwd(), cfg.model.inp_dir, region)
+        features_df_es = load_features(os.path.join(base, f"main_features_{region}.csv"))
+        targets_df_es  = load_oggm(os.path.join(base, f"oggm_targets_{region}.csv"))
+        merged_df_es   = merge_features_targets(features_df_es, targets_df_es)
+        loyo_df        = make_cv_splits(merged_df_es, held_years)["loyo"]
+        loyo_arrays    = prepare_arrays(loyo_df, ft_cols, scaler=scaler, target_scaler=target_scaler)
+        best_val_rmse  = float("inf")
+        best_params    = params
+        no_improve     = 0
+
     # --- Training loop ---
     n_data = len(train_arrays["targets"])
     train_step = make_train_step(
@@ -282,6 +300,7 @@ def run_pretrain(cfg: DictConfig) -> None:
         huber_delta=cfg.model.get("huber_delta", 0.5),
     )
     losses = []
+    stopped_epoch = cfg.model.model_nepochs
 
     for epoch in range(cfg.model.model_nepochs):
         rng, rng_step = jax.random.split(rng)
@@ -297,6 +316,27 @@ def run_pretrain(cfg: DictConfig) -> None:
         if (epoch + 1) % max(1, cfg.model.model_nepochs // 10) == 0:
             print(f"  epoch {epoch+1}/{cfg.model.model_nepochs}  loss={loss:.6f}  beta={beta:.3f}")
 
+        # --- Early stopping check ---
+        if use_early_stop and (epoch + 1) % eval_interval == 0:
+            rng, rng_es = jax.random.split(rng)
+            val_metrics = evaluate_split(model, params, loyo_arrays, rng_es,
+                                         n_samples=10, target_scaler=target_scaler)
+            val_rmse = val_metrics["rmse"]
+            if val_rmse < best_val_rmse:
+                best_val_rmse = val_rmse
+                best_params   = params
+                no_improve    = 0
+            else:
+                no_improve += 1
+            if no_improve >= patience:
+                print(f"  Early stopping at epoch {epoch+1} — best loyo RMSE={best_val_rmse:.4f}")
+                stopped_epoch = epoch + 1
+                break
+
+    if use_early_stop:
+        params = best_params
+        print(f"  Restored best params (loyo RMSE={best_val_rmse:.4f}, stopped at epoch {stopped_epoch})")
+
     # --- Save pretrained params ---
     mu_dict, log_sigma_dict = extract_vi_params(params["params"])
     params_path = os.path.join(cfg.model.output_dir, "pretrained_params.pkl")
@@ -309,7 +349,7 @@ def run_pretrain(cfg: DictConfig) -> None:
     ax.plot(losses)
     ax.set_xlabel("Epoch")
     ax.set_ylabel("ELBO loss")
-    ax.set_title("Stage 1 pretraining loss")
+    ax.set_title(f"Stage 1 pretraining loss (stopped epoch {stopped_epoch})")
     fig.savefig(os.path.join(cfg.model.output_dir, "training_loss.png"), dpi=150)
     plt.close(fig)
 

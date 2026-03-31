@@ -17,6 +17,8 @@ beta_anneal_epochs: 400       # 20% of model_nepochs
 seed: 0
 oggm_loss_fn: huber           # 'huber' or 'rmse'
 huber_delta: 0.5              # Huber transition point in scaled target units (only used if oggm_loss_fn=huber)
+early_stopping_patience: 20  # stop after this many eval intervals with no val improvement (0 = disabled)
+early_stopping_interval: 100 # evaluate val set every N epochs
 
 # --- Inference ---
 model_nensemble: 100

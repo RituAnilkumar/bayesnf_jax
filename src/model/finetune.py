@@ -73,8 +73,15 @@ def load_pretrained_prior(pretrained_params_path: str) -> tuple[dict, dict]:
     return prior  # (mu_dict, log_sigma_dict)
 
 
-def load_oggm_full(cfg: DictConfig) -> pd.DataFrame:
-    """Load the full (all rows) merged OGGM dataset for the configured region."""
+def load_oggm_full(cfg: DictConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Load the full merged OGGM dataset and the raw features for the configured region.
+
+    Returns:
+        (oggm_df, features_df) — oggm_df is the inner-join of features + OGGM targets
+        (years limited by OGGM target coverage); features_df is the full features file
+        including years beyond OGGM coverage (e.g. 2023/2024 for GLaMBIE evaluation).
+    """
     region = cfg.model.reg_subdir
     base   = os.path.join(get_original_cwd(), cfg.model.inp_dir, region)
 
@@ -84,7 +91,7 @@ def load_oggm_full(cfg: DictConfig) -> pd.DataFrame:
 
     held_years = select_held_years(merged_df["year"].unique().tolist())
     splits     = make_cv_splits(merged_df, held_years)
-    return splits["full"]
+    return splits["full"], features_df
 
 
 def load_temporal_avg(cfg: DictConfig, rgi_ids_ordered: np.ndarray) -> pd.DataFrame:
@@ -118,57 +125,67 @@ def load_temporal_avg(cfg: DictConfig, rgi_ids_ordered: np.ndarray) -> pd.DataFr
 
 def load_glambie(
     cfg: DictConfig,
-    oggm_years: set,
+    feature_years: set,
     temporal_avg_end_year: int,
-) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None]:
     """
-    Load and train/test split GLaMBIE data for the configured region.
+    Load and three-way split GLaMBIE data for the configured region.
 
-    Test split: GLaMBIE years that fall after the temporal_avg period end year.
-    These years are naturally held out because temporal_avg provides no constraint
-    on them — the model has not been trained to match any period-mean target
-    covering those years.
+    Splits:
+      train      — years <= temporal_avg_end_year  (used in finetuning loss)
+      val        — first post-temporal_avg year (typically 2021)  (early stopping)
+      final_test — remaining post-temporal_avg years (2022+)  (reported metrics)
 
-    Train split: GLaMBIE years within the temporal_avg period.
+    GLaMBIE years not present in feature_years (the full features file, not just
+    OGGM-merged rows) are dropped with a warning. Using feature_years instead of
+    oggm_years means 2023/2024 are retained when features exist but OGGM targets
+    don't extend that far.
 
     Args:
-        cfg:                  Hydra config (needs cfg.model.glambie_path)
-        oggm_years:           Set of integer years present in the OGGM feature data
-                              (GLaMBIE years must be a subset — asserted here)
-        temporal_avg_end_year: Last year of the temporal_avg period (e.g. 2020).
-                              GLaMBIE years > this are used as test set.
+        cfg:                   Hydra config (needs cfg.model.glambie_path)
+        feature_years:         Set of years present in the full features file.
+        temporal_avg_end_year: Last year of temporal_avg period (e.g. 2020).
 
     Returns:
-        (glambie_train_df, glambie_test_df) — either may be None if no data.
+        (glambie_train_df, glambie_val_df, glambie_final_test_df) — any may be None.
     """
     glambie_path = cfg.model.get("glambie_path", None)
     if not glambie_path or not os.path.exists(glambie_path):
-        return None, None
+        return None, None, None
 
-    df = _load_glambie_raw(glambie_path)  # long format: region, year, source, value_mwe, error_mwe
+    df = _load_glambie_raw(glambie_path)
     if df.empty:
-        return None, None
+        return None, None, None
 
-    # Keep only GLaMBIE years present in OGGM feature data — others have no
-    # glacier predictions to aggregate against, so they can't be evaluated.
     glambie_years = set(df["year"].unique())
-    out_of_range  = glambie_years - oggm_years
+    out_of_range  = glambie_years - feature_years
     if out_of_range:
-        print(f"  GLaMBIE years dropped (not in OGGM feature data): {sorted(out_of_range)}")
-        df = df[df["year"].isin(oggm_years)].reset_index(drop=True)
+        print(f"  GLaMBIE years dropped (no feature data): {sorted(out_of_range)}")
+        df = df[df["year"].isin(feature_years)].reset_index(drop=True)
     if df.empty:
-        return None, None
+        return None, None, None
 
-    # Split: years within temporal_avg period → train; years after → test
     train_df = df[df["year"] <= temporal_avg_end_year].reset_index(drop=True)
-    test_df  = df[df["year"] >  temporal_avg_end_year].reset_index(drop=True)
+    post_df  = df[df["year"] >  temporal_avg_end_year].reset_index(drop=True)
 
-    test_years = sorted(test_df["year"].unique().tolist())
-    if test_years:
-        print(f"  GLaMBIE test years (post-temporal_avg, held out): {test_years}")
+    post_years = sorted(post_df["year"].unique().tolist())
+    if post_years:
+        val_year   = post_years[0]         # e.g. 2021
+        test_years = post_years[1:]        # e.g. [2022, 2023, 2024]
+        val_df       = post_df[post_df["year"] == val_year].reset_index(drop=True)
+        final_test_df = post_df[post_df["year"].isin(test_years)].reset_index(drop=True) if test_years else pd.DataFrame()
+        print(f"  GLaMBIE val year (early stopping): {val_year}")
+        if test_years:
+            print(f"  GLaMBIE final test years: {test_years}")
+    else:
+        val_df        = pd.DataFrame()
+        final_test_df = pd.DataFrame()
 
-    return (train_df if not train_df.empty else None,
-            test_df  if not test_df.empty  else None)
+    return (
+        train_df      if not train_df.empty      else None,
+        val_df        if not val_df.empty        else None,
+        final_test_df if not final_test_df.empty else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +372,7 @@ def evaluate_glambie_test(
     model: BayesianNeuralField,
     params: dict,
     *,
-    oggm_df: pd.DataFrame,
+    features_df: pd.DataFrame,
     glambie_test_df: pd.DataFrame,
     ft_cols: list[str],
     rng: jax.Array,
@@ -364,17 +381,20 @@ def evaluate_glambie_test(
     target_scaler: tuple[float, float] | None = None,
 ) -> pd.DataFrame:
     """
-    Evaluate finetuned model against held-out GLaMBIE test years.
+    Evaluate model against held-out GLaMBIE test years.
 
-    For each test year, computes the MC predictive regional mean and compares
+    Uses features_df (the full features file, not the OGGM-merged df) so that
+    years with feature coverage but no OGGM targets (e.g. 2023/2024) are not
+    silently skipped.
+
+    For each test year, computes the MC area-weighted regional mean and compares
     against the GLaMBIE observation. Returns a DataFrame of per-observation metrics.
     """
     test_years = sorted(glambie_test_df["year"].unique().tolist())
     year_to_idx = {y: i for i, y in enumerate(test_years)}
 
-    # Filter OGGM rows to test years
-    test_mask = oggm_df["year"].isin(test_years)
-    test_df   = oggm_df[test_mask].reset_index(drop=True)
+    # Use full features file — includes years beyond OGGM target coverage
+    test_df = features_df[features_df["year"].isin(test_years)].reset_index(drop=True)
 
     time_idx, covariates, _, _ = build_model_inputs(test_df, ft_cols)
     if scaler is not None:
@@ -477,15 +497,20 @@ def run_finetune(cfg: DictConfig) -> None:
         print(f"WARNING: target_scaler.pkl not found at {target_scaler_path} — predictions will be unscaled")
 
     # --- Load data ---
-    oggm_df     = load_oggm_full(cfg)
+    oggm_df, features_df = load_oggm_full(cfg)
     oggm_years  = set(oggm_df["year"].unique().tolist())
+    # features_df covers years beyond OGGM target coverage (e.g. 2023/2024)
+    # and is used for GLaMBIE evaluation of those years
+    all_feature_years = set(features_df["year"].unique().tolist())
 
     # Get unique glaciers in factorize order (sort=True matches prepare_finetune_arrays)
     _, unique_glaciers = pd.factorize(oggm_df["rgi_id"], sort=True)
 
     temporal_avg_df              = load_temporal_avg(cfg, unique_glaciers)
     temporal_avg_end_year = int(temporal_avg_df["end_date"].max())
-    glambie_train_df, glambie_test_df = load_glambie(cfg, oggm_years, temporal_avg_end_year)
+    # Use all_feature_years so GLaMBIE years 2023/2024 aren't silently dropped
+    # when OGGM targets don't extend that far but features do.
+    glambie_train_df, glambie_val_df, glambie_final_test_df = load_glambie(cfg, all_feature_years, temporal_avg_end_year)
 
     # --- Prepare static arrays (factorize outside JIT) ---
     static_arrays = prepare_finetune_arrays(
@@ -536,8 +561,23 @@ def run_finetune(cfg: DictConfig) -> None:
         n_data=n_finetune_obs, target_mean=t_mean, target_std=t_std,
     )
 
+    # --- Early stopping setup (val = GLaMBIE 2021, if available) ---
+    patience      = int(cfg.model.get("early_stopping_patience", 20))
+    eval_interval = int(cfg.model.get("early_stopping_interval", 100))
+    use_early_stop = (patience > 0) and (glambie_val_df is not None)
+    if use_early_stop:
+        val_eval_kwargs = dict(
+            features_df=features_df, ft_cols=ft_cols,
+            n_samples=10, scaler=scaler, target_scaler=target_scaler,
+        )
+        best_val_rmse = float("inf")
+        best_params   = params
+        no_improve    = 0
+
     # --- Training loop ---
     losses = []
+    stopped_epoch = cfg.model.model_nepochs
+
     for epoch in range(cfg.model.model_nepochs):
         rng, rng_step = jax.random.split(rng)
         beta = beta_schedule[epoch]
@@ -545,6 +585,27 @@ def run_finetune(cfg: DictConfig) -> None:
         losses.append(float(loss))
         if (epoch + 1) % max(1, cfg.model.model_nepochs // 10) == 0:
             print(f"  epoch {epoch+1}/{cfg.model.model_nepochs}  loss={loss:.6f}  beta={beta:.3f}")
+
+        if use_early_stop and (epoch + 1) % eval_interval == 0:
+            rng, rng_es = jax.random.split(rng)
+            val_df_es = evaluate_glambie_test(model, params,
+                                              glambie_test_df=glambie_val_df,
+                                              rng=rng_es, **val_eval_kwargs)
+            val_rmse = float(np.sqrt((val_df_es["residual"] ** 2).mean()))
+            if val_rmse < best_val_rmse:
+                best_val_rmse = val_rmse
+                best_params   = params
+                no_improve    = 0
+            else:
+                no_improve += 1
+            if no_improve >= patience:
+                print(f"  Early stopping at epoch {epoch+1} — best val RMSE (2021)={best_val_rmse:.4f}")
+                stopped_epoch = epoch + 1
+                break
+
+    if use_early_stop:
+        params = best_params
+        print(f"  Restored best params (val RMSE={best_val_rmse:.4f}, stopped epoch {stopped_epoch})")
 
     # --- Save finetuned params ---
     mu_dict, log_sigma_dict = extract_vi_params(params["params"])
@@ -558,25 +619,25 @@ def run_finetune(cfg: DictConfig) -> None:
     ax.plot(losses)
     ax.set_xlabel("Epoch")
     ax.set_ylabel("ELBO loss")
-    ax.set_title("Stage 2 finetuning loss")
+    ax.set_title(f"Stage 2 finetuning loss (stopped epoch {stopped_epoch})")
     fig.savefig(os.path.join(cfg.model.output_dir, "training_loss.png"), dpi=150)
     plt.close(fig)
 
-    # --- GLaMBIE test evaluation ---
-    if glambie_test_df is not None:
+    # --- GLaMBIE final test evaluation (2022+) ---
+    if glambie_final_test_df is not None:
         eval_kwargs = dict(
-            oggm_df=oggm_df, glambie_test_df=glambie_test_df, ft_cols=ft_cols,
+            features_df=features_df, ft_cols=ft_cols,
             n_samples=cfg.model.model_nensemble, scaler=scaler, target_scaler=target_scaler,
         )
 
         # Pretrain baseline (prior params — no finetuning applied)
         rng, rng_pre = jax.random.split(rng)
-        pre_df = evaluate_glambie_test(model, prior_params, rng=rng_pre, **eval_kwargs)
+        pre_df = evaluate_glambie_test(model, prior_params, glambie_test_df=glambie_final_test_df, rng=rng_pre, **eval_kwargs)
         pre_df["stage"] = "pretrain"
 
         # Finetuned model
         rng, rng_fin = jax.random.split(rng)
-        fin_df = evaluate_glambie_test(model, params, rng=rng_fin, **eval_kwargs)
+        fin_df = evaluate_glambie_test(model, params, glambie_test_df=glambie_final_test_df, rng=rng_fin, **eval_kwargs)
         fin_df["stage"] = "finetune"
 
         metrics_df = pd.concat([pre_df, fin_df], ignore_index=True)
