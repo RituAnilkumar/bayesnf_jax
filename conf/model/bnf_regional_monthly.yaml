@@ -15,6 +15,8 @@ model_nepochs: 2000
 lr: 1.0e-3
 beta_anneal_epochs: 400       # 20% of model_nepochs
 seed: 0
+oggm_loss_fn: huber           # 'huber' or 'rmse'
+huber_delta: 0.5              # Huber transition point in scaled target units (only used if oggm_loss_fn=huber)
 
 # --- Inference ---
 model_nensemble: 100

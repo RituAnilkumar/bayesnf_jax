@@ -18,32 +18,41 @@ from .aggregation import glacier_annual_mean, regional_annual_mean
 # ---------------------------------------------------------------------------
 
 def oggm_loss(
-    preds: jax.Array,   # shape (N,)  model predictions [MWE/yr]
-    targets: jax.Array, # shape (N,)  OGGM targets [MWE/yr], pre-divided by 1000
-    delta: float = 0.5, # Huber transition point [MWE/yr] — MSE below, MAE above
+    preds: jax.Array,       # shape (N,)  model predictions (scaled units)
+    targets: jax.Array,     # shape (N,)  OGGM targets (scaled units)
+    loss_fn: str = "huber", # 'huber' or 'rmse'
+    delta: float = 0.5,     # Huber transition point in scaled units (only used if loss_fn='huber')
 ) -> jax.Array:
     """
-    Huber loss over all (glacier × year) point predictions.
+    Loss over all (glacier × year) point predictions.
 
-    Behaves as MSE for |residual| < delta and MAE (with a constant offset) for
-    larger residuals, limiting the influence of divergent OGGM outliers while
-    preserving well-conditioned gradients near zero.
+    Two modes controlled by loss_fn:
+      'huber' — Huber loss: MSE for |r| <= delta, MAE beyond. Limits influence
+                of outliers while preserving quadratic gradients near zero.
+      'rmse'  — Plain MSE (minimising MSE is equivalent to minimising RMSE).
 
-    delta=0.5 MWE/yr is a reasonable default: typical inter-annual variability
-    is ~0.1-0.3 MWE/yr, so residuals above 0.5 are genuine outliers.
+    Both operate on scaled target units (after target_scaler is applied).
+    delta should be set in scaled units accordingly (default 0.5 is reasonable
+    when targets are standardised to ~N(0,1)).
 
     Args:
-        preds:   Model predictions, shape (N,)   [MWE/yr]
-        targets: OGGM mass balance targets, shape (N,)  [MWE/yr]
-        delta:   Huber transition point in MWE/yr.
+        preds:   Model predictions, shape (N,)
+        targets: OGGM targets, shape (N,)
+        loss_fn: 'huber' or 'rmse'
+        delta:   Huber transition point (scaled units). Only used if loss_fn='huber'.
 
     Returns:
-        Scalar Huber loss.
+        Scalar loss value.
     """
     r = preds - targets
-    return jnp.mean(jnp.where(jnp.abs(r) <= delta,
-                               0.5 * r ** 2,
-                               delta * (jnp.abs(r) - 0.5 * delta)))
+    if loss_fn == "huber":
+        return jnp.mean(jnp.where(jnp.abs(r) <= delta,
+                                   0.5 * r ** 2,
+                                   delta * (jnp.abs(r) - 0.5 * delta)))
+    elif loss_fn == "rmse":
+        return jnp.mean(r ** 2)
+    else:
+        raise ValueError(f"Unknown oggm_loss_fn '{loss_fn}': must be 'huber' or 'rmse'")
 
 
 # ---------------------------------------------------------------------------

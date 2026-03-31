@@ -127,11 +127,18 @@ def prepare_arrays(
 # Training step (JIT-compiled)
 # ---------------------------------------------------------------------------
 
-def make_train_step(model: BayesianNeuralField, optimizer, n_data: int):
+def make_train_step(
+    model: BayesianNeuralField,
+    optimizer,
+    n_data: int,
+    loss_fn_name: str = "huber",
+    huber_delta: float = 0.5,
+):
     """
     Factory: returns a JIT-compiled train_step closed over model, optimizer, and n_data.
 
-    n_data is used to normalise KL to the per-data-point scale of the likelihood.
+    n_data normalises KL to the per-data-point scale of the likelihood.
+    loss_fn_name / huber_delta control the OGGM point-level loss (see oggm_loss).
 
     Returned function signature:
         train_step(params, opt_state, rng, time_index, covariates, targets, beta)
@@ -142,7 +149,7 @@ def make_train_step(model: BayesianNeuralField, optimizer, n_data: int):
         def loss_fn(params):
             rng_fwd, rng_kl = jax.random.split(rng)
             preds = model.apply(params, time_index, covariates, rng_fwd)
-            l_oggm = oggm_loss(preds, targets)
+            l_oggm = oggm_loss(preds, targets, loss_fn=loss_fn_name, delta=huber_delta)
 
             mu_dict, log_sigma_dict   = extract_vi_params(params["params"])
             prior_mu, prior_log_sigma = make_standard_normal_prior(mu_dict, log_sigma_dict)
@@ -269,7 +276,11 @@ def run_pretrain(cfg: DictConfig) -> None:
 
     # --- Training loop ---
     n_data = len(train_arrays["targets"])
-    train_step = make_train_step(model, optimizer, n_data)
+    train_step = make_train_step(
+        model, optimizer, n_data,
+        loss_fn_name=cfg.model.get("oggm_loss_fn", "huber"),
+        huber_delta=cfg.model.get("huber_delta", 0.5),
+    )
     losses = []
 
     for epoch in range(cfg.model.model_nepochs):
