@@ -112,10 +112,11 @@ def load_temporal_avg(cfg: DictConfig, rgi_ids_ordered: np.ndarray) -> pd.DataFr
     og_ids = set(rgi_ids_ordered)
     extra   = ta_ids - og_ids
     missing = og_ids - ta_ids
-    assert not extra,   f"temporal_avg has rgi_ids not in OGGM data: {extra}"
-    assert not missing, f"OGGM glaciers missing from temporal_avg: {missing}"
+    assert not extra, f"temporal_avg has rgi_ids not in OGGM data: {extra}"
+    if missing:
+        print(f"  Warning: {len(missing)} OGGM glaciers not in temporal_avg, excluded from temporal_avg loss: {missing}")
 
-    # Sort to match factorize ordering
+    # Sort to match factorize ordering (missing glaciers simply absent from df)
     id_to_idx = {rid: i for i, rid in enumerate(rgi_ids_ordered)}
     df = df[df["rgi_id"].isin(og_ids)].copy()
     df["_order"] = df["rgi_id"].map(id_to_idx)
@@ -220,13 +221,22 @@ def prepare_finetune_arrays(
     # at their boundary year (e.g. year 2010 appears only in 2010-2020, not 2000-2010).
     hugonnet_periods = []
     for (pstart, pend), period_df in temporal_avg_df.groupby(["start_date", "end_date"]):
-        pmask   = (oggm_df["year"] >= pstart) & (oggm_df["year"] < pend)
-        p_gids  = glacier_codes[pmask.to_numpy()]
-        p_tgt   = period_df["avg_mb_mwe"].to_numpy(dtype=np.float32)
-        p_errs  = period_df["uncertainty_mwe"].to_numpy(dtype=np.float32)
+        period_rgi_set = set(period_df["rgi_id"].unique())
+        # Only rows within the year window AND whose glacier has temporal_avg data
+        pmask = ((oggm_df["year"] >= pstart) & (oggm_df["year"] < pend)
+                 & oggm_df["rgi_id"].isin(period_rgi_set)).to_numpy()
+        # Re-factorize glacier IDs for this period to contiguous [0, n_period_glaciers)
+        period_rgi_series = oggm_df.loc[pmask, "rgi_id"]
+        p_gids_local, period_unique = pd.factorize(period_rgi_series, sort=True)
+        n_p_glaciers = len(period_unique)
+        # Reorder period_df rows to match sorted period_unique order
+        period_df_sorted = period_df.set_index("rgi_id").loc[period_unique].reset_index()
+        p_tgt   = period_df_sorted["avg_mb_mwe"].to_numpy(dtype=np.float32)
+        p_errs  = period_df_sorted["uncertainty_mwe"].to_numpy(dtype=np.float32)
         hugonnet_periods.append({
-            "period_mask": jnp.array(pmask.to_numpy()),
-            "glacier_ids": jnp.array(p_gids, dtype=jnp.int32),
+            "period_mask": jnp.array(pmask),
+            "glacier_ids": jnp.array(p_gids_local, dtype=jnp.int32),
+            "n_glaciers":  n_p_glaciers,
             "ta_targets":  jnp.array(p_tgt),
             "ta_errs":     jnp.array(p_errs),
         })
@@ -323,7 +333,7 @@ def make_train_step(
                 l_ta += temporal_avg_loss(
                     period_preds,
                     period["glacier_ids"],
-                    sa["n_glaciers"],
+                    period["n_glaciers"],
                     period["ta_targets"],
                     period["ta_errs"],
                 )
