@@ -79,8 +79,7 @@ python main_pipeline.py model=bnf_regional_seasonal/r06
 To include the OGGM cross-validation stage before the full pretrain:
 
 ```bash
-python main_pipeline.py model=bnf_regional_seasonal/r06 \
-    "pipeline.stages=[pretrain_cv,pretrain_full,finetune,predict]"
+python main_pipeline.py model=bnf_regional_seasonal/r06 pipeline.stages=[pretrain_cv,pretrain_full,finetune,predict]
 ```
 
 ### Individual stages
