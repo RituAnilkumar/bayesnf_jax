@@ -9,9 +9,9 @@ Observation data:
   - GLaMBIE regional annual means (gravimetry + altimetry, where available)
 
 GLaMBIE test evaluation:
-  - A held-out set of GLaMBIE years (specified in cfg.model.glambie_test_years)
-    is withheld from training and used to assess finetuned model fit.
-  - This replaces the loyo/logo cross-validation used in Stage 1.
+  - All post-temporal_avg GLaMBIE years (2021+) are withheld from training
+    and used to assess finetuned model fit.
+  - Early stopping monitors training loss, not a validation set.
 
 Outputs written to cfg.model.output_dir:
   - finetuned_params.pkl          (tuple of mu_dict, log_sigma_dict)
@@ -127,14 +127,13 @@ def load_glambie(
     cfg: DictConfig,
     feature_years: set,
     temporal_avg_end_year: int,
-) -> tuple[pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None]:
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """
-    Load and three-way split GLaMBIE data for the configured region.
+    Load and two-way split GLaMBIE data for the configured region.
 
     Splits:
-      train      — years <= temporal_avg_end_year  (used in finetuning loss)
-      val        — first post-temporal_avg year (typically 2021)  (early stopping)
-      final_test — remaining post-temporal_avg years (2022+)  (reported metrics)
+      train — years <= temporal_avg_end_year  (used in finetuning loss)
+      test  — all post-temporal_avg years (2021+)  (reported metrics only)
 
     GLaMBIE years not present in feature_years (the full features file, not just
     OGGM-merged rows) are dropped with a warning. Using feature_years instead of
@@ -147,15 +146,15 @@ def load_glambie(
         temporal_avg_end_year: Last year of temporal_avg period (e.g. 2020).
 
     Returns:
-        (glambie_train_df, glambie_val_df, glambie_final_test_df) — any may be None.
+        (glambie_train_df, glambie_test_df) — either may be None.
     """
     glambie_path = cfg.model.get("glambie_path", None)
     if not glambie_path or not os.path.exists(glambie_path):
-        return None, None, None
+        return None, None
 
     df = _load_glambie_raw(glambie_path)
     if df.empty:
-        return None, None, None
+        return None, None
 
     glambie_years = set(df["year"].unique())
     out_of_range  = glambie_years - feature_years
@@ -163,28 +162,18 @@ def load_glambie(
         print(f"  GLaMBIE years dropped (no feature data): {sorted(out_of_range)}")
         df = df[df["year"].isin(feature_years)].reset_index(drop=True)
     if df.empty:
-        return None, None, None
+        return None, None
 
     train_df = df[df["year"] <= temporal_avg_end_year].reset_index(drop=True)
-    post_df  = df[df["year"] >  temporal_avg_end_year].reset_index(drop=True)
+    test_df  = df[df["year"] >  temporal_avg_end_year].reset_index(drop=True)
 
-    post_years = sorted(post_df["year"].unique().tolist())
-    if post_years:
-        val_year   = post_years[0]         # e.g. 2021
-        test_years = post_years[1:]        # e.g. [2022, 2023, 2024]
-        val_df       = post_df[post_df["year"] == val_year].reset_index(drop=True)
-        final_test_df = post_df[post_df["year"].isin(test_years)].reset_index(drop=True) if test_years else pd.DataFrame()
-        print(f"  GLaMBIE val year (early stopping): {val_year}")
-        if test_years:
-            print(f"  GLaMBIE final test years: {test_years}")
-    else:
-        val_df        = pd.DataFrame()
-        final_test_df = pd.DataFrame()
+    test_years = sorted(test_df["year"].unique().tolist())
+    if test_years:
+        print(f"  GLaMBIE test years: {test_years}")
 
     return (
-        train_df      if not train_df.empty      else None,
-        val_df        if not val_df.empty        else None,
-        final_test_df if not final_test_df.empty else None,
+        train_df if not train_df.empty else None,
+        test_df  if not test_df.empty  else None,
     )
 
 
@@ -510,7 +499,7 @@ def run_finetune(cfg: DictConfig) -> None:
     temporal_avg_end_year = int(temporal_avg_df["end_date"].max())
     # Use all_feature_years so GLaMBIE years 2023/2024 aren't silently dropped
     # when OGGM targets don't extend that far but features do.
-    glambie_train_df, glambie_val_df, glambie_final_test_df = load_glambie(cfg, all_feature_years, temporal_avg_end_year)
+    glambie_train_df, glambie_test_df = load_glambie(cfg, all_feature_years, temporal_avg_end_year)
 
     # --- Prepare static arrays (factorize outside JIT) ---
     static_arrays = prepare_finetune_arrays(
@@ -561,18 +550,14 @@ def run_finetune(cfg: DictConfig) -> None:
         n_data=n_finetune_obs, target_mean=t_mean, target_std=t_std,
     )
 
-    # --- Early stopping setup (val = GLaMBIE 2021, if available) ---
+    # --- Early stopping setup (monitors training loss, not validation) ---
     patience      = int(cfg.model.get("early_stopping_patience", 20))
     eval_interval = int(cfg.model.get("early_stopping_interval", 100))
-    use_early_stop = (patience > 0) and (glambie_val_df is not None)
+    use_early_stop = patience > 0
     if use_early_stop:
-        val_eval_kwargs = dict(
-            features_df=features_df, ft_cols=ft_cols,
-            n_samples=10, scaler=scaler, target_scaler=target_scaler,
-        )
-        best_val_rmse = float("inf")
-        best_params   = params
-        no_improve    = 0
+        best_loss   = float("inf")
+        best_params = params
+        no_improve  = 0
 
     # --- Training loop ---
     losses = []
@@ -582,30 +567,26 @@ def run_finetune(cfg: DictConfig) -> None:
         rng, rng_step = jax.random.split(rng)
         beta = beta_schedule[epoch]
         params, opt_state, loss = train_step(params, opt_state, rng_step, beta)
-        losses.append(float(loss))
+        loss_val = float(loss)
+        losses.append(loss_val)
         if (epoch + 1) % max(1, cfg.model.model_nepochs // 10) == 0:
-            print(f"  epoch {epoch+1}/{cfg.model.model_nepochs}  loss={loss:.6f}  beta={beta:.3f}")
+            print(f"  epoch {epoch+1}/{cfg.model.model_nepochs}  loss={loss_val:.6f}  beta={beta:.3f}")
 
         if use_early_stop and (epoch + 1) % eval_interval == 0:
-            rng, rng_es = jax.random.split(rng)
-            val_df_es = evaluate_glambie_test(model, params,
-                                              glambie_test_df=glambie_val_df,
-                                              rng=rng_es, **val_eval_kwargs)
-            val_rmse = float(np.sqrt((val_df_es["residual"] ** 2).mean()))
-            if val_rmse < best_val_rmse:
-                best_val_rmse = val_rmse
-                best_params   = params
-                no_improve    = 0
+            if loss_val < best_loss:
+                best_loss   = loss_val
+                best_params = params
+                no_improve  = 0
             else:
                 no_improve += 1
             if no_improve >= patience:
-                print(f"  Early stopping at epoch {epoch+1} — best val RMSE (2021)={best_val_rmse:.4f}")
+                print(f"  Early stopping at epoch {epoch+1} — best train loss={best_loss:.6f}")
                 stopped_epoch = epoch + 1
                 break
 
     if use_early_stop:
         params = best_params
-        print(f"  Restored best params (val RMSE={best_val_rmse:.4f}, stopped epoch {stopped_epoch})")
+        print(f"  Restored best params (train loss={best_loss:.6f}, stopped epoch {stopped_epoch})")
 
     # --- Save finetuned params ---
     mu_dict, log_sigma_dict = extract_vi_params(params["params"])
@@ -623,8 +604,8 @@ def run_finetune(cfg: DictConfig) -> None:
     fig.savefig(os.path.join(cfg.model.output_dir, "training_loss.png"), dpi=150)
     plt.close(fig)
 
-    # --- GLaMBIE final test evaluation (2022+) ---
-    if glambie_final_test_df is not None:
+    # --- GLaMBIE test evaluation (all post-temporal_avg years: 2021+) ---
+    if glambie_test_df is not None:
         eval_kwargs = dict(
             features_df=features_df, ft_cols=ft_cols,
             n_samples=cfg.model.model_nensemble, scaler=scaler, target_scaler=target_scaler,
@@ -632,12 +613,12 @@ def run_finetune(cfg: DictConfig) -> None:
 
         # Pretrain baseline (prior params — no finetuning applied)
         rng, rng_pre = jax.random.split(rng)
-        pre_df = evaluate_glambie_test(model, prior_params, glambie_test_df=glambie_final_test_df, rng=rng_pre, **eval_kwargs)
+        pre_df = evaluate_glambie_test(model, prior_params, glambie_test_df=glambie_test_df, rng=rng_pre, **eval_kwargs)
         pre_df["stage"] = "pretrain"
 
         # Finetuned model
         rng, rng_fin = jax.random.split(rng)
-        fin_df = evaluate_glambie_test(model, params, glambie_test_df=glambie_final_test_df, rng=rng_fin, **eval_kwargs)
+        fin_df = evaluate_glambie_test(model, params, glambie_test_df=glambie_test_df, rng=rng_fin, **eval_kwargs)
         fin_df["stage"] = "finetune"
 
         metrics_df = pd.concat([pre_df, fin_df], ignore_index=True)
