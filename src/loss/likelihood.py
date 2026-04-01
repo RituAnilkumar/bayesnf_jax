@@ -90,8 +90,7 @@ def temporal_avg_loss(
         Scalar inverse-variance weighted MSE.
     """
     pred_means = glacier_annual_mean(preds, glacier_ids, n_glaciers)  # (n_glaciers,)
-    uncertainty_floored = jnp.maximum(uncertainty, 0.1)
-    return jnp.mean(((pred_means - avg_mb) / uncertainty_floored) ** 2)
+    return jnp.mean(((pred_means - avg_mb) / uncertainty) ** 2)
 
 
 # ---------------------------------------------------------------------------
