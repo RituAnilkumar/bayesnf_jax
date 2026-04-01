@@ -222,6 +222,11 @@ def run_pretrain(cfg: DictConfig) -> None:
     Reads cfg.model.train_split to determine data split.
     Saves outputs to cfg.model.output_dir.
     """
+    print("default_backend:", jax.default_backend())
+    print("devices:", jax.devices())
+    print("local_device_count:", jax.local_device_count())
+    print("device_count:", jax.device_count())
+
     os.makedirs(cfg.model.output_dir, exist_ok=True)
     rng = jax.random.PRNGKey(cfg.model.seed)
 
