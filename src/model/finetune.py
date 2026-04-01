@@ -318,9 +318,11 @@ def make_train_step(
         def loss_fn(params):
             rng_period, rng_glambie = jax.random.split(rng)
 
-            # --- Temporal-avg loss — sum over all Hugonnet periods ---
+            # --- Temporal-avg loss — mean over all Hugonnet periods ---
             # Python loop unrolled at JIT trace time (fixed number of periods).
             # Same rng_period reused across periods: consistent weight sample per step.
+            # Divide by n_periods so the total temporal_avg contribution stays O(1)
+            # (same scale as a single period), matching the GLaMBIE term scale.
             l_ta = jnp.array(0.0)
             for period in sa["hugonnet_periods"]:
                 period_preds_scaled = model.apply(
@@ -337,6 +339,7 @@ def make_train_step(
                     period["ta_targets"],
                     period["ta_errs"],
                 )
+            l_ta = l_ta / sa["n_hugonnet_periods"]
 
             # --- GLaMBIE loss (unscale model output → physical MWE/yr) ---
             if has_glambie:
@@ -596,10 +599,11 @@ def run_finetune(cfg: DictConfig) -> None:
     opt_state = optimizer.init(params)
 
     # --- Beta schedule + train step ---
-    # n_data for KL normalisation: sum the actual observed-glacier count per Hugonnet
-    # period (may differ across periods after is_cor exclusion), plus the GLaMBIE
-    # (year, source) observation count.
-    n_finetune_obs = sum(p["n_glaciers"] for p in static_arrays["hugonnet_periods"])
+    # n_data for KL normalisation: the temporal_avg loss is now averaged over periods,
+    # so its effective observation count is one period's worth (mean across periods),
+    # not the sum.  GLaMBIE observation count is added as before.
+    _period_counts = [p["n_glaciers"] for p in static_arrays["hugonnet_periods"]]
+    n_finetune_obs = round(sum(_period_counts) / len(_period_counts)) if _period_counts else 0
     if static_arrays["has_glambie"]:
         n_finetune_obs += int(static_arrays["obs_year_idx"].shape[0])
 
@@ -612,6 +616,11 @@ def run_finetune(cfg: DictConfig) -> None:
     )
 
     # --- Early stopping setup (monitors training loss, not validation) ---
+    # IMPORTANT: early stopping only activates AFTER beta annealing completes.
+    # During annealing the ELBO total increases even as the model improves (KL
+    # weight is ramping up), so the minimum total loss often falls at an early
+    # low-beta checkpoint.  Tracking best_params during annealing would restore
+    # an undertrained model.  We start tracking only once beta = 1.0.
     patience      = int(cfg.model.get("early_stopping_patience", 20))
     eval_interval = int(cfg.model.get("early_stopping_interval", 100))
     use_early_stop = patience > 0
@@ -633,7 +642,8 @@ def run_finetune(cfg: DictConfig) -> None:
         if (epoch + 1) % max(1, cfg.model.model_nepochs // 10) == 0:
             print(f"  epoch {epoch+1}/{cfg.model.model_nepochs}  loss={loss_val:.6f}  beta={beta:.3f}")
 
-        if use_early_stop and (epoch + 1) % eval_interval == 0:
+        annealing_done = (epoch + 1) >= cfg.model.beta_anneal_epochs
+        if use_early_stop and annealing_done and (epoch + 1) % eval_interval == 0:
             if loss_val < best_loss:
                 best_loss   = loss_val
                 best_params = params
@@ -645,7 +655,7 @@ def run_finetune(cfg: DictConfig) -> None:
                 stopped_epoch = epoch + 1
                 break
 
-    if use_early_stop:
+    if use_early_stop and best_loss < float("inf"):
         params = best_params
         print(f"  Restored best params (train loss={best_loss:.6f}, stopped epoch {stopped_epoch})")
 
