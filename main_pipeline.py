@@ -24,8 +24,9 @@ Note: pretrain_cv and pretrain_full write to separate output directories so
 they do not overwrite each other.
 """
 
+import os
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from src.model.pretrain import run_pretrain
 from src.model.finetune import run_finetune
@@ -51,23 +52,22 @@ def main(cfg: DictConfig) -> None:
         cfg_full = cfg.copy()
         cfg_full.model.train_split = "full"
         run_pretrain(cfg_full)
+        # Always override pretrained_params_path to where pretrain_full actually wrote it,
+        # regardless of what the region yaml says (region yaml may point to a different dir).
+        actual_pretrained = os.path.abspath(
+            os.path.join(cfg.model.output_dir, "pretrained_params.pkl")
+        )
+        OmegaConf.update(cfg, "model.pretrained_params_path", actual_pretrained)
 
     if "finetune" in stages:
-        # Derive pretrained_params_path from the pretrain output dir if not set
-        if not cfg.model.get("pretrained_params_path"):
-            import os
-            cfg.model.pretrained_params_path = os.path.join(
-                cfg.model.output_dir, "pretrained_params.pkl"
-            )
         run_finetune(cfg)
+        # Always override finetuned_params_path to where finetune actually wrote it.
+        actual_finetuned = os.path.abspath(
+            os.path.join(cfg.model.output_dir, "finetuned_params.pkl")
+        )
+        OmegaConf.update(cfg, "model.finetuned_params_path", actual_finetuned)
 
     if "predict" in stages:
-        # Derive finetuned_params_path from the finetune output dir if not set
-        if not cfg.model.get("finetuned_params_path"):
-            import os
-            cfg.model.finetuned_params_path = os.path.join(
-                cfg.model.output_dir, "finetuned_params.pkl"
-            )
         run_predict(cfg)
 
 
