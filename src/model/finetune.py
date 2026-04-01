@@ -596,9 +596,10 @@ def run_finetune(cfg: DictConfig) -> None:
     opt_state = optimizer.init(params)
 
     # --- Beta schedule + train step ---
-    # n_data for KL normalisation: count each Hugonnet period as n_glaciers observations,
-    # plus the GLaMBIE (year, source) observation count.
-    n_finetune_obs = static_arrays["n_glaciers"] * static_arrays["n_hugonnet_periods"]
+    # n_data for KL normalisation: sum the actual observed-glacier count per Hugonnet
+    # period (may differ across periods after is_cor exclusion), plus the GLaMBIE
+    # (year, source) observation count.
+    n_finetune_obs = sum(p["n_glaciers"] for p in static_arrays["hugonnet_periods"])
     if static_arrays["has_glambie"]:
         n_finetune_obs += int(static_arrays["obs_year_idx"].shape[0])
 
