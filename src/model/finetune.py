@@ -594,9 +594,27 @@ def run_finetune(cfg: DictConfig) -> None:
     # Keep a copy of the pretrained params for baseline evaluation after finetuning
     prior_params = params
 
-    # --- Optimizer ---
-    optimizer = optax.adam(cfg.model.lr)
-    opt_state = optimizer.init(params)
+    # --- Optimizer: finetune_lr + cosine decay starting after beta annealing + grad clipping ---
+    # Cosine decay runs from beta_anneal_epochs → model_nepochs (the post-annealing window).
+    # During beta annealing the LR is held constant at finetune_lr to preserve the flexibility
+    # needed while KL weight is still ramping up.
+    finetune_lr     = float(cfg.model.get("finetune_lr", cfg.model.lr))
+    grad_clip_norm  = float(cfg.model.get("grad_clip_norm", 0.0))
+    anneal_epochs   = int(cfg.model.beta_anneal_epochs)
+    decay_steps     = max(1, cfg.model.model_nepochs - anneal_epochs)
+
+    lr_schedule = optax.join_schedules(
+        schedules=[
+            optax.constant_schedule(finetune_lr),
+            optax.cosine_decay_schedule(finetune_lr, decay_steps=decay_steps, alpha=0.05),
+        ],
+        boundaries=[anneal_epochs],
+    )
+    optimizer_chain = [optax.adam(lr_schedule)]
+    if grad_clip_norm > 0.0:
+        optimizer_chain.insert(0, optax.clip_by_global_norm(grad_clip_norm))
+    optimizer  = optax.chain(*optimizer_chain)
+    opt_state  = optimizer.init(params)
 
     # --- Beta schedule + train step ---
     # n_data for KL normalisation: the temporal_avg loss is now averaged over periods,

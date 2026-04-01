@@ -90,7 +90,8 @@ def temporal_avg_loss(
         Scalar inverse-variance weighted MSE.
     """
     pred_means = glacier_annual_mean(preds, glacier_ids, n_glaciers)  # (n_glaciers,)
-    return jnp.mean(((pred_means - avg_mb) / uncertainty) ** 2)
+    uncertainty_floored = jnp.maximum(uncertainty, 0.1)
+    return jnp.mean(((pred_means - avg_mb) / uncertainty_floored) ** 2)
 
 
 # ---------------------------------------------------------------------------
@@ -136,4 +137,5 @@ def glambie_loss(
     """
     pred_regional_means = regional_annual_mean(preds, year_ids, n_years, glacier_areas)  # (n_years,)
     pred_at_obs = pred_regional_means[obs_year_idx]                                       # (N_obs,)
-    return jnp.mean(((pred_at_obs - glambie_means) / glambie_errs) ** 2)
+    glambie_errs_floored = jnp.maximum(glambie_errs, 0.1)
+    return jnp.mean(((pred_at_obs - glambie_means) / glambie_errs_floored) ** 2)

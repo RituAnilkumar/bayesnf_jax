@@ -13,6 +13,8 @@ fourier_seed: 42
 # --- Training ---
 model_nepochs: 40000
 lr: 1.0e-3
+finetune_lr: 2.0e-4          # Stage 2 initial LR (lower than pretrain; cosine-decayed after beta annealing)
+grad_clip_norm: 2.0           # global gradient norm clip for Stage 2 (0 = disabled)
 beta_anneal_epochs: 10000       # 20% of model_nepochs — beta ramps 0→1 over this window
 seed: 0
 oggm_loss_fn: rmse           # 'huber' or 'rmse'
