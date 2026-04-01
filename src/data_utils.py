@@ -218,7 +218,7 @@ def load_temporal_avg(path: str) -> pd.DataFrame:
     """
     Load per-glacier temporal-average mass balance targets (legacy format).
 
-    Values are already in MWE/yr. Covers the period 2001-2020 per glacier.
+    Values are already in MWE/yr. Period range varies — typically 2001-2020.
 
     Input columns expected: rgi_id, start_date, end_date,
                             avg_mb_mwe, avg_mb_gt, uncertainty_mwe, uncertainty_gt

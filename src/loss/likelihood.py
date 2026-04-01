@@ -68,7 +68,7 @@ def temporal_avg_loss(
 ) -> jax.Array:
     """
     Inverse-variance weighted MSE between predicted per-glacier period means
-    and temporal-average observations (typically 2001-2020).
+    and temporal-average observations (longest Hugonnet period, typically 2000-2020).
 
     L_temporal_avg = (1/N_glaciers) * sum_i [
         (pred_period_mean_i - avg_mb_i)^2 / uncertainty_i^2

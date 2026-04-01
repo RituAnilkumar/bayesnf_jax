@@ -29,7 +29,9 @@ ELBO with BayesNF's built-in observation models.
 
 The motivating observation dataset (from `oggm_combined_loss.py`) demonstrates
 a need to train on aggregated rather than point-level observations:
-- Hugonnet (2021): 20-year per-glacier mass balance averages (2000-2019)
+- Hugonnet (2021): per-glacier mass balance averages over multiple periods
+  (2000-2010, 2000-2020, 2010-2020); finetuning uses only the single longest
+  period (2000-2020) — decadal periods have higher uncertainties and hurt performance
 - GLaMBIE: annual regional mass balance aggregates from gravimetry and/or
   altimetry, available for some regions and years only
 
@@ -249,11 +251,15 @@ aggregate) rather than an approximation.
 
 ### Hugonnet data format expected
 
-Input file: r{nn}_hugonnet.csv
-Required columns: rgi_id, dmdtda, err_dmdtda
-(Other Hugonnet columns — period, area, dmdt, err_dmdt — are not used)
-The rgi_id ordering in this file must be aligned with the factorized
-glacier codes from the training data (assert this explicitly in code).
+Input file: dmdtda_hugo.csv per region, extracted from the full hugonnet_dmdt.csv
+using extract_hugonnet_region() in data_utils.py.
+Required columns: rgiid, period ('YYYY-MM-DD_YYYY-MM-DD'), dmdtda, err_dmdtda
+The file may contain multiple periods (2000-2010, 2000-2020, 2010-2020).
+finetune.py selects only the longest period at runtime (by comparing end_date - start_date).
+Correlated glaciers (is_cor=True) are excluded by default — these are glaciers with
+no direct geodetic observation for a given period (Hugonnet interpolated them).
+Glacier alignment with factorized OGGM codes is handled per-period by pd.factorize
+inside prepare_finetune_arrays().
 
 ### GLaMBIE data format expected
 

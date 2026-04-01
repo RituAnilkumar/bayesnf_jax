@@ -36,11 +36,12 @@ Aspect, Zmax, Zmed, Slope, Zmin, Area
 year, rgi_id, mass_balance   (units: mm/yr — converted to MWE/yr automatically)
 ```
 
-**`temporal_avg_targets_r{nn}.csv`**
+**`temporal_avg_targets_r{nn}.csv`** (or `dmdtda_hugo.csv`)
 ```
-rgi_id, start_date, end_date, avg_mb_mwe, avg_mb_gt, uncertainty_mwe, uncertainty_gt
+rgi_id, start_date, end_date, avg_mb_mwe, uncertainty_mwe
 ```
-Must cover every glacier in `main_features`. Period is typically 2001–2020.
+May contain multiple Hugonnet periods (e.g. 2000-2010, 2000-2020, 2010-2020).
+Finetuning automatically selects the single longest period (typically 2000–2020).
 
 **`glambie_targets_r{nn}.csv`**
 ```
@@ -145,9 +146,10 @@ outputs/
 - `train` = neither held
 
 **Stage 2 (finetune):**
-- No held-out data from temporal_avg (2001–2020 all used)
+- No held-out data from temporal_avg (longest Hugonnet period fully used)
 - GLaMBIE years ≤ temporal_avg end year → training loss
-- GLaMBIE years > temporal_avg end year (typically 2021–2024) → validation, automatically held out by construction
+- GLaMBIE years > temporal_avg end year (typically 2021–2024) → test, automatically held out by construction
+- Early stopping monitors training loss only (no validation set); activates after beta annealing completes
 
 ---
 

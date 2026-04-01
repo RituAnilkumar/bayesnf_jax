@@ -16,7 +16,7 @@ Output files:
   glambie_scatter_finetune.png    — GLaMBIE combined annual regional mean vs model
   glambie_scatter_pretrain.png
   cumulative_gt.png               — cumulative Gt: pretrain, finetune, OGGM vs GLaMBIE
-  hugonnet_scatter_{p}_{finetune,pretrain}.png — per-period glacier scatter
+  hugonnet_scatter_{finetune,pretrain}.png    — per-glacier Hugonnet scatter (longest period)
 """
 
 import os

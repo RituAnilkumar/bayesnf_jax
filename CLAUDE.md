@@ -161,14 +161,18 @@ architectural components are needed.
 - Load pretrained_params.pkl as the prior (Bayesian continual learning)
 - Prior: N(mu_pre, sigma_pre) — NOT standard normal
 - KL: KL(finetuned posterior || pretrained posterior), analytic
-- Three likelihood terms, all in MWE/yr:
+- Two likelihood terms, all in MWE/yr:
 
   L_temporal_avg = (1/N_glaciers) * sum_i [
       (pred_period_mean_i - avg_mb_mwe_i)² / uncertainty_mwe_i²
   ]
   where:
+  - Only the single longest Hugonnet period is used (typically 2000-2020).
+    Decadal periods (2000-2010, 2010-2020) have higher uncertainties and
+    empirically reduce performance — finetune.py selects the longest period
+    at runtime by comparing (end_date - start_date) spans.
   - pred_period_mean_i = mean of per-year predictions for glacier i over
-    start_date–end_date (typically 2001-2020), via segment_sum / count_sum
+    start_date–end_date, via segment_sum / count_sum
   - avg_mb_mwe_i, uncertainty_mwe_i are already in MWE/yr — no unit conversion
 
   L_glambie = (1/N_obs) * sum_k [
@@ -228,7 +232,9 @@ Follow the same Hydra override pattern as jungle3:
   (one valid primary observation anywhere disables combined for the whole file)
 - Year column in OGGM data may be int (annual) or date string (seasonal) —
   handle both as in jungle3/src/model/bayesnf_oggm.py
-- Temporal avg period is 2001-2020 per glacier (start_date/end_date columns)
+- Temporal avg: only the single longest Hugonnet period is used (typically
+  2000-2020). The dmdtda CSV may contain multiple periods — finetune.py
+  filters to the longest span at runtime. (start_date/end_date columns)
 - GLaMBIE source values (after load_glambie reshape): 'altimetry', 'gravimetry', 'combined'
 - GLaMBIE year derived from floor(end_date) — end_date is a fractional year
 

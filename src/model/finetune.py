@@ -214,11 +214,9 @@ def prepare_finetune_arrays(
     glacier_codes, unique_glaciers = pd.factorize(oggm_df["rgi_id"], sort=True)
     n_glaciers = len(unique_glaciers)
 
-    # Multi-period Hugonnet temporal-avg arrays.
-    # temporal_avg_df is grouped by (start_date, end_date) — one group per Hugonnet period.
-    # temporal_avg_df is already sorted by glacier factorize order (asserted upstream).
-    # Period mask uses exclusive end (year < end_year) so decadal periods don't overlap
-    # at their boundary year (e.g. year 2010 appears only in 2010-2020, not 2000-2010).
+    # Hugonnet temporal-avg arrays — currently always a single period (longest span).
+    # The loop handles the general case; at present temporal_avg_df contains one period.
+    # Period mask uses exclusive end (year < end_year) — consistent convention.
     hugonnet_periods = []
     for (pstart, pend), period_df in temporal_avg_df.groupby(["start_date", "end_date"]):
         period_rgi_set = set(period_df["rgi_id"].unique())
@@ -318,11 +316,10 @@ def make_train_step(
         def loss_fn(params):
             rng_period, rng_glambie = jax.random.split(rng)
 
-            # --- Temporal-avg loss — mean over all Hugonnet periods ---
-            # Python loop unrolled at JIT trace time (fixed number of periods).
-            # Same rng_period reused across periods: consistent weight sample per step.
-            # Divide by n_periods so the total temporal_avg contribution stays O(1)
-            # (same scale as a single period), matching the GLaMBIE term scale.
+            # --- Temporal-avg loss (single Hugonnet period) ---
+            # Loop kept for generality; n_hugonnet_periods == 1 in current usage.
+            # Dividing by n_periods is a no-op (÷1) but keeps scale correct if
+            # multiple periods are ever re-enabled.
             l_ta = jnp.array(0.0)
             for period in sa["hugonnet_periods"]:
                 period_preds_scaled = model.apply(
@@ -556,7 +553,18 @@ def run_finetune(cfg: DictConfig) -> None:
     # Get unique glaciers in factorize order (sort=True matches prepare_finetune_arrays)
     _, unique_glaciers = pd.factorize(oggm_df["rgi_id"], sort=True)
 
-    temporal_avg_df              = load_temporal_avg(cfg, unique_glaciers)
+    temporal_avg_df       = load_temporal_avg(cfg, unique_glaciers)
+    # Use only the longest Hugonnet period (2000-2020). The decadal periods
+    # (2000-2010, 2010-2020) have higher uncertainties and empirically hurt performance.
+    _spans = temporal_avg_df.groupby(["start_date", "end_date"]).size().reset_index(name="_n")
+    _spans["_span"] = _spans["end_date"] - _spans["start_date"]
+    _best = _spans.sort_values("_span", ascending=False).iloc[0]
+    temporal_avg_df = temporal_avg_df[
+        (temporal_avg_df["start_date"] == _best["start_date"]) &
+        (temporal_avg_df["end_date"]   == _best["end_date"])
+    ].reset_index(drop=True)
+    print(f"  Using Hugonnet period {int(_best['start_date'])}-{int(_best['end_date'])} only "
+          f"({len(temporal_avg_df)} glaciers)")
     temporal_avg_end_year = int(temporal_avg_df["end_date"].max())
     # Use all_feature_years so GLaMBIE years 2023/2024 aren't silently dropped
     # when OGGM targets don't extend that far but features do.
@@ -617,9 +625,8 @@ def run_finetune(cfg: DictConfig) -> None:
     opt_state  = optimizer.init(params)
 
     # --- Beta schedule + train step ---
-    # n_data for KL normalisation: the temporal_avg loss is now averaged over periods,
-    # so its effective observation count is one period's worth (mean across periods),
-    # not the sum.  GLaMBIE observation count is added as before.
+    # n_data for KL normalisation: single Hugonnet period, so n_glaciers for that period.
+    # GLaMBIE observation count is added as before.
     _period_counts = [p["n_glaciers"] for p in static_arrays["hugonnet_periods"]]
     n_finetune_obs = round(sum(_period_counts) / len(_period_counts)) if _period_counts else 0
     if static_arrays["has_glambie"]:
