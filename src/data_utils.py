@@ -48,6 +48,9 @@ def fit_target_scaler(targets: np.ndarray) -> tuple[float, float]:
     Returns:
         (mean, std) as Python floats.
     """
+    targets = targets[np.isfinite(targets)]
+    if len(targets) == 0:
+        raise ValueError("fit_target_scaler: no finite values in targets — check OGGM data for NaNs/Infs")
     return float(targets.mean()), float(targets.std())
 
 
@@ -106,6 +109,10 @@ def load_oggm(path: str) -> pd.DataFrame:
     Returns columns:        rgi_id, year, time_index, mass_balance_mwe
     """
     df = pd.read_csv(path)
+    n_before = len(df)
+    df = df.dropna(subset=["mass_balance"])
+    if len(df) < n_before:
+        print(f"  WARNING: load_oggm dropped {n_before - len(df)} rows with NaN mass_balance from {path}")
     df["mass_balance_mwe"] = df["mass_balance"] / 1000.0
     df["time_index"] = df["year"] - T_MIN
     return df[["rgi_id", "year", "time_index", "mass_balance_mwe"]]
