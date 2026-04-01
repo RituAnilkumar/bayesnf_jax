@@ -11,13 +11,13 @@ n_fourier: 8
 fourier_seed: 42
 
 # --- Training ---
-model_nepochs: 20000
+model_nepochs: 40000
 lr: 1.0e-3
-beta_anneal_epochs: 4000       # 20% of model_nepochs — beta ramps 0→1 over this window
+beta_anneal_epochs: 10000       # 20% of model_nepochs — beta ramps 0→1 over this window
 seed: 0
 oggm_loss_fn: rmse           # 'huber' or 'rmse'
 huber_delta: 0.5              # Huber transition point in scaled target units (only used if oggm_loss_fn=huber)
-early_stopping_patience: 200  # stop after this many eval intervals with no val improvement (0 = disabled)
+early_stopping_patience: 100  # stop after this many eval intervals with no val improvement (0 = disabled)
 early_stopping_interval: 1000 # evaluate val set every N epochs
 
 # --- Inference ---
