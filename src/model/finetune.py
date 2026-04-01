@@ -377,6 +377,44 @@ def make_train_step(
 # GLaMBIE test evaluation
 # ---------------------------------------------------------------------------
 
+def evaluate_oggm_glambie(
+    oggm_df: pd.DataFrame,
+    glambie_test_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Compute OGGM-as-baseline regional means against held-out GLaMBIE test years.
+
+    For each GLaMBIE test observation whose year appears in oggm_df, computes
+    the area-weighted regional mean of OGGM mass_balance_mwe and compares it
+    to the GLaMBIE observation.  Years outside OGGM coverage are silently skipped
+    (they will simply be absent from the returned DataFrame).
+
+    Args:
+        oggm_df:         Full OGGM dataframe — columns include year, mass_balance_mwe, Area.
+        glambie_test_df: GLaMBIE held-out observations — columns year, source, value_mwe.
+
+    Returns:
+        DataFrame with columns: year, source, glambie_mwe, pred_mwe, residual.
+    """
+    rows = []
+    for _, obs in glambie_test_df.iterrows():
+        yr_df = oggm_df[oggm_df["year"] == obs["year"]]
+        if yr_df.empty:
+            continue
+        total_area = yr_df["Area"].sum()
+        if total_area == 0:
+            continue
+        oggm_regional_mean = float((yr_df["mass_balance_mwe"] * yr_df["Area"]).sum() / total_area)
+        rows.append({
+            "year":        obs["year"],
+            "source":      obs["source"],
+            "glambie_mwe": obs["value_mwe"],
+            "pred_mwe":    oggm_regional_mean,
+            "residual":    oggm_regional_mean - obs["value_mwe"],
+        })
+    return pd.DataFrame(rows)
+
+
 def evaluate_glambie_test(
     model: BayesianNeuralField,
     params: dict,
@@ -633,6 +671,10 @@ def run_finetune(cfg: DictConfig) -> None:
             n_samples=cfg.model.model_nensemble, scaler=scaler, target_scaler=target_scaler,
         )
 
+        # OGGM baseline (area-weighted regional mean from raw OGGM targets)
+        oggm_df_eval = evaluate_oggm_glambie(oggm_df, glambie_test_df)
+        oggm_df_eval["stage"] = "oggm"
+
         # Pretrain baseline (prior params — no finetuning applied)
         rng, rng_pre = jax.random.split(rng)
         pre_df = evaluate_glambie_test(model, prior_params, glambie_test_df=glambie_test_df, rng=rng_pre, **eval_kwargs)
@@ -643,7 +685,7 @@ def run_finetune(cfg: DictConfig) -> None:
         fin_df = evaluate_glambie_test(model, params, glambie_test_df=glambie_test_df, rng=rng_fin, **eval_kwargs)
         fin_df["stage"] = "finetune"
 
-        metrics_df = pd.concat([pre_df, fin_df], ignore_index=True)
+        metrics_df = pd.concat([oggm_df_eval, pre_df, fin_df], ignore_index=True)
         metrics_path = os.path.join(cfg.model.output_dir, "metrics_glambie_test.csv")
         metrics_df.to_csv(metrics_path, index=False)
 
