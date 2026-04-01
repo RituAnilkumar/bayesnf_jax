@@ -132,8 +132,8 @@ def load_glambie(
     Load and two-way split GLaMBIE data for the configured region.
 
     Splits:
-      train — years <= temporal_avg_end_year  (used in finetuning loss)
-      test  — all post-temporal_avg years (2021+)  (reported metrics only)
+      train — years < temporal_avg_end_year  (used in finetuning loss)
+      test  — years >= temporal_avg_end_year  (reported metrics only)
 
     GLaMBIE years not present in feature_years (the full features file, not just
     OGGM-merged rows) are dropped with a warning. Using feature_years instead of
@@ -164,8 +164,12 @@ def load_glambie(
     if df.empty:
         return None, None
 
-    train_df = df[df["year"] <= temporal_avg_end_year].reset_index(drop=True)
-    test_df  = df[df["year"] >  temporal_avg_end_year].reset_index(drop=True)
+    # Use strict < so that the Hugonnet end year (e.g. 2020, exclusive in the
+    # period convention) goes to test rather than being silently dropped from train.
+    # OGGM only covers up to end_year-1 (e.g. 2019), so year==end_year has no
+    # OGGM rows and would be filtered out of training anyway.
+    train_df = df[df["year"] <  temporal_avg_end_year].reset_index(drop=True)
+    test_df  = df[df["year"] >= temporal_avg_end_year].reset_index(drop=True)
 
     test_years = sorted(test_df["year"].unique().tolist())
     if test_years:
