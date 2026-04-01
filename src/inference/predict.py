@@ -4,9 +4,12 @@ Inference utilities — MC forward passes and output formatting.
 Loads finetuned_params.pkl and generates predictions over the full
 (glacier × year) grid specified in for_preds.csv.
 
-Output CSV columns:
-  preds_full.csv     — one row per (glacier, year): rgi_id, year, p2_5, p50, p97_5, mean, std
-  preds_quantiles.csv — same as preds_full but wide-format quantile summary
+Output files:
+  preds_full.csv           — per (glacier, year): rgi_id, year, p2_5, p50, p97_5, mean, std
+  regional_annual_mwe.csv  — area-weighted regional mean MWE/yr per year (MC quantiles)
+  regional_annual_gt.csv   — regional Gt/yr per year (MC + density uncertainty)
+  regional_mass_loss.png   — Gt/yr time series + GLaMBIE combined overlay
+  hugonnet_scatter_*.png   — per-period scatter: model vs Hugonnet dmdtda per glacier
 """
 
 import os
@@ -15,17 +18,24 @@ import jax.numpy as jnp
 import cloudpickle
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
 
 from src.model.bnf_module import BayesianNeuralField, T_MIN
-import cloudpickle
 from src.data_utils import (
     load_features,
+    load_dmdtda,
     build_model_inputs,
     apply_scaler,
     FEATURE_COLS,
 )
+
+# Ice density assumption (Huss 2013) for Gt uncertainty propagation
+_ICE_DENSITY     = 850.0   # kg/m³
+_ICE_DENSITY_SIG = 60.0    # kg/m³ 1-sigma uncertainty
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +176,224 @@ def predictions_to_df(pred_grid: pd.DataFrame, quantiles: dict) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Regional aggregate outputs
+# ---------------------------------------------------------------------------
+
+def compute_regional_series(
+    mc_preds_np: np.ndarray,   # (n_samples, N) MWE/yr, already unscaled
+    pred_grid: pd.DataFrame,    # N rows, must have year and Area (km²)
+) -> dict:
+    """
+    Compute annual area-weighted regional mean MWE/yr and Gt/yr across MC samples.
+
+    Area column is assumed to be in km².
+    Gt/yr = MWE/yr × total_area_km² × 1e-3  (via ρ_water = 1000 kg/m³).
+    Density uncertainty (±60 kg/m³ on 850) is propagated separately and stored
+    for use in plots and CSV output.
+
+    Returns dict with keys:
+        years            — sorted list of int years
+        mwe_samples      — (n_samples, n_years) area-weighted mean MWE/yr
+        gt_samples       — (n_samples, n_years) Gt/yr
+        total_area_km2   — (n_years,) total region area per year
+    """
+    years = sorted(pred_grid["year"].unique().tolist())
+    year_to_idx = {y: i for i, y in enumerate(years)}
+    n_years  = len(years)
+    areas    = pred_grid["Area"].values.astype(np.float64)
+    year_idx = pred_grid["year"].map(year_to_idx).values
+
+    total_area = np.array([areas[year_idx == i].sum() for i in range(n_years)])
+
+    # Area-weighted mean per sample per year: one dot-product per year
+    n_samples = mc_preds_np.shape[0]
+    mwe_samples = np.zeros((n_samples, n_years), dtype=np.float64)
+    for yi in range(n_years):
+        mask = year_idx == yi
+        if total_area[yi] > 0:
+            w = areas[mask] / total_area[yi]
+            mwe_samples[:, yi] = mc_preds_np[:, mask].astype(np.float64) @ w
+
+    # Gt: MWE × area_km² × 1e6 m²/km² × 1000 kg/m³ / 1e12 kg/Gt = MWE × area × 1e-3
+    gt_samples = mwe_samples * total_area[np.newaxis, :] * 1e-3
+
+    return {
+        "years":          years,
+        "mwe_samples":    mwe_samples,
+        "gt_samples":     gt_samples,
+        "total_area_km2": total_area,
+    }
+
+
+def _summarise(samples: np.ndarray) -> dict:
+    """Return p2_5, p50, p97_5, mean, std over axis=0."""
+    return {
+        "p2_5":  np.percentile(samples, 2.5,  axis=0),
+        "p50":   np.percentile(samples, 50.0, axis=0),
+        "p97_5": np.percentile(samples, 97.5, axis=0),
+        "mean":  samples.mean(axis=0),
+        "std":   samples.std(axis=0),
+    }
+
+
+def save_regional_csvs(regional: dict, output_dir: str) -> None:
+    """
+    Save regional_annual_mwe.csv and regional_annual_gt.csv.
+
+    For Gt, also saves p2_5_total / p97_5_total which fold in the density
+    uncertainty (±60 kg/m³) in quadrature with the MC interval half-widths.
+    """
+    years = regional["years"]
+
+    # --- MWE ---
+    mwe = _summarise(regional["mwe_samples"])
+    pd.DataFrame({"year": years, **{k: mwe[k] for k in ("p2_5", "p50", "p97_5", "mean", "std")}}).to_csv(
+        os.path.join(output_dir, "regional_annual_mwe.csv"), index=False
+    )
+
+    # --- Gt with density uncertainty ---
+    gt = _summarise(regional["gt_samples"])
+    density_sig = np.abs(gt["p50"]) * (_ICE_DENSITY_SIG / _ICE_DENSITY)
+    half_lo = gt["p50"] - gt["p2_5"]
+    half_hi = gt["p97_5"] - gt["p50"]
+    p2_5_total  = gt["p50"] - np.sqrt(half_lo ** 2 + density_sig ** 2)
+    p97_5_total = gt["p50"] + np.sqrt(half_hi ** 2 + density_sig ** 2)
+
+    pd.DataFrame({
+        "year":        years,
+        "p2_5":        gt["p2_5"],
+        "p50":         gt["p50"],
+        "p97_5":       gt["p97_5"],
+        "mean":        gt["mean"],
+        "std":         gt["std"],
+        "p2_5_total":  p2_5_total,
+        "p97_5_total": p97_5_total,
+    }).to_csv(os.path.join(output_dir, "regional_annual_gt.csv"), index=False)
+
+    print(f"Saved regional_annual_mwe.csv and regional_annual_gt.csv → {output_dir}")
+
+
+def plot_regional_mass_loss(
+    regional: dict,
+    glambie_wide_df,   # pd.DataFrame from glambie_targets CSV, or None
+    output_dir: str,
+) -> None:
+    """
+    Plot annual regional Gt/yr time series with uncertainty shading.
+
+    MC uncertainty shown as darker shade; total (MC + density) as lighter shade.
+    GLaMBIE combined_mwe overlaid as a line with error bars where available.
+    """
+    years = np.array(regional["years"])
+    gt    = _summarise(regional["gt_samples"])
+    total_area_mean = regional["total_area_km2"].mean()  # scalar for GLaMBIE conversion
+
+    density_sig = np.abs(gt["p50"]) * (_ICE_DENSITY_SIG / _ICE_DENSITY)
+    half_lo = gt["p50"] - gt["p2_5"]
+    half_hi = gt["p97_5"] - gt["p50"]
+    p2_5_total  = gt["p50"] - np.sqrt(half_lo ** 2 + density_sig ** 2)
+    p97_5_total = gt["p50"] + np.sqrt(half_hi ** 2 + density_sig ** 2)
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    # Total uncertainty (lighter)
+    ax.fill_between(years, p2_5_total, p97_5_total, alpha=0.20, color="steelblue",
+                    label="95% CI (MC + density unc.)")
+    # MC uncertainty (darker)
+    ax.fill_between(years, gt["p2_5"], gt["p97_5"], alpha=0.40, color="steelblue",
+                    label="95% CI (MC)")
+    # Median
+    ax.plot(years, gt["p50"], color="steelblue", lw=1.5, label="Model median")
+
+    # GLaMBIE combined overlay
+    if glambie_wide_df is not None and "combined_mwe" in glambie_wide_df.columns:
+        gb = glambie_wide_df.dropna(subset=["combined_mwe", "combined_mwe_errors"]).copy()
+        gb["year"] = np.floor(gb["end_date"]).astype(int)
+        gb_gt    = gb["combined_mwe"].values * total_area_mean * 1e-3
+        gb_gt_err = gb["combined_mwe_errors"].values * total_area_mean * 1e-3
+        ax.errorbar(
+            gb["year"].values, gb_gt,
+            yerr=gb_gt_err,
+            fmt="o", color="darkorange", ms=4, lw=1.2, capsize=3,
+            label="GLaMBIE combined",
+        )
+
+    ax.axhline(0, color="black", lw=0.6, ls="--")
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Regional mass balance (Gt/yr)")
+    ax.set_title("Annual regional mass balance")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(output_dir, "regional_mass_loss.png"), dpi=150)
+    plt.close(fig)
+    print(f"Saved regional_mass_loss.png → {output_dir}")
+
+
+def plot_hugonnet_scatters(
+    preds_df: pd.DataFrame,   # per-glacier per-year: rgi_id, year, mean, std
+    pred_grid: pd.DataFrame,  # N rows: rgi_id, year, Area
+    hugo_df: pd.DataFrame,    # from load_dmdtda: rgi_id, start_date, end_date, avg_mb_mwe, uncertainty_mwe
+    output_dir: str,
+) -> None:
+    """
+    One scatter plot per Hugonnet period: model predicted period mean vs Hugonnet dmdtda.
+
+    For each (start_date, end_date) period in hugo_df, filters preds_df to
+    years in [start_date, end_date) and computes per-glacier mean prediction.
+    Error bars show ±1 std of per-glacier MC predictions over the period.
+    Separate plot files are named hugonnet_scatter_{start}_{end}.png.
+    """
+    for (pstart, pend), period_hugo in hugo_df.groupby(["start_date", "end_date"]):
+        period_preds = preds_df[(preds_df["year"] >= pstart) & (preds_df["year"] < pend)]
+        if period_preds.empty:
+            continue
+
+        pred_means = (
+            period_preds.groupby("rgi_id")[["mean", "std"]]
+            .agg({"mean": "mean", "std": "mean"})
+            .reset_index()
+        )
+        merged = pred_means.merge(
+            period_hugo[["rgi_id", "avg_mb_mwe", "uncertainty_mwe"]],
+            on="rgi_id", how="inner",
+        )
+        if merged.empty:
+            continue
+
+        x = merged["avg_mb_mwe"].values
+        y = merged["mean"].values
+        y_err = merged["std"].values
+
+        vmin = min(x.min(), y.min()) - 0.1
+        vmax = max(x.max(), y.max()) + 0.1
+
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.errorbar(x, y, yerr=y_err, fmt="o", ms=3, alpha=0.5, lw=0.8,
+                    color="steelblue", ecolor="steelblue", capsize=0, label="Glaciers")
+        ax.plot([vmin, vmax], [vmin, vmax], "k--", lw=0.8, label="1:1")
+        ax.set_xlim(vmin, vmax)
+        ax.set_ylim(vmin, vmax)
+        ax.set_xlabel("Hugonnet dmdtda (MWE/yr)")
+        ax.set_ylabel("Model predicted mean (MWE/yr)")
+        ax.set_title(f"Hugonnet scatter {pstart}–{pend}")
+
+        # Diagonal R² annotation
+        ss_res = ((y - x) ** 2).sum()
+        ss_tot = ((x - x.mean()) ** 2).sum()
+        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+        rmse = float(np.sqrt(((y - x) ** 2).mean()))
+        ax.text(0.05, 0.95, f"R²={r2:.3f}  RMSE={rmse:.3f}",
+                transform=ax.transAxes, fontsize=9, va="top")
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+
+        fname = f"hugonnet_scatter_{pstart}_{pend}.png"
+        fig.savefig(os.path.join(output_dir, fname), dpi=150)
+        plt.close(fig)
+        print(f"Saved {fname} → {output_dir}")
+
+
+# ---------------------------------------------------------------------------
 # Main prediction function
 # ---------------------------------------------------------------------------
 
@@ -174,7 +402,7 @@ def run_predict(cfg: DictConfig) -> None:
     Full inference run for one region.
 
     Loads finetuned params, runs MC predictions over the full feature grid,
-    writes preds_full.csv and preds_quantiles.csv to cfg.model.output_dir.
+    writes per-glacier and regional outputs to cfg.model.output_dir.
     """
     os.makedirs(cfg.model.output_dir, exist_ok=True)
     rng = jax.random.PRNGKey(cfg.model.seed)
@@ -182,7 +410,7 @@ def run_predict(cfg: DictConfig) -> None:
     # --- Resolve relative paths against original cwd (Hydra chdir moves us to output dir) ---
     orig = get_original_cwd()
     cfg_mutable = OmegaConf.to_container(cfg, resolve=True)
-    for key in ("finetuned_params_path", "inp_dir"):
+    for key in ("finetuned_params_path", "inp_dir", "temporal_avg_path", "glambie_path"):
         if key in cfg_mutable["model"] and cfg_mutable["model"][key]:
             cfg_mutable["model"][key] = os.path.join(orig, cfg_mutable["model"][key])
     cfg = OmegaConf.create(cfg_mutable)
@@ -240,21 +468,34 @@ def run_predict(cfg: DictConfig) -> None:
         n_samples=cfg.model.model_nensemble,
     )  # (n_samples, N)
 
-    # --- Unscale predictions to physical MWE/yr ---
+    # --- Unscale predictions to physical MWE/yr, convert to numpy once ---
     if target_scaler is not None:
         t_mean, t_std = target_scaler
         mc_preds = mc_preds * t_std + t_mean
+    mc_preds_np = np.array(mc_preds)  # (n_samples, N) — reused for per-glacier and regional
 
-    # --- Quantiles and output ---
-    quantiles = extract_quantiles(mc_preds)
+    # --- Per-glacier predictions CSV ---
+    quantiles = extract_quantiles(mc_preds_np)
     preds_df  = predictions_to_df(pred_grid, quantiles)
-
     full_path = os.path.join(cfg.model.output_dir, "preds_full.csv")
     preds_df.to_csv(full_path, index=False)
-    print(f"Saved predictions → {full_path}")
+    print(f"Saved preds_full.csv → {full_path}")
 
-    # preds_quantiles: p2_5 / p50 / p97_5 only (compact summary)
-    quantiles_df = preds_df[["rgi_id", "year", "p2_5", "p50", "p97_5"]].copy()
-    q_path = os.path.join(cfg.model.output_dir, "preds_quantiles.csv")
-    quantiles_df.to_csv(q_path, index=False)
-    print(f"Saved quantile summary → {q_path}")
+    # --- Regional time series CSVs (MWE + Gt) ---
+    regional = compute_regional_series(mc_preds_np, pred_grid)
+    save_regional_csvs(regional, cfg.model.output_dir)
+
+    # --- GLaMBIE wide-format (for plot overlay) ---
+    glambie_wide_df = None
+    glambie_path_cfg = cfg.model.get("glambie_path", None)
+    if glambie_path_cfg and os.path.exists(glambie_path_cfg):
+        glambie_wide_df = pd.read_csv(glambie_path_cfg)
+
+    # --- Regional mass loss plot ---
+    plot_regional_mass_loss(regional, glambie_wide_df, cfg.model.output_dir)
+
+    # --- Hugonnet scatter plots ---
+    hugo_path = cfg.model.get("temporal_avg_path", None)
+    if hugo_path and os.path.exists(hugo_path):
+        hugo_df = load_dmdtda(hugo_path)
+        plot_hugonnet_scatters(preds_df, pred_grid, hugo_df, cfg.model.output_dir)
