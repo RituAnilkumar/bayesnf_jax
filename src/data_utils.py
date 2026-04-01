@@ -142,9 +142,9 @@ def _parse_hugonnet_period(period: str) -> tuple[int, int]:
 
     Format: 'YYYY-MM-DD_YYYY-MM-DD', e.g. '2000-01-01_2020-01-01'
     Returns the year of each date as integers: (2000, 2020).
-    The end year is the calendar year of the end date — the finetune period
-    mask uses >= start_year and <= end_year so OGGM rows are correctly
-    selected (OGGM typically ends at end_year-1 if end date is Jan 1).
+    The end year is the calendar year of the end date.  The finetune period
+    mask uses >= start_year and < end_year (exclusive), consistent with the
+    Hugonnet convention that "2000-01-01_2020-01-01" covers 2000–2019.
     """
     parts = period.split("_")
     start_year = int(parts[0].split("-")[0])

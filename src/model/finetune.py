@@ -34,7 +34,6 @@ from src.model.bnf_module import (
     BayesianNeuralField,
     compute_total_kl,
     extract_vi_params,
-    T_MIN,
 )
 from src.loss.elbo import finetune_elbo, make_beta_schedule
 from src.loss.likelihood import temporal_avg_loss, glambie_loss
@@ -206,12 +205,12 @@ def prepare_finetune_arrays(
         glambie_means, glambie_errs         — GLaMBIE targets
     """
     # Full OGGM grid arrays
-    time_index, covariates, rgi_ids_all, _ = build_model_inputs(oggm_df, ft_cols)
+    time_index, covariates, _, _ = build_model_inputs(oggm_df, ft_cols)
     if scaler is not None:
         covariates = apply_scaler(covariates, scaler)
 
     # Factorize glacier IDs — codes[i] gives glacier index for row i
-    glacier_codes, unique_glaciers = pd.factorize(oggm_df["rgi_id"], sort=True)
+    _, unique_glaciers = pd.factorize(oggm_df["rgi_id"], sort=True)
     n_glaciers = len(unique_glaciers)
 
     # Hugonnet temporal-avg arrays — currently always a single period (longest span).
@@ -250,6 +249,17 @@ def prepare_finetune_arrays(
 
     # GLaMBIE arrays
     if glambie_train_df is not None:
+        # Restrict GLaMBIE train years to those present in oggm_df.
+        # Years like 2020 can appear in glambie_train_df (year <= temporal_avg_end_year)
+        # but be absent from oggm_df (OGGM targets end at 2019). Including them
+        # would produce zero OGGM rows for that year, causing 0/0 = NaN in the
+        # area-weighted segment mean and NaN gradients throughout.
+        oggm_years_set = set(oggm_df["year"].unique().tolist())
+        glambie_train_df = glambie_train_df[glambie_train_df["year"].isin(oggm_years_set)].reset_index(drop=True)
+        if glambie_train_df.empty:
+            out["has_glambie"] = False
+            return out
+
         glambie_years = sorted(glambie_train_df["year"].unique().tolist())
         year_to_idx   = {y: i for i, y in enumerate(glambie_years)}
         n_glambie_years = len(glambie_years)
@@ -545,7 +555,6 @@ def run_finetune(cfg: DictConfig) -> None:
 
     # --- Load data ---
     oggm_df, features_df = load_oggm_full(cfg)
-    oggm_years  = set(oggm_df["year"].unique().tolist())
     # features_df covers years beyond OGGM target coverage (e.g. 2023/2024)
     # and is used for GLaMBIE evaluation of those years
     all_feature_years = set(features_df["year"].unique().tolist())
@@ -579,14 +588,6 @@ def run_finetune(cfg: DictConfig) -> None:
     model = BayesianNeuralField(
         hidden_sizes=tuple([cfg.model.model_nhidden] * cfg.model.model_nlayers),
         n_fourier=cfg.model.n_fourier,
-    )
-    rng, rng_init, rng_fwd = jax.random.split(rng, 3)
-    # Initialise with dummy input to get params structure, then overwrite with prior
-    dummy_params = model.init(
-        rng_init,
-        static_arrays["time_index"][:1],
-        static_arrays["covariates"][:1],
-        rng_fwd,
     )
     # Reconstruct full params dict from pretrained (mu, log_sigma)
     def _merge(d_mu, d_ls):
