@@ -11,16 +11,16 @@ n_fourier: 8
 fourier_seed: 42
 
 # --- Training ---
-model_nepochs: 40000
+model_nepochs: 10000
 lr: 1.0e-3
-finetune_lr: 2.0e-4          # Stage 2 initial LR (lower than pretrain; cosine-decayed after beta annealing)
+finetune_lr: 3.0e-4          # Stage 2 initial LR (lower than pretrain; cosine-decayed after beta annealing)
 grad_clip_norm: 2.0           # global gradient norm clip for Stage 2 (0 = disabled)
-beta_anneal_epochs: 10000       # 20% of model_nepochs — beta ramps 0→1 over this window
+beta_anneal_epochs: 2000       # Set to 20-30% of model_nepochs — beta ramps 0→1 over this window
 seed: 0
 oggm_loss_fn: rmse           # 'huber' or 'rmse'
 huber_delta: 0.5              # Huber transition point in scaled target units (only used if oggm_loss_fn=huber)
 early_stopping_patience: 100  # stop after this many eval intervals with no val improvement (0 = disabled)
-early_stopping_interval: 1000 # evaluate val set every N epochs
+early_stopping_interval: 100 # evaluate val set every N epochs
 
 # --- Inference ---
 model_nensemble: 100          # MC samples at prediction time

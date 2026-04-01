@@ -178,3 +178,7 @@ All configurable in `conf/model/bnf_regional_seasonal.yaml` or overridden per-re
    `conf/model/bnf_regional_seasonal/` and `conf/model/bnf_regional_monthly/`.
    Verify the paths in `conf/model/bnf_regional_seasonal/r{nn}.yaml` are correct.
 3. Run the pipeline as shown above.
+
+
+# Ritu's Quick Runs
+python main_pipeline.py -m model=bnf_regional_seasonal/r06 model.model_nlayers=1,2,3 model.model_nhidden=16,32,64  pipeline.stages=[pretrain_cv,pretrain_full,finetune,predict] 
