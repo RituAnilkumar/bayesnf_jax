@@ -29,6 +29,11 @@ outputs/
 *.pickle
 
 # Data — keep structure but not the actual csvs
+data_for_model/
+data_for_model/*/*
+data_for_model_backup/
+data_for_model_backup/*/*
+data_for_model_backup/*
 data_for_model/oggm/*/train.csv
 data_for_model/oggm/*/logo.csv
 data_for_model/oggm/*/loyo.csv

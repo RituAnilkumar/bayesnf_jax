@@ -182,3 +182,8 @@ All configurable in `conf/model/bnf_regional_seasonal.yaml` or overridden per-re
 
 # Ritu's Quick Runs
 python main_pipeline.py -m model=bnf_regional_seasonal/r06 model.model_nlayers=1,2,3 model.model_nhidden=16,32,64  pipeline.stages=[pretrain_cv,pretrain_full,finetune,predict] 
+
+Setup in the sh files for all regions. Run this:
+for r in $(seq -w 1 19); do
+  sbatch --export=ALL,REGION=r${r} --job-name=${r}_seasonal run_regs.sh 
+done
