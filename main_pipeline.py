@@ -36,36 +36,47 @@ from src.inference.predict import run_predict
 STAGE_ORDER = ["pretrain_cv", "pretrain_full", "finetune", "predict"]
 
 
+def _mutable_copy(cfg: DictConfig) -> DictConfig:
+    """Return a fully mutable deep copy of cfg (safe across Hydra struct/readonly modes)."""
+    return OmegaConf.create(OmegaConf.to_container(cfg, resolve=True, throw_on_missing=False))
+
+
 @hydra.main(config_path="conf", config_name="config_pipeline", version_base=None)
 def main(cfg: DictConfig) -> None:
     stages = list(cfg.pipeline.stages)
     assert all(s in STAGE_ORDER for s in stages), \
         f"Unknown stage(s): {set(stages) - set(STAGE_ORDER)}"
 
+    # Work with a fully mutable copy so OmegaConf.update and direct assignment
+    # are safe regardless of Hydra's struct/readonly mode in single-run or multirun.
+    cfg = _mutable_copy(cfg)
+
     if "pretrain_cv" in stages:
-        cfg_cv = cfg.copy()
+        cfg_cv = _mutable_copy(cfg)
         cfg_cv.model.train_split = "train"
         cfg_cv.model.output_dir = cfg.model.output_dir + "_cv"
         run_pretrain(cfg_cv)
+        # cfg.model.output_dir is untouched — cfg_cv is an independent copy
 
     if "pretrain_full" in stages:
-        cfg_full = cfg.copy()
+        cfg_full = _mutable_copy(cfg)
         cfg_full.model.train_split = "full"
         run_pretrain(cfg_full)
-        # Always override pretrained_params_path to where pretrain_full actually wrote it,
-        # regardless of what the region yaml says (region yaml may point to a different dir).
+        # Override pretrained_params_path to where pretrain_full actually wrote it.
+        # This takes priority over whatever the region yaml specified, which may
+        # point to a different (standalone pretrain) output directory.
         actual_pretrained = os.path.abspath(
             os.path.join(cfg.model.output_dir, "pretrained_params.pkl")
         )
-        OmegaConf.update(cfg, "model.pretrained_params_path", actual_pretrained)
+        cfg.model.pretrained_params_path = actual_pretrained
 
     if "finetune" in stages:
         run_finetune(cfg)
-        # Always override finetuned_params_path to where finetune actually wrote it.
+        # Override finetuned_params_path to where finetune actually wrote it.
         actual_finetuned = os.path.abspath(
             os.path.join(cfg.model.output_dir, "finetuned_params.pkl")
         )
-        OmegaConf.update(cfg, "model.finetuned_params_path", actual_finetuned)
+        cfg.model.finetuned_params_path = actual_finetuned
 
     if "predict" in stages:
         run_predict(cfg)
