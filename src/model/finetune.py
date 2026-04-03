@@ -48,6 +48,7 @@ from src.data_utils import (
     load_glambie as _load_glambie_raw,
     build_model_inputs,
     apply_scaler,
+    extract_hugonnet_region,
     FEATURE_COLS,
 )
 
@@ -104,7 +105,14 @@ def load_temporal_avg(cfg: DictConfig, rgi_ids_ordered: np.ndarray) -> pd.DataFr
     Returns DataFrame sorted to match rgi_ids_ordered, columns:
         rgi_id, start_date, end_date, avg_mb_mwe, uncertainty_mwe
     """
-    df = _load_temporal_avg(cfg.model.temporal_avg_path)
+    path = cfg.model.temporal_avg_path
+    if not os.path.exists(path):
+        reg_int = int(cfg.model.reg_subdir.lstrip("r"))
+        all_csv = os.path.join(get_original_cwd(), cfg.model.inp_dir, "dmdtda_all.csv")
+        print(f"  temporal_avg_path not found — generating from {all_csv} for reg={reg_int}")
+        extract_hugonnet_region(all_csv, reg_int, path, period=None)
+
+    df = _load_temporal_avg(path)
 
     # Assert exact rgi_id set match between temporal_avg and OGGM
     ta_ids = set(df["rgi_id"].unique())

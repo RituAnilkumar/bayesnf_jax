@@ -39,6 +39,7 @@ from src.data_utils import (
     merge_features_targets,
     build_model_inputs,
     apply_scaler,
+    extract_hugonnet_region,
     FEATURE_COLS,
 )
 
@@ -605,8 +606,14 @@ def run_predict(cfg: DictConfig) -> None:
 
     hugo_df = None
     hugo_path = cfg.model.get("temporal_avg_path", None)
-    if hugo_path and os.path.exists(hugo_path):
-        hugo_df = load_dmdtda(hugo_path)
+    if hugo_path:
+        if not os.path.exists(hugo_path):
+            reg_int = int(cfg.model.reg_subdir.lstrip("r"))
+            all_csv = os.path.join(orig, cfg.model.inp_dir, "dmdtda_all.csv")
+            print(f"  temporal_avg_path not found — generating from {all_csv} for reg={reg_int}")
+            extract_hugonnet_region(all_csv, reg_int, hugo_path, period=None)
+        if os.path.exists(hugo_path):
+            hugo_df = load_dmdtda(hugo_path)
 
     oggm_gt_df = _oggm_regional_gt(cfg, pred_grid)
 
