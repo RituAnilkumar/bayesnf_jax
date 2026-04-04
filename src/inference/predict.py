@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
 
-from src.model.bnf_module import BayesianNeuralField, T_MIN
+from src.model.bnf_module import BayesianNeuralField, T_MIN, mc_predict_chunked
 from src.data_utils import (
     load_features,
     load_oggm,
@@ -123,15 +123,9 @@ def _run_mc(
     """
     Run MC inference and return unscaled predictions as numpy (n_samples, N).
     """
-    mc = model.apply(
-        params,
-        jnp.array(time_index),
-        jnp.array(covariates),
-        rng,
-        n_samples=n_samples,
-        method=model.mc_predict,
+    mc_np = mc_predict_chunked(
+        model, params, jnp.array(time_index), jnp.array(covariates), rng, n_samples
     )
-    mc_np = np.array(mc)
     if target_scaler is not None:
         t_mean, t_std = target_scaler
         mc_np = mc_np * t_std + t_mean

@@ -258,6 +258,37 @@ class BayesianNeuralField(nn.Module):
         return jax.vmap(single_sample)(rngs)  # (n_samples, batch)
 
 
+def mc_predict_chunked(
+    model: "BayesianNeuralField",
+    params: dict,
+    time_index: jax.Array,
+    covariates: jax.Array,
+    rng: jax.Array,
+    n_samples: int,
+    chunk_size: int = 10,
+) -> "np.ndarray":
+    """
+    MC prediction with chunked vmap to bound peak GPU memory.
+
+    Runs n_samples in groups of chunk_size, vmapping within each chunk and
+    immediately moving results to CPU (numpy).  Peak GPU memory is proportional
+    to chunk_size rather than n_samples, which prevents OOM on large regions.
+
+    Returns numpy array of shape (n_samples, batch).
+    """
+    import numpy as _np
+    chunks = []
+    for start in range(0, n_samples, chunk_size):
+        end = min(start + chunk_size, n_samples)
+        rng, rng_chunk = jax.random.split(rng)
+        chunk = model.apply(
+            params, time_index, covariates, rng_chunk,
+            n_samples=(end - start), method=model.mc_predict,
+        )
+        chunks.append(_np.array(chunk))  # pull to CPU immediately
+    return _np.concatenate(chunks, axis=0)  # (n_samples, batch)
+
+
 # ---------------------------------------------------------------------------
 # KL divergence utilities
 # ---------------------------------------------------------------------------

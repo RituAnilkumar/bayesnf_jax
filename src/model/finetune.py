@@ -34,6 +34,7 @@ from src.model.bnf_module import (
     BayesianNeuralField,
     compute_total_kl,
     extract_vi_params,
+    mc_predict_chunked,
 )
 from src.loss.elbo import finetune_elbo, make_beta_schedule
 from src.loss.likelihood import temporal_avg_loss, glambie_loss
@@ -472,14 +473,9 @@ def evaluate_glambie_test(
     year_ids  = test_df["year"].map(year_to_idx).to_numpy(dtype=np.int32)
     areas     = test_df["Area"].to_numpy(dtype=np.float32)
 
-    # MC predictions → (n_samples, N)
-    mc_preds = model.apply(
-        params,
-        jnp.array(time_idx),
-        jnp.array(covariates),
-        rng,
-        n_samples=n_samples,
-        method=model.mc_predict,
+    # MC predictions → (n_samples, N) — chunked to bound peak GPU memory
+    mc_preds = mc_predict_chunked(
+        model, params, jnp.array(time_idx), jnp.array(covariates), rng, n_samples
     )
 
     # Area-weighted regional annual mean per sample → (n_samples, n_years)
