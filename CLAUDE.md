@@ -151,7 +151,7 @@ architectural components are needed.
   L_oggm = (1 / N_points) * sum_ij (pred_ij - oggm_ij)²
 - Prior: N(0, 1) — use make_standard_normal_prior()
 - KL: KL(posterior || N(0,1)), analytic
-- ELBO = L_oggm - beta * KL
+- Loss (minimised) = L_oggm + (beta / n_data) * KL
 - Beta annealing: anneal beta from 0 → 1 over first ~20% of epochs
   (prevents posterior collapse early in training)
 - Output: save (mu_dict, log_sigma_dict) as pretrained_params.pkl
@@ -181,14 +181,15 @@ architectural components are needed.
   where:
   - k indexes all available (year, source) pairs — gravimetry and altimetry
     are treated as separate residuals
-  - pred_ann_mean_t = mean of per-glacier predictions in year t
-    (regional sum via segment_sum, divided by N_glaciers)
-  - glambie_mean_t = GLaMBIE regional Gt/yr sum divided by N_glaciers
-    to convert to MWE/yr mean (err scaled by same factor)
+  - pred_ann_mean_t = area-weighted regional mean of per-glacier predictions
+    in year t (segment_weighted_mean with glacier areas as weights)
+  - glambie_mean_t = GLaMBIE regional mean in MWE/yr (already in MWE/yr
+    in the data file; no unit conversion needed)
   - N_obs = total number of (year, source) observations, NOT unique years
     (so years with both gravimetry and altimetry count as 2)
 
-  ELBO = L_temporal_avg + L_glambie - beta * KL(finetuned || pretrained)
+  Loss (minimised) = L_temporal_avg + L_glambie + (beta / n_data) * KL(finetuned || pretrained)
+  where n_data = n_period_glaciers + n_glambie_obs
 
 - No manual loss weighting beyond uncertainty weighting and unit normalisation
 - GLaMBIE may be absent for some regions (e.g. High Mountain Asia has no

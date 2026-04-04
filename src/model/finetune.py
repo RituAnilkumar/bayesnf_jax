@@ -638,7 +638,7 @@ def run_finetune(cfg: DictConfig) -> None:
     # n_data for KL normalisation: single Hugonnet period, so n_glaciers for that period.
     # GLaMBIE observation count is added as before.
     _period_counts = [p["n_glaciers"] for p in static_arrays["hugonnet_periods"]]
-    n_finetune_obs = round(sum(_period_counts) / len(_period_counts)) if _period_counts else 0
+    n_finetune_obs = _period_counts[0] if _period_counts else 0
     if static_arrays["has_glambie"]:
         n_finetune_obs += int(static_arrays["obs_year_idx"].shape[0])
 

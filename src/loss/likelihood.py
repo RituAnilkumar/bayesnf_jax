@@ -136,5 +136,5 @@ def glambie_loss(
     """
     pred_regional_means = regional_annual_mean(preds, year_ids, n_years, glacier_areas)  # (n_years,)
     pred_at_obs = pred_regional_means[obs_year_idx]                                       # (N_obs,)
-    glambie_errs_floored = jnp.maximum(glambie_errs, 0.1)
+    glambie_errs_floored = jnp.maximum(glambie_errs, 1e-3)  # floor at 1 mm/yr to prevent div-by-zero
     return jnp.mean(((pred_at_obs - glambie_means) / glambie_errs_floored) ** 2)

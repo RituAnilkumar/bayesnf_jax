@@ -1,8 +1,11 @@
 """
 ELBO assembly and beta annealing schedule.
 
-Stage 1 ELBO:  L_oggm  - beta * KL(q || N(0,1))
-Stage 2 ELBO:  L_temporal_avg + L_glambie - beta * KL(q || q_pretrained)
+These functions return a *loss to be minimised* (not the ELBO to be maximised).
+The relationship is:  loss = -ELBO / n_data  (up to constants).
+
+Stage 1 loss:  L_oggm  + (beta / n_data) * KL(q || N(0,1))
+Stage 2 loss:  L_temporal_avg + L_glambie + (beta / n_data) * KL(q || q_pretrained)
 
 Beta is annealed linearly from 0 → 1 over the first `beta_anneal_epochs`
 epochs (default 20% of total epochs). This prevents posterior collapse
