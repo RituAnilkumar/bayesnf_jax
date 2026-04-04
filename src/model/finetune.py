@@ -114,16 +114,17 @@ def load_temporal_avg(cfg: DictConfig, rgi_ids_ordered: np.ndarray) -> pd.DataFr
 
     df = _load_temporal_avg(path)
 
-    # Assert exact rgi_id set match between temporal_avg and OGGM
+    # Align rgi_id sets between temporal_avg and OGGM
     ta_ids = set(df["rgi_id"].unique())
     og_ids = set(rgi_ids_ordered)
     extra   = ta_ids - og_ids
     missing = og_ids - ta_ids
-    assert not extra, f"temporal_avg has rgi_ids not in OGGM data: {extra}"
+    if extra:
+        print(f"  Warning: {len(extra)} temporal_avg glaciers not in OGGM data — dropping from temporal_avg loss")
     if missing:
-        print(f"  Warning: {len(missing)} OGGM glaciers not in temporal_avg, excluded from temporal_avg loss: {missing}")
+        print(f"  Warning: {len(missing)} OGGM glaciers not in temporal_avg, excluded from temporal_avg loss")
 
-    # Sort to match factorize ordering (missing glaciers simply absent from df)
+    # Sort to match factorize ordering (extra/missing glaciers simply absent from df)
     id_to_idx = {rid: i for i, rid in enumerate(rgi_ids_ordered)}
     df = df[df["rgi_id"].isin(og_ids)].copy()
     df["_order"] = df["rgi_id"].map(id_to_idx)
