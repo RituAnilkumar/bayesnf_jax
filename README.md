@@ -181,7 +181,7 @@ All configurable in `conf/model/bnf_regional_seasonal.yaml` or overridden per-re
 
 
 # Ritu's Quick Runs
-python main_pipeline.py -m model=bnf_regional_seasonal/r06 model.model_nlayers=1,2,3 model.model_nhidden=8,16,32,64 model.inp_dir=/scratch/b5at/ranil.b5at/bayesnf_jax/data_for_model pipeline.stages=[pretrain_cv,pretrain_full,finetune,predict] 
+python main_pipeline.py -m model=bnf_regional_seasonal/r06 model.model_nlayers=1,2,3 model.model_nhidden=8,16,32,64 model.inp_dir=/scratch/b5at/ranil.b5at/bayesnf_jax/data_for_model pipeline.stages=[pretrain_cv,pretrain_full,finetune,predict] model.beta_anneal_epochs=2000,10000,20000 model.finetune_lr=1e-4,3e-4,1e-3 model.uncertainty_floor=0.05,0.1,0.2
 
 Setup in the sh files for all regions. Run this:
 for r in $(seq -w 1 19); do

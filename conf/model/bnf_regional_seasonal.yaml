@@ -19,6 +19,10 @@ beta_anneal_epochs: 2000       # Set to 20-30% of model_nepochs — beta ramps 0
 seed: 0
 oggm_loss_fn: rmse           # 'huber' or 'rmse'
 huber_delta: 0.5              # Huber transition point in scaled target units (only used if oggm_loss_fn=huber)
+uncertainty_floor: 0.1        # Minimum uncertainty [MWE/yr] used in inverse-variance weighting.
+                              # Applied to both temporal_avg and GLaMBIE errors before computing 1/σ².
+                              # Observations with σ < floor are treated as equally precise at the floor.
+                              # Prevents very small uncertainties from dominating. Tune in [0.01, 0.5].
 early_stopping_patience: 100  # stop after this many eval intervals with no val improvement (0 = disabled)
 early_stopping_interval: 100 # evaluate val set every N epochs
 

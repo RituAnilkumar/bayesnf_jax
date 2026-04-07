@@ -188,10 +188,13 @@ architectural components are needed.
   - N_obs = total number of (year, source) observations, NOT unique years
     (so years with both gravimetry and altimetry count as 2)
 
-  Loss (minimised) = L_temporal_avg + L_glambie + (beta / n_data) * KL(finetuned || pretrained)
+  Loss (minimised) = L_temporal_avg + glambie_weight * L_glambie + (beta / n_data) * KL(finetuned || pretrained)
   where n_data = n_period_glaciers + n_glambie_obs
 
-- No manual loss weighting beyond uncertainty weighting and unit normalisation
+- uncertainty_floor (default 0.1 MWE/yr): minimum σ used in 1/σ² weighting for both
+  temporal_avg and GLaMBIE losses. Observations with σ < floor are treated as equally
+  precise at the floor. Prevents very small reported uncertainties from dominating
+  gradients regardless of which dataset has smaller errors. Tune in [0.01, 0.5].
 - GLaMBIE may be absent for some regions (e.g. High Mountain Asia has no
   gravimetry) — handle gracefully, do not error if glambie file is missing
   or empty for a given source
