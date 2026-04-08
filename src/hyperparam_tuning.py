@@ -647,23 +647,32 @@ def save_top_runs(df: pd.DataFrame, output_dir: Path, top_n: int = 10) -> None:
     top = (
         valid.groupby(param_cols)
         .agg(
-            mean_loyo_rmse=("loyo_rmse",    "mean"),
-            std_loyo_rmse= ("loyo_rmse",    "std"),
+            run_id=           ("run_id",       "first"),
+            mean_loyo_rmse=   ("loyo_rmse",    "mean"),
+            std_loyo_rmse=    ("loyo_rmse",    "std"),
             mean_glambie_rmse=("glambie_rmse", "mean"),
             std_glambie_rmse= ("glambie_rmse", "std"),
-            mean_composite=("composite",    "mean"),
-            mean_rank=     ("rank_in_region","mean"),
-            n_regions=     ("region",        "nunique"),
+            mean_composite=   ("composite",    "mean"),
+            mean_rank=        ("rank_in_region","mean"),
+            n_regions=        ("region",        "nunique"),
         )
         .reset_index()
         .sort_values("mean_composite")
         .head(top_n)
     )
 
+    # Put run_id first so it's immediately visible
+    col_order = ["run_id"] + param_cols + [
+        "mean_loyo_rmse", "std_loyo_rmse",
+        "mean_glambie_rmse", "std_glambie_rmse",
+        "mean_composite", "mean_rank", "n_regions",
+    ]
+    top = top[col_order]
+
     path = output_dir / "top_runs.csv"
     top.to_csv(path, index=False, float_format="%.5f")
     print(f"  Saved {path}")
-    print("\nTop configurations:")
+    print("\nTop configurations (run_id = folder number to inspect):")
     print(top.to_string(index=False))
 
 
