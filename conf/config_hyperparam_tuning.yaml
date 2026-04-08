@@ -1,0 +1,26 @@
+# Config for src/hyperparam_tuning.py
+#
+# Usage:
+#   python src/hyperparam_tuning.py
+#   python src/hyperparam_tuning.py --config conf/config_hyperparam_tuning.yaml
+#   python src/hyperparam_tuning.py --multirun_root /path/to/multirun/r06_3645680
+#
+# multirun_root must point directly to the region-job sweep directory whose
+# immediate children are numbered run directories (0, 1, 2, ...).
+# Outputs are written to:  hyperparam_analysis/{region_jobid}/
+
+multirun_root: /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r06_3645680
+
+# GLaMBIE years to use for held-out test RMSE (must not have been used in training).
+glambie_test_years: [2021, 2022, 2023]
+
+# Composite score weights: score = loyo_weight * norm_loyo_rmse + glambie_weight * norm_glambie_rmse
+# Both are normalised per-region to [0,1] before combining.
+loyo_weight: 0.5
+glambie_weight: 0.5
+
+# Skip a region entirely if it has fewer completed runs than this threshold.
+min_runs_per_region: 10
+
+# Top-N runs to highlight in the ranking table and regional heatmap.
+top_n: 10
