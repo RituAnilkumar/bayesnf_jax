@@ -46,6 +46,7 @@ data_for_model/glambie/*.csv
 # SLURM logs
 out_files/
 err_files/
+hyperparam_analysis/
 *.out
 *.err
 

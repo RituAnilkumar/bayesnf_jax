@@ -16,8 +16,8 @@ glambie_test_years: [2021, 2022, 2023]
 
 # Composite score weights: score = loyo_weight * norm_loyo_rmse + glambie_weight * norm_glambie_rmse
 # Both are normalised per-region to [0,1] before combining.
-loyo_weight: 0.5
-glambie_weight: 0.5
+loyo_weight: 0.0
+glambie_weight: 1.0
 
 # Skip a region entirely if it has fewer completed runs than this threshold.
 min_runs_per_region: 10
