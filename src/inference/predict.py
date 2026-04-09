@@ -247,6 +247,48 @@ def _glambie_combined_gt(glambie_wide_df: pd.DataFrame, total_area_km2: float) -
     return gb[["year", "gt", "gt_err"]].sort_values("year").reset_index(drop=True)
 
 
+def _glambie_sources_mwe(glambie_wide_df) -> dict:
+    """
+    Extract altimetry and gravimetry from GLaMBIE wide format as MWE/yr per year.
+
+    Returns dict with keys 'altimetry' and 'gravimetry', each a DataFrame with
+    columns: year, mwe, mwe_err. Missing sources return empty DataFrames.
+    """
+    empty = pd.DataFrame(columns=["year", "mwe", "mwe_err"])
+    if glambie_wide_df is None:
+        return {"altimetry": empty, "gravimetry": empty}
+
+    result = {}
+    for source in ("altimetry", "gravimetry"):
+        val_col = f"{source}_mwe"
+        err_col = f"{source}_mwe_errors"
+        if val_col not in glambie_wide_df.columns or err_col not in glambie_wide_df.columns:
+            result[source] = empty
+            continue
+        df = glambie_wide_df.dropna(subset=[val_col, err_col]).copy()
+        if df.empty:
+            result[source] = empty
+            continue
+        df["year"]    = np.floor(df["end_date"]).astype(int)
+        df["mwe"]     = df[val_col].values
+        df["mwe_err"] = df[err_col].values
+        result[source] = df[["year", "mwe", "mwe_err"]].sort_values("year").reset_index(drop=True)
+    return result
+
+
+def _oggm_regional_mwe(oggm_gt_df: pd.DataFrame, total_area_km2: float) -> pd.DataFrame:
+    """
+    Convert OGGM regional Gt/yr to MWE/yr using total_area_km2.
+
+    Returns DataFrame: year, mwe.
+    """
+    if oggm_gt_df.empty or total_area_km2 <= 0:
+        return pd.DataFrame(columns=["year", "mwe"])
+    df = oggm_gt_df.copy()
+    df["mwe"] = df["gt"] / (total_area_km2 * 1e-3)
+    return df[["year", "mwe"]]
+
+
 # ---------------------------------------------------------------------------
 # CSV output
 # ---------------------------------------------------------------------------
@@ -282,18 +324,38 @@ def _shade_mc(ax, years, gt_summary, color, alpha_mc=0.40, alpha_total=0.20, lab
     ax.plot(years, gt_summary["p50"], color=color, lw=1.5, label=f"{label_prefix}median")
 
 
-# --- Plot 1: finetune Gt/yr + GLaMBIE combined ---
-def plot_regional_mass_loss(regional_fin: dict, glambie_wide_df, output_dir: str) -> None:
+# --- Plot 1: finetune Gt/yr + GLaMBIE sources + OGGM ---
+def plot_regional_mass_loss(
+    regional_fin: dict, glambie_wide_df, oggm_gt_df: pd.DataFrame, output_dir: str
+) -> None:
     years = np.array(regional_fin["years"])
     gt    = _summarise(regional_fin["gt_samples"])
     total_area_mean = float(regional_fin["total_area_km2"].mean())
-    gb = _glambie_combined_gt(glambie_wide_df, total_area_mean)
+
+    gb_combined  = _glambie_combined_gt(glambie_wide_df, total_area_mean)
+    gb_sources   = _glambie_sources_mwe(glambie_wide_df)
 
     fig, ax = plt.subplots(figsize=(12, 5))
     _shade_mc(ax, years, gt, "steelblue")
-    if not gb.empty:
-        ax.errorbar(gb["year"].values, gb["gt"].values, yerr=gb["gt_err"].values,
+
+    if not gb_combined.empty:
+        ax.errorbar(gb_combined["year"].values, gb_combined["gt"].values,
+                    yerr=gb_combined["gt_err"].values,
                     fmt="o", color="darkorange", ms=4, lw=1.2, capsize=3, label="GLaMBIE combined")
+
+    for source, color, marker in [("altimetry", "forestgreen", "s"), ("gravimetry", "purple", "^")]:
+        df = gb_sources[source]
+        if not df.empty:
+            gt_vals = df["mwe"].values * total_area_mean * 1e-3
+            gt_errs = df["mwe_err"].values * total_area_mean * 1e-3
+            ax.errorbar(df["year"].values, gt_vals, yerr=gt_errs,
+                        fmt=marker, color=color, ms=4, lw=1.2, capsize=3,
+                        label=f"GLaMBIE {source}")
+
+    if not oggm_gt_df.empty:
+        ax.plot(oggm_gt_df["year"].values, oggm_gt_df["gt"].values,
+                color="seagreen", lw=1.2, ls="--", label="OGGM")
+
     ax.axhline(0, color="black", lw=0.6, ls="--")
     ax.set_xlabel("Year"); ax.set_ylabel("Gt/yr"); ax.set_title("Regional mass balance (finetuned)")
     ax.legend(fontsize=8); fig.tight_layout()
@@ -304,29 +366,41 @@ def plot_regional_mass_loss(regional_fin: dict, glambie_wide_df, output_dir: str
 
 # --- Plot 2: pretrain vs finetune MWE time series ---
 def plot_regional_mwe_comparison(
-    regional_pre: dict, regional_fin: dict, glambie_wide_df, output_dir: str
+    regional_pre: dict, regional_fin: dict, glambie_wide_df, oggm_gt_df: pd.DataFrame, output_dir: str
 ) -> None:
     years_pre = np.array(regional_pre["years"])
     years_fin = np.array(regional_fin["years"])
     mwe_pre   = _summarise(regional_pre["mwe_samples"])
     mwe_fin   = _summarise(regional_fin["mwe_samples"])
 
-    # Use finetune total_area for GLaMBIE (they share the same pred_grid)
     total_area_mean = float(regional_fin["total_area_km2"].mean())
-    gb = _glambie_combined_gt(glambie_wide_df, total_area_mean)
-    gb_mwe = gb.copy()
-    if not gb_mwe.empty:
-        gb_mwe["mwe"]     = gb_mwe["gt"] / (total_area_mean * 1e-3)
-        gb_mwe["mwe_err"] = gb_mwe["gt_err"] / (total_area_mean * 1e-3)
+    gb_combined = _glambie_combined_gt(glambie_wide_df, total_area_mean)
+    gb_sources  = _glambie_sources_mwe(glambie_wide_df)
+    oggm_mwe    = _oggm_regional_mwe(oggm_gt_df, total_area_mean)
 
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.fill_between(years_pre, mwe_pre["p2_5"], mwe_pre["p97_5"], alpha=0.25, color="darkorange")
     ax.plot(years_pre, mwe_pre["p50"], color="darkorange", lw=1.3, label="Pretrain median")
     ax.fill_between(years_fin, mwe_fin["p2_5"], mwe_fin["p97_5"], alpha=0.25, color="steelblue")
     ax.plot(years_fin, mwe_fin["p50"], color="steelblue", lw=1.3, label="Finetune median")
-    if not gb_mwe.empty:
-        ax.errorbar(gb_mwe["year"].values, gb_mwe["mwe"].values, yerr=gb_mwe["mwe_err"].values,
+
+    if not gb_combined.empty:
+        gb_mwe     = gb_combined["gt"].values / (total_area_mean * 1e-3)
+        gb_mwe_err = gb_combined["gt_err"].values / (total_area_mean * 1e-3)
+        ax.errorbar(gb_combined["year"].values, gb_mwe, yerr=gb_mwe_err,
                     fmt="o", color="black", ms=3, lw=1.0, capsize=3, label="GLaMBIE combined")
+
+    for source, color, marker in [("altimetry", "forestgreen", "s"), ("gravimetry", "purple", "^")]:
+        df = gb_sources[source]
+        if not df.empty:
+            ax.errorbar(df["year"].values, df["mwe"].values, yerr=df["mwe_err"].values,
+                        fmt=marker, color=color, ms=4, lw=1.0, capsize=3,
+                        label=f"GLaMBIE {source}")
+
+    if not oggm_mwe.empty:
+        ax.plot(oggm_mwe["year"].values, oggm_mwe["mwe"].values,
+                color="seagreen", lw=1.2, ls="--", label="OGGM")
+
     ax.axhline(0, color="black", lw=0.6, ls="--")
     ax.set_xlabel("Year"); ax.set_ylabel("MWE/yr")
     ax.set_title("Regional annual mean mass balance: pretrain vs finetune")
@@ -613,12 +687,12 @@ def run_predict(cfg: DictConfig) -> None:
 
     # --- Plots ---
 
-    # 1. Finetune Gt/yr vs GLaMBIE
-    plot_regional_mass_loss(regional_fin, glambie_wide_df, cfg.model.output_dir)
+    # 1. Finetune Gt/yr vs GLaMBIE sources + OGGM
+    plot_regional_mass_loss(regional_fin, glambie_wide_df, oggm_gt_df, cfg.model.output_dir)
 
-    # 2. Pretrain vs finetune MWE time series
+    # 2. Pretrain vs finetune MWE time series + GLaMBIE sources + OGGM
     if regional_pre is not None:
-        plot_regional_mwe_comparison(regional_pre, regional_fin, glambie_wide_df, cfg.model.output_dir)
+        plot_regional_mwe_comparison(regional_pre, regional_fin, glambie_wide_df, oggm_gt_df, cfg.model.output_dir)
 
     # 3. GLaMBIE scatter — finetune and pretrain
     plot_glambie_scatter(regional_fin, glambie_wide_df, "finetune", cfg.model.output_dir)
