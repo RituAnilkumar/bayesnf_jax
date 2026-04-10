@@ -346,12 +346,18 @@ def plot_marginals(df: pd.DataFrame, output_dir: Path) -> None:
         fig.suptitle(f"Marginal effect on {metric_label}", fontsize=13)
 
         for ax, short in zip(axes, param_cols):
-            groups = [
-                valid[valid[short] == val][metric_col].values
-                for val in sorted(valid[short].dropna().unique())
+            unique_vals = sorted(valid[short].dropna().unique())
+            pairs = [
+                (str(val), valid[valid[short] == val][metric_col].values)
+                for val in unique_vals
             ]
-            labels = [str(v) for v in sorted(valid[short].dropna().unique())]
-            bp = ax.boxplot(groups, labels=labels, patch_artist=True, notch=False)
+            # Drop any value whose group has no data (float comparison edge cases)
+            pairs = [(lbl, grp) for lbl, grp in pairs if len(grp) > 0]
+            if not pairs:
+                ax.set_visible(False)
+                continue
+            labels, groups = zip(*pairs)
+            bp = ax.boxplot(groups, tick_labels=labels, patch_artist=True, notch=False)
             for patch in bp["boxes"]:
                 patch.set_facecolor("steelblue")
                 patch.set_alpha(0.6)
