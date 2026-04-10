@@ -46,8 +46,6 @@ SWEEP_PARAMS = [
     "model.model_nlayers",
     "model.model_nhidden",
     "model.beta_anneal_epochs",
-    "model.finetune_lr",
-    "model.uncertainty_floor",
 ]
 
 # Short names used in plot labels / column headers
@@ -55,8 +53,6 @@ PARAM_SHORT = {
     "model.model_nlayers":        "nlayers",
     "model.model_nhidden":        "nhidden",
     "model.beta_anneal_epochs":   "beta_epochs",
-    "model.finetune_lr":          "lr",
-    "model.uncertainty_floor":    "unc_floor",
 }
 
 # Human-readable axis labels for plots
@@ -64,16 +60,13 @@ PARAM_LABEL = {
     "nlayers":     "N layers",
     "nhidden":     "Hidden width",
     "beta_epochs": "Beta anneal epochs",
-    "lr":          "Finetune LR",
-    "unc_floor":   "Uncertainty floor",
 }
 
 # Key 2-D pairs to show in heatmaps (short names)
 HEATMAP_PAIRS = [
     ("nlayers",     "nhidden"),
-    ("lr",          "unc_floor"),
-    ("beta_epochs", "lr"),
-    ("nlayers",     "lr"),
+    ("beta_epochs", "nlayers"),
+    ("beta_epochs", "nhidden"),
 ]
 
 
@@ -502,6 +495,70 @@ def plot_parallel_coords(df: pd.DataFrame, output_dir: Path) -> None:
     _savefig(fig, output_dir / "plots" / "parallel_coords.png", dpi=150)
 
 
+def plot_nhidden_vs_rmse(df: pd.DataFrame, output_dir: Path) -> None:
+    """nhidden on x-axis, RMSE on y-axis, one line per nlayers value.
+
+    Each point is the mean RMSE across all regions and beta_anneal_epochs values
+    for that (nhidden, nlayers) combination. Error bars show ±1 std.
+    Two subplots: LOYO RMSE (pretrain) and GLaMBIE test RMSE (finetune).
+    """
+    markers = {1: "o", 2: "s", 3: "^", 4: "D", 5: "v"}
+    colors  = {1: "steelblue", 2: "darkorange", 3: "forestgreen", 4: "purple", 5: "crimson"}
+
+    metrics = [
+        ("loyo_rmse",    "LOYO RMSE (MWE/yr)"),
+        ("glambie_rmse", "GLaMBIE test RMSE (MWE/yr)"),
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=False)
+
+    for ax, (metric_col, metric_label) in zip(axes, metrics):
+        valid = df.dropna(subset=[metric_col, "nhidden", "nlayers"])
+        if valid.empty:
+            ax.set_visible(False)
+            continue
+
+        nhidden_vals = sorted(valid["nhidden"].unique())
+        nlayers_vals = sorted(valid["nlayers"].unique())
+
+        for nl in nlayers_vals:
+            sub = valid[valid["nlayers"] == nl]
+            means, stds, xs = [], [], []
+            for nh in nhidden_vals:
+                cell = sub[sub["nhidden"] == nh][metric_col]
+                if len(cell) == 0:
+                    continue
+                xs.append(nh)
+                means.append(cell.mean())
+                stds.append(cell.std() if len(cell) > 1 else 0.0)
+
+            if not xs:
+                continue
+
+            marker = markers.get(int(nl), "o")
+            color  = colors.get(int(nl), "grey")
+            ax.errorbar(
+                xs, means, yerr=stds,
+                marker=marker, color=color, lw=1.5, ms=6, capsize=4,
+                label=f"{int(nl)} layer{'s' if nl > 1 else ''}",
+            )
+
+        ax.set_xlabel("Hidden width (neurons)", fontsize=10)
+        ax.set_ylabel(metric_label, fontsize=10)
+        ax.set_title(metric_label, fontsize=11)
+        ax.set_xticks(nhidden_vals)
+        ax.legend(fontsize=9, title="N layers")
+        ax.grid(alpha=0.35)
+
+    fig.suptitle(
+        "RMSE vs hidden width by number of layers\n"
+        "(mean ± std across regions and beta_anneal_epochs)",
+        fontsize=12,
+    )
+    fig.tight_layout()
+    _savefig(fig, output_dir / "plots" / "nhidden_vs_rmse.png")
+
+
 def plot_pretrain_vs_finetune(df: pd.DataFrame, output_dir: Path) -> None:
     """Scatter of LOYO RMSE (pretrain) vs GLaMBIE RMSE (finetune),
     one subplot per region, coloured by composite score.
@@ -739,23 +796,26 @@ def main() -> None:
     # ---- Plots ----
     print("\nGenerating plots...")
 
-    print("  [1/6] Marginal box plots")
+    print("  [1/7] Marginal box plots")
     plot_marginals(df, output_dir)
 
-    print("  [2/6] 2-D heatmaps")
+    print("  [2/7] 2-D heatmaps")
     plot_heatmaps(df, output_dir)
 
-    print("  [3/6] Parallel coordinates")
+    print("  [3/7] Parallel coordinates")
     plot_parallel_coords(df, output_dir)
 
-    print("  [4/6] Pretrain vs finetune scatter")
+    print("  [4/7] Pretrain vs finetune scatter")
     plot_pretrain_vs_finetune(df, output_dir)
 
-    print("  [5/6] Parameter importance")
+    print("  [5/7] Parameter importance")
     plot_param_importance(df, output_dir)
 
-    print("  [6/6] Regional ranking heatmap")
+    print("  [6/7] Regional ranking heatmap")
     plot_regional_ranking(df, output_dir, top_n=top_n)
+
+    print("  [7/7] Hidden width vs RMSE by n_layers")
+    plot_nhidden_vs_rmse(df, output_dir)
 
     # ---- Summary table ----
     print("\nTop runs:")
