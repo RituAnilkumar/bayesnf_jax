@@ -43,9 +43,6 @@ from src.data_utils import (
     FEATURE_COLS,
 )
 
-# Ice density assumption (Huss 2013) for Gt uncertainty propagation
-_ICE_DENSITY     = 850.0   # kg/m³
-_ICE_DENSITY_SIG = 60.0    # kg/m³ 1-sigma uncertainty
 
 
 # ---------------------------------------------------------------------------
@@ -201,13 +198,14 @@ def compute_regional_series(mc_preds_np: np.ndarray, pred_grid: pd.DataFrame) ->
 
 
 def _gt_with_density_unc(gt_summary: dict) -> tuple[np.ndarray, np.ndarray]:
-    """Return (p2_5_total, p97_5_total) folding in density uncertainty in quadrature."""
-    density_sig = np.abs(gt_summary["p50"]) * (_ICE_DENSITY_SIG / _ICE_DENSITY)
-    half_lo = gt_summary["p50"] - gt_summary["p2_5"]
-    half_hi = gt_summary["p97_5"] - gt_summary["p50"]
-    p2_5_total  = gt_summary["p50"] - np.sqrt(half_lo ** 2 + density_sig ** 2)
-    p97_5_total = gt_summary["p50"] + np.sqrt(half_hi ** 2 + density_sig ** 2)
-    return p2_5_total, p97_5_total
+    """
+    Return (p2_5_total, p97_5_total) from MC uncertainty only.
+
+    No density correction is applied: predictions are already in MWE/yr (mass per unit
+    area, water-equivalent), so the Gt conversion (MWE × area_km² × 1e-3) involves no
+    density assumption. The MC spread is the only source of uncertainty here.
+    """
+    return gt_summary["p2_5"], gt_summary["p97_5"]
 
 
 def _oggm_regional_gt(cfg: DictConfig, pred_grid: pd.DataFrame) -> pd.DataFrame:
@@ -510,18 +508,12 @@ def plot_cumulative_gt(
     ax.fill_between(yrs_fin, fin_s["p2_5"], fin_s["p97_5"], alpha=0.20, color="steelblue")
     ax.plot(yrs_fin, fin_s["p50"], color="steelblue", lw=1.3, label="Finetune (median, 95% CI)")
 
-    # OGGM — no MC, propagate density uncertainty through cumsum
+    # OGGM — single deterministic line (already in MWE/yr, no density assumption needed)
     if not oggm_gt_df.empty:
         og = oggm_gt_df[oggm_gt_df["year"] >= start_year].copy()
         if not og.empty:
-            og_cum  = og["gt"].cumsum().values
-            # Density uncertainty per year, accumulated in quadrature
-            og_sig  = np.abs(og["gt"].values) * (_ICE_DENSITY_SIG / _ICE_DENSITY)
-            og_cum_sig = np.sqrt(np.cumsum(og_sig ** 2))
-            ax.fill_between(og["year"].values,
-                            og_cum - 1.96 * og_cum_sig, og_cum + 1.96 * og_cum_sig,
-                            alpha=0.20, color="seagreen")
-            ax.plot(og["year"].values, og_cum, color="seagreen", lw=1.3, label="OGGM (density unc.)")
+            og_cum = og["gt"].cumsum().values
+            ax.plot(og["year"].values, og_cum, color="seagreen", lw=1.3, ls="--", label="OGGM")
 
     # GLaMBIE combined cumulative
     if not gb.empty:

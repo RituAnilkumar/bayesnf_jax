@@ -78,7 +78,7 @@ def temporal_avg_loss(
     where pred_period_mean_i = mean of preds for glacier i over start_date–end_date rows.
 
     uncertainty_floor prevents glaciers with very small reported uncertainties from
-    dominating the loss. Set via cfg.model.uncertainty_floor (default 0.1 MWE/yr).
+    dominating the loss. Set via cfg.model.uncertainty_floor.
 
     Inputs are already in MWE/yr — no unit conversion needed.
     rgi_id ordering must match the factorize codes in glacier_ids (assert upstream).
@@ -130,7 +130,7 @@ def glambie_loss(
     ]
 
     uncertainty_floor prevents observations with very small reported uncertainties from
-    dominating the loss. Set via cfg.model.uncertainty_floor (default 0.1 MWE/yr).
+    dominating the loss. Set via cfg.model.uncertainty_floor.
 
     Args:
         preds:             Predictions for rows whose year appears in GLaMBIE, shape (N,)
