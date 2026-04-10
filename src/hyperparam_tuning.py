@@ -655,10 +655,7 @@ def plot_regional_ranking(df: pd.DataFrame, output_dir: Path, top_n: int = 10) -
 
     # Build label for each config row
     def _config_label(row) -> str:
-        return (
-            f"L={int(row.nlayers)} H={int(row.nhidden)} "
-            f"β={int(row.beta_epochs)} lr={row.lr:.0e} σ={row.unc_floor}"
-        )
+        return f"L={int(row.nlayers)} H={int(row.nhidden)} β={int(row.beta_epochs)}"
 
     config_labels = [_config_label(r) for _, r in top_configs.iterrows()]
 
