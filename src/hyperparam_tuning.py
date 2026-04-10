@@ -408,7 +408,11 @@ def plot_heatmaps(df: pd.DataFrame, output_dir: Path) -> None:
         agg_grid  = _make_grid(valid)
 
         all_data = np.concatenate([g[~np.isnan(g)] for g in all_grids] + [agg_grid[~np.isnan(agg_grid)]])
-        vmin, vmax = np.nanmin(all_data), np.nanmax(all_data)
+        if all_data.size == 0:
+            plt.close(fig)
+            print(f"  Skipping heatmap {p1} vs {p2} — no complete runs for this pair")
+            continue
+        vmin, vmax = all_data.min(), all_data.max()
 
         for ax_idx, (label, grid) in enumerate(
             list(zip(regions, all_grids)) + [("All regions", agg_grid)]
