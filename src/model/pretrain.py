@@ -18,6 +18,7 @@ Outputs written to cfg.model.output_dir:
 """
 
 import os
+import functools
 import jax
 import jax.numpy as jnp
 import optax
@@ -135,19 +136,23 @@ def make_train_step(
     huber_delta: float = 0.5,
 ):
     """
-    Factory: returns a JIT-compiled train_step closed over model, optimizer, and n_data.
+    Factory: returns a pmap-compiled train_step for multi-GPU data parallelism.
 
-    n_data normalises KL to the per-data-point scale of the likelihood.
-    loss_fn_name / huber_delta control the OGGM point-level loss (see oggm_loss).
+    All arguments must have a leading device axis of size n_devices:
+        params, opt_state   — replicated via jax.device_put_replicated
+        rng                 — (n_devices, 2) from jax.random.split(key, n_devices)
+        time_index          — (n_devices, N//n_devices)
+        covariates          — (n_devices, N//n_devices, n_features)
+        targets             — (n_devices, N//n_devices)
+        beta                — (n_devices,) broadcast scalar
 
-    Returned function signature:
-        train_step(params, opt_state, rng, time_index, covariates, targets, beta)
-        -> (params, opt_state, loss_scalar)
+    n_data must be the TOTAL dataset size (before sharding) so the KL
+    normalisation in pretrain_elbo is correct after pmean.
     """
-    @jax.jit
+    @functools.partial(jax.pmap, axis_name='devices')
     def train_step(params, opt_state, rng, time_index, covariates, targets, beta):
         def loss_fn(params):
-            rng_fwd, rng_kl = jax.random.split(rng)
+            rng_fwd, _ = jax.random.split(rng)
             preds = model.apply(params, time_index, covariates, rng_fwd)
             l_oggm = oggm_loss(preds, targets, loss_fn=loss_fn_name, delta=huber_delta)
 
@@ -155,9 +160,17 @@ def make_train_step(
             prior_mu, prior_log_sigma = make_standard_normal_prior(mu_dict, log_sigma_dict)
             kl = compute_total_kl(mu_dict, log_sigma_dict, prior_mu, prior_log_sigma)
 
+            # n_data is the TOTAL dataset size (not the per-device shard size) so
+            # KL scaling is correct after pmean averages the likelihood gradients.
             return pretrain_elbo(l_oggm, kl, beta, n_data)
 
         loss, grads = jax.value_and_grad(loss_fn)(params)
+        # Average gradients and loss across all devices.  KL gradients are
+        # identical on every device (params are replicated), so pmean leaves
+        # them unchanged.  Likelihood gradients from each shard are averaged
+        # to recover the full-batch gradient.
+        grads = jax.lax.pmean(grads, axis_name='devices')
+        loss  = jax.lax.pmean(loss,  axis_name='devices')
         updates, opt_state_new = optimizer.update(grads, opt_state, params)
         params_new = optax.apply_updates(params, updates)
         return params_new, opt_state_new, loss
@@ -209,6 +222,32 @@ def evaluate_split(
     ss_tot = float(jnp.sum((targets - jnp.mean(targets)) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
     return {"rmse": rmse, "bias": bias, "r2": r2, "n_points": len(targets)}
+
+
+# ---------------------------------------------------------------------------
+# Multi-GPU helpers
+# ---------------------------------------------------------------------------
+
+def _shard_arrays(arrays: dict, n_devices: int) -> dict:
+    """
+    Pad N to the nearest multiple of n_devices, then reshape each array from
+    (N, ...) to (n_devices, N//n_devices, ...) so pmap can distribute shards.
+
+    Padding duplicates the first few rows — for large N (tens of thousands)
+    the effect on the loss is negligible.
+    """
+    n = next(iter(arrays.values())).shape[0]
+    pad = (-n) % n_devices
+    if pad > 0:
+        arrays = {k: jnp.concatenate([v, v[:pad]], axis=0) for k, v in arrays.items()}
+        n = n + pad
+    n_per = n // n_devices
+    return {k: v.reshape(n_devices, n_per, *v.shape[1:]) for k, v in arrays.items()}
+
+
+def _unreplicate(tree):
+    """Extract the single-device copy of a pmap-replicated pytree (takes device 0)."""
+    return jax.tree_util.tree_map(lambda x: x[0], tree)
 
 
 # ---------------------------------------------------------------------------
@@ -297,8 +336,21 @@ def run_pretrain(cfg: DictConfig) -> None:
         best_params    = params
         no_improve     = 0
 
+    # --- Multi-GPU setup ---
+    # n_data must be captured from the FULL (unsharded) dataset so the KL
+    # normalisation in pretrain_elbo is correct after pmean.
+    n_data    = len(train_arrays["targets"])
+    n_devices = jax.local_device_count()
+    devices   = jax.devices()
+    print(f"  Using {n_devices} device(s): {devices}")
+
+    sharded_arrays = _shard_arrays(train_arrays, n_devices)
+
+    # Replicate params and optimizer state across all devices.
+    params    = jax.device_put_replicated(params, devices)
+    opt_state = jax.device_put_replicated(opt_state, devices)
+
     # --- Training loop ---
-    n_data = len(train_arrays["targets"])
     train_step = make_train_step(
         model, optimizer, n_data,
         loss_fn_name=cfg.model.get("oggm_loss_fn", "huber"),
@@ -310,26 +362,31 @@ def run_pretrain(cfg: DictConfig) -> None:
     for epoch in range(cfg.model.model_nepochs):
         rng, rng_step = jax.random.split(rng)
         beta = beta_schedule[epoch]
-        params, opt_state, loss = train_step(
-            params, opt_state, rng_step,
-            train_arrays["time_index"],
-            train_arrays["covariates"],
-            train_arrays["targets"],
-            beta,
+        # Give each device a distinct RNG key so weight samples are independent.
+        rng_keys = jax.random.split(rng_step, n_devices)       # (n_devices, 2)
+        beta_arr = jnp.full((n_devices,), beta)                # (n_devices,)
+        params, opt_state, loss_arr = train_step(
+            params, opt_state, rng_keys,
+            sharded_arrays["time_index"],
+            sharded_arrays["covariates"],
+            sharded_arrays["targets"],
+            beta_arr,
         )
-        losses.append(float(loss))
+        # loss_arr has shape (n_devices,); all values identical after pmean.
+        loss = float(loss_arr[0])
+        losses.append(loss)
         if (epoch + 1) % max(1, cfg.model.model_nepochs // 10) == 0:
             print(f"  epoch {epoch+1}/{cfg.model.model_nepochs}  loss={loss:.6f}  beta={beta:.3f}")
 
         # --- Early stopping check ---
         if use_early_stop and (epoch + 1) % eval_interval == 0:
             rng, rng_es = jax.random.split(rng)
-            val_metrics = evaluate_split(model, params, loyo_arrays, rng_es,
+            val_metrics = evaluate_split(model, _unreplicate(params), loyo_arrays, rng_es,
                                          n_samples=10, target_scaler=target_scaler)
             val_rmse = val_metrics["rmse"]
             if val_rmse < best_val_rmse:
                 best_val_rmse = val_rmse
-                best_params   = params
+                best_params   = params  # store replicated; unreplicate at save time
                 no_improve    = 0
             else:
                 no_improve += 1
@@ -343,7 +400,9 @@ def run_pretrain(cfg: DictConfig) -> None:
         print(f"  Restored best params (loyo RMSE={best_val_rmse:.4f}, stopped at epoch {stopped_epoch})")
 
     # --- Save pretrained params ---
-    mu_dict, log_sigma_dict = extract_vi_params(params["params"])
+    # Un-replicate before extracting VI params — all devices hold identical values.
+    single_params = _unreplicate(params)
+    mu_dict, log_sigma_dict = extract_vi_params(single_params["params"])
     params_path = os.path.join(cfg.model.output_dir, "pretrained_params.pkl")
     with open(params_path, "wb") as f:
         cloudpickle.dump((mu_dict, log_sigma_dict), f)
@@ -375,7 +434,7 @@ def run_pretrain(cfg: DictConfig) -> None:
                 continue
             arrays = prepare_arrays(split_df, ft_cols, scaler=scaler, target_scaler=target_scaler)
             rng, rng_eval = jax.random.split(rng)
-            metrics = evaluate_split(model, params, arrays, rng_eval, n_samples=cfg.model.model_nensemble, target_scaler=target_scaler)
+            metrics = evaluate_split(model, single_params, arrays, rng_eval, n_samples=cfg.model.model_nensemble, target_scaler=target_scaler)
             metrics["region"] = region
             metrics["split"]  = split_name
             rows.append(metrics)
