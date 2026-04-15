@@ -183,7 +183,7 @@ def _region_from_dir_name(dir_name: str) -> str:
 def build_results_df(
     multirun_root: Path,
     test_years: list[int],
-    min_runs_per_region: int = 10,
+    min_runs_per_region: int = 5,
 ) -> pd.DataFrame:
     """Load metrics for every discovered run and return a combined DataFrame.
 
@@ -441,6 +441,9 @@ def plot_parallel_coords(df: pd.DataFrame, output_dir: Path) -> None:
     Only complete runs (no NaN in composite) are shown.
     """
     valid = df.dropna(subset=["composite"]).copy()
+    if valid.empty:
+        print("  Skipping parallel coords — no complete runs")
+        return
     param_cols = list(PARAM_SHORT.values())
 
     # Normalise each param axis to [0, 1] for visual alignment
@@ -564,6 +567,9 @@ def plot_pretrain_vs_finetune(df: pd.DataFrame, output_dir: Path) -> None:
     one subplot per region, coloured by composite score.
     """
     valid = df.dropna(subset=["loyo_rmse", "glambie_rmse"])
+    if valid.empty:
+        print("  Skipping pretrain vs finetune scatter — no complete runs")
+        return
     regions = sorted(valid["region"].unique())
     ncols = min(4, len(regions))
     nrows = int(np.ceil(len(regions) / ncols))
@@ -613,6 +619,9 @@ def plot_param_importance(df: pd.DataFrame, output_dir: Path) -> None:
 
     for ax, (metric_col, metric_label) in zip(axes, metrics):
         imp = compute_param_importance(df, metric=metric_col)
+        if imp.empty or imp.max() == 0:
+            ax.set_visible(False)
+            continue
         colors = ["steelblue" if v >= imp.max() * 0.5 else "lightsteelblue" for v in imp.values]
         ax.barh(
             [PARAM_LABEL.get(k, k) for k in imp.index],
@@ -638,6 +647,9 @@ def plot_regional_ranking(df: pd.DataFrame, output_dir: Path, top_n: int = 10) -
     Helps assess whether the best configs generalise across regions.
     """
     valid = df.dropna(subset=["composite"])
+    if valid.empty:
+        print("  Skipping regional ranking — no complete runs")
+        return
     param_cols = list(PARAM_SHORT.values())
 
     # Top-N configs by mean_rank
@@ -769,7 +781,7 @@ def main() -> None:
     test_years    = list(cfg.get("glambie_test_years", [2021, 2022, 2023]))
     loyo_weight   = float(cfg.get("loyo_weight",   0.5))
     glambie_weight= float(cfg.get("glambie_weight", 0.5))
-    min_runs      = int(cfg.get("min_runs_per_region", 10))
+    min_runs      = int(cfg.get("min_runs_per_region", 5))
     top_n         = int(cfg.get("top_n", 10))
 
     output_dir.mkdir(parents=True, exist_ok=True)
