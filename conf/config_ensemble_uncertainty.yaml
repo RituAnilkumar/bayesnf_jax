@@ -1,0 +1,35 @@
+# Config for src/ensemble_uncertainty.py
+#
+# Usage:
+#   python src/ensemble_uncertainty.py
+#   python src/ensemble_uncertainty.py --config conf/config_ensemble_uncertainty.yaml
+#   python src/ensemble_uncertainty.py --multirun_root /path/to/multirun/r06_3645680
+#
+# multirun_root must point directly to the region-job sweep directory whose
+# immediate children are numbered run directories (0, 1, 2, ...) — same layout
+# as config_hyperparam_tuning.yaml.
+# Outputs are written to: {output_dir}/
+
+multirun_root: /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r06_3645680
+output_dir: outputs/ensemble_uncertainty
+
+# Weighting scheme: 'performance' or 'equal'
+#   performance: softmax over negative composite scores (lower composite = higher weight)
+#   equal:       uniform weights across all valid runs
+weighting: performance
+
+# Composite score weights (only used when weighting: performance).
+# Must match the weights used in config_hyperparam_tuning.yaml for consistency.
+loyo_weight: 0.0
+glambie_weight: 1.0
+
+# GLaMBIE years held out for test RMSE. Must match config_hyperparam_tuning.yaml.
+glambie_test_years: [2021, 2022, 2023]
+
+# Softmax temperature for performance-based weights.
+# Lower = weight concentrates on best model; higher = approaches equal weighting.
+# Operates on composite scores already normalised to [0, 1] per region.
+softmax_temperature: 0.1
+
+# Skip ensemble if fewer than this many runs have complete metrics.
+min_runs_per_region: 5

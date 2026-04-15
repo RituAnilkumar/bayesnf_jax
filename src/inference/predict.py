@@ -287,9 +287,11 @@ def _save_regional_csvs(regional: dict, output_dir: str, suffix: str = "") -> No
     mwe   = _summarise(regional["mwe_samples"])
     gt    = _summarise(regional["gt_samples"])
 
-    pd.DataFrame({"year": years, **{k: mwe[k] for k in ("p2_5", "p50", "p97_5", "mean", "std")}}).to_csv(
-        os.path.join(output_dir, f"regional_annual_mwe{suffix}.csv"), index=False
-    )
+    pd.DataFrame({
+        "year": years,
+        "total_area_km2": regional["total_area_km2"],
+        **{k: mwe[k] for k in ("p2_5", "p50", "p97_5", "mean", "std")},
+    }).to_csv(os.path.join(output_dir, f"regional_annual_mwe{suffix}.csv"), index=False)
     pd.DataFrame({
         "year": years, "p2_5": gt["p2_5"], "p50": gt["p50"], "p97_5": gt["p97_5"],
         "mean": gt["mean"], "std": gt["std"],
