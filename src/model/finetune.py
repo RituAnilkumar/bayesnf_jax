@@ -351,7 +351,7 @@ def make_train_step(
             # multiple periods are ever re-enabled.
             l_ta = jnp.array(0.0)
             for period in sa["hugonnet_periods"]:
-                period_preds_scaled = model.apply(
+                period_preds_scaled = jax.checkpoint(model.apply)(
                     params,
                     sa["time_index"][period["period_mask"]],
                     sa["covariates"][period["period_mask"]],
@@ -370,7 +370,7 @@ def make_train_step(
 
             # --- GLaMBIE loss (unscale model output → physical MWE/yr) ---
             if has_glambie:
-                glambie_preds_scaled = model.apply(
+                glambie_preds_scaled = jax.checkpoint(model.apply)(
                     params,
                     sa["glambie_time_index"],
                     sa["glambie_covariates"],
