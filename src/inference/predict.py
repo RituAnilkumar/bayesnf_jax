@@ -9,7 +9,7 @@ Output files:
   preds_full_pretrain.csv         — same, from pretrained model
   regional_annual_mwe.csv         — area-weighted regional mean MWE/yr per year  [finetune]
   regional_annual_mwe_pretrain.csv
-  regional_annual_gt.csv          — regional Gt/yr per year (MC + density uncertainty)  [finetune]
+  regional_annual_gt.csv          — regional Gt/yr per year (MC uncertainty)  [finetune]
   regional_annual_gt_pretrain.csv
   regional_mass_loss.png          — finetune Gt/yr + GLaMBIE combined
   regional_mwe_comparison.png     — pretrain vs finetune MWE on same axes
@@ -197,15 +197,6 @@ def compute_regional_series(mc_preds_np: np.ndarray, pred_grid: pd.DataFrame) ->
     }
 
 
-def _gt_with_density_unc(gt_summary: dict) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Return (p2_5_total, p97_5_total) from MC uncertainty only.
-
-    No density correction is applied: predictions are already in MWE/yr (mass per unit
-    area, water-equivalent), so the Gt conversion (MWE × area_km² × 1e-3) involves no
-    density assumption. The MC spread is the only source of uncertainty here.
-    """
-    return gt_summary["p2_5"], gt_summary["p97_5"]
 
 
 def _oggm_regional_gt(cfg: DictConfig, pred_grid: pd.DataFrame) -> pd.DataFrame:
@@ -295,7 +286,6 @@ def _save_regional_csvs(regional: dict, output_dir: str, suffix: str = "") -> No
     years = regional["years"]
     mwe   = _summarise(regional["mwe_samples"])
     gt    = _summarise(regional["gt_samples"])
-    p2_5_total, p97_5_total = _gt_with_density_unc(gt)
 
     pd.DataFrame({"year": years, **{k: mwe[k] for k in ("p2_5", "p50", "p97_5", "mean", "std")}}).to_csv(
         os.path.join(output_dir, f"regional_annual_mwe{suffix}.csv"), index=False
@@ -303,7 +293,6 @@ def _save_regional_csvs(regional: dict, output_dir: str, suffix: str = "") -> No
     pd.DataFrame({
         "year": years, "p2_5": gt["p2_5"], "p50": gt["p50"], "p97_5": gt["p97_5"],
         "mean": gt["mean"], "std": gt["std"],
-        "p2_5_total": p2_5_total, "p97_5_total": p97_5_total,
     }).to_csv(os.path.join(output_dir, f"regional_annual_gt{suffix}.csv"), index=False)
     print(f"Saved regional_annual_mwe{suffix}.csv and regional_annual_gt{suffix}.csv")
 
@@ -312,13 +301,10 @@ def _save_regional_csvs(regional: dict, output_dir: str, suffix: str = "") -> No
 # Plot helpers
 # ---------------------------------------------------------------------------
 
-def _shade_mc(ax, years, gt_summary, color, alpha_mc=0.40, alpha_total=0.20, label_prefix=""):
-    """Fill MC band (darker) and total-uncertainty band (lighter) on ax."""
-    p2_5_total, p97_5_total = _gt_with_density_unc(gt_summary)
-    ax.fill_between(years, p2_5_total, p97_5_total, alpha=alpha_total, color=color,
-                    label=f"{label_prefix}95% CI (MC+density)")
+def _shade_mc(ax, years, gt_summary, color, alpha_mc=0.40, label_prefix=""):
+    """Fill 95% MC credible interval band and plot median on ax."""
     ax.fill_between(years, gt_summary["p2_5"], gt_summary["p97_5"], alpha=alpha_mc, color=color,
-                    label=f"{label_prefix}95% CI (MC)")
+                    label=f"{label_prefix}95% CI")
     ax.plot(years, gt_summary["p50"], color=color, lw=1.5, label=f"{label_prefix}median")
 
 
