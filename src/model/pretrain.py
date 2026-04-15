@@ -153,11 +153,7 @@ def make_train_step(
     def train_step(params, opt_state, rng, time_index, covariates, targets, beta):
         def loss_fn(params):
             rng_fwd, _ = jax.random.split(rng)
-            # jax.checkpoint recomputes activations during backprop instead of
-            # storing them — reduces peak memory from O(n_layers) to O(1).
-            # Safe for VI: rng_fwd is deterministic so the same eps are drawn
-            # during the recomputed forward pass.
-            preds = jax.checkpoint(model.apply)(params, time_index, covariates, rng_fwd)
+            preds = model.apply(params, time_index, covariates, rng_fwd)
             l_oggm = oggm_loss(preds, targets, loss_fn=loss_fn_name, delta=huber_delta)
 
             mu_dict, log_sigma_dict   = extract_vi_params(params["params"])

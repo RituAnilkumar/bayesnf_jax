@@ -190,9 +190,16 @@ class BayesianNeuralField(nn.Module):
             n_fourier=self.n_fourier,
             seed=self.fourier_seed
         )
-        # Build VI dense layers: hidden layers + scalar output layer
+        # nn.remat applies gradient checkpointing at the hidden-layer level:
+        # activations are recomputed during backprop instead of stored, reducing
+        # peak memory from O(n_layers × batch) to O(batch).  Applied here at the
+        # Flax module level so XLA sees proper checkpoint annotations before pmap
+        # compilation — wrapping model.apply with jax.checkpoint inside pmap
+        # confuses XLA's HLO buffer size estimator for larger architectures.
+        # The output layer is a single linear op and costs negligible memory.
+        RematVIDense = nn.remat(VIDense)
         self.hidden_layers = [
-            VIDense(features=h) for h in self.hidden_sizes
+            RematVIDense(features=h) for h in self.hidden_sizes
         ]
         self.output_layer = VIDense(features=1)
 
