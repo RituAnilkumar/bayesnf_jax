@@ -45,8 +45,13 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import warnings
 from pathlib import Path
+
+# Ensure the project root is on sys.path so this script can be run directly
+# as `python src/ensemble_uncertainty.py` from the project root.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import matplotlib
 matplotlib.use("Agg")
