@@ -161,6 +161,92 @@ def _ensemble_components(
 
 
 # ---------------------------------------------------------------------------
+# Auxiliary data helpers (self-contained — no import from predict.py)
+# ---------------------------------------------------------------------------
+
+def _load_glambie_wide(glambie_path: str):
+    """Load GLaMBIE wide-format CSV. Returns None if path is empty or missing."""
+    if not glambie_path or not os.path.exists(glambie_path):
+        return None
+    return pd.read_csv(glambie_path)
+
+
+def _glambie_combined_gt(glambie_wide_df, total_area_km2: float) -> pd.DataFrame:
+    """Extract GLaMBIE combined as Gt/yr per year."""
+    if glambie_wide_df is None or "combined_mwe" not in glambie_wide_df.columns:
+        return pd.DataFrame(columns=["year", "gt", "gt_err"])
+    gb = glambie_wide_df.dropna(subset=["combined_mwe", "combined_mwe_errors"]).copy()
+    if gb.empty:
+        return pd.DataFrame(columns=["year", "gt", "gt_err"])
+    gb["year"]   = np.floor(gb["end_date"]).astype(int)
+    gb["gt"]     = gb["combined_mwe"].values     * total_area_km2 * 1e-3
+    gb["gt_err"] = gb["combined_mwe_errors"].values * total_area_km2 * 1e-3
+    return gb[["year", "gt", "gt_err"]].sort_values("year").reset_index(drop=True)
+
+
+def _glambie_sources_mwe(glambie_wide_df) -> dict:
+    """Extract altimetry and gravimetry from GLaMBIE wide format as MWE/yr per year."""
+    empty = pd.DataFrame(columns=["year", "mwe", "mwe_err"])
+    if glambie_wide_df is None:
+        return {"altimetry": empty, "gravimetry": empty}
+    result = {}
+    for source in ("altimetry", "gravimetry"):
+        val_col = f"{source}_mwe"
+        err_col = f"{source}_mwe_errors"
+        if val_col not in glambie_wide_df.columns or err_col not in glambie_wide_df.columns:
+            result[source] = empty
+            continue
+        df = glambie_wide_df.dropna(subset=[val_col, err_col]).copy()
+        if df.empty:
+            result[source] = empty
+            continue
+        df["year"]    = np.floor(df["end_date"]).astype(int)
+        df["mwe"]     = df[val_col].values
+        df["mwe_err"] = df[err_col].values
+        result[source] = df[["year", "mwe", "mwe_err"]].sort_values("year").reset_index(drop=True)
+    return result
+
+
+def _load_oggm_regional(inp_dir: str, reg_subdir: str) -> pd.DataFrame:
+    """
+    Load OGGM targets and compute area-weighted regional Gt/yr and MWE/yr per year.
+
+    Returns DataFrame with columns: year, gt, mwe.
+    Returns empty DataFrame if files are missing.
+    """
+    if not inp_dir or not reg_subdir:
+        return pd.DataFrame(columns=["year", "gt", "mwe"])
+
+    oggm_path = os.path.join(inp_dir, reg_subdir, f"oggm_targets_{reg_subdir}.csv")
+    feat_path = os.path.join(inp_dir, reg_subdir, f"main_features_{reg_subdir}.csv")
+
+    if not os.path.exists(oggm_path) or not os.path.exists(feat_path):
+        warnings.warn(f"OGGM files not found under {inp_dir}/{reg_subdir} — OGGM series skipped.")
+        return pd.DataFrame(columns=["year", "gt", "mwe"])
+
+    oggm = pd.read_csv(oggm_path)
+    # Handle both raw mm/yr and pre-converted MWE/yr column names
+    if "mass_balance_mwe" not in oggm.columns:
+        if "mass_balance" in oggm.columns:
+            oggm["mass_balance_mwe"] = oggm["mass_balance"] / 1000.0
+        else:
+            warnings.warn("OGGM targets CSV has no recognised mass balance column — skipped.")
+            return pd.DataFrame(columns=["year", "gt", "mwe"])
+
+    feats  = pd.read_csv(feat_path, usecols=["rgi_id", "year", "Area"])
+    merged = oggm.merge(feats, on=["rgi_id", "year"], how="inner")
+
+    rows = []
+    for yr, grp in merged.groupby("year"):
+        total_area = grp["Area"].sum()
+        if total_area > 0:
+            w_mwe = (grp["mass_balance_mwe"] * grp["Area"]).sum() / total_area
+            rows.append({"year": yr, "gt": w_mwe * total_area * 1e-3, "mwe": w_mwe})
+
+    return pd.DataFrame(rows).sort_values("year").reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
 
@@ -171,42 +257,168 @@ def _savefig(fig: plt.Figure, path: Path, dpi: int = 150) -> None:
     print(f"  Saved {path}")
 
 
-def plot_regional_uncertainty(
-    regional_mwe: pd.DataFrame,
-    regional_gt: pd.DataFrame,
+def _shade_ensemble(ax, years, mu, s_eps, s_str, s_tot):
+    """
+    Draw three nested uncertainty bands and the ensemble median.
+
+    Bands (outermost to innermost):
+      ±2σ total       — lightest fill (steelblue)
+      ±1σ structural  — medium fill (darkorange)
+      ±1σ epistemic   — darkest fill (steelblue)
+    """
+    ax.fill_between(years, mu - 2 * s_tot, mu + 2 * s_tot,
+                    alpha=0.12, color="steelblue", label="±2σ total")
+    ax.fill_between(years, mu - s_str, mu + s_str,
+                    alpha=0.25, color="darkorange", label="±1σ structural")
+    ax.fill_between(years, mu - s_eps, mu + s_eps,
+                    alpha=0.30, color="steelblue", label="±1σ epistemic")
+    ax.plot(years, mu, color="steelblue", lw=1.8, label="ensemble median")
+
+
+def plot_ensemble_gt(
+    ensemble_gt: pd.DataFrame,
+    glambie_wide_df,
+    oggm_df: pd.DataFrame,
+    total_area_km2: np.ndarray,
+    output_dir: Path,
+) -> None:
+    """Regional Gt/yr: ensemble uncertainty bands + OGGM + GLaMBIE sources."""
+    years           = ensemble_gt["year"].values
+    mu              = ensemble_gt["median_gt"].values
+    total_area_mean = float(total_area_km2.mean())
+
+    gb_combined = _glambie_combined_gt(glambie_wide_df, total_area_mean)
+    gb_sources  = _glambie_sources_mwe(glambie_wide_df)
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    _shade_ensemble(ax, years, mu,
+                    ensemble_gt["std_epistemic"].values,
+                    ensemble_gt["std_structural"].values,
+                    ensemble_gt["std_total"].values)
+
+    if not gb_combined.empty:
+        ax.errorbar(gb_combined["year"].values, gb_combined["gt"].values,
+                    yerr=gb_combined["gt_err"].values,
+                    fmt="o", color="black", ms=4, lw=1.2, capsize=3, label="GLaMBIE combined")
+
+    for source, color, marker in [("altimetry", "forestgreen", "s"), ("gravimetry", "purple", "^")]:
+        df = gb_sources[source]
+        if not df.empty:
+            gt_vals = df["mwe"].values * total_area_mean * 1e-3
+            gt_errs = df["mwe_err"].values * total_area_mean * 1e-3
+            ax.errorbar(df["year"].values, gt_vals, yerr=gt_errs,
+                        fmt=marker, color=color, ms=4, lw=1.2, capsize=3,
+                        label=f"GLaMBIE {source}")
+
+    if not oggm_df.empty:
+        ax.plot(oggm_df["year"].values, oggm_df["gt"].values,
+                color="seagreen", lw=1.2, ls="--", label="OGGM")
+
+    ax.axhline(0, color="black", lw=0.6, ls="--")
+    ax.set_xlabel("Year"); ax.set_ylabel("Gt/yr")
+    ax.set_title("Regional mass balance — ensemble (Gt/yr)")
+    ax.legend(fontsize=8); fig.tight_layout()
+    _savefig(fig, output_dir / "ensemble_regional_gt.png")
+
+
+def plot_ensemble_mwe(
+    ensemble_mwe: pd.DataFrame,
+    glambie_wide_df,
+    oggm_df: pd.DataFrame,
+    total_area_km2: np.ndarray,
+    output_dir: Path,
+) -> None:
+    """Regional MWE/yr: ensemble uncertainty bands + OGGM + GLaMBIE sources."""
+    years           = ensemble_mwe["year"].values
+    mu              = ensemble_mwe["median_mwe"].values
+    total_area_mean = float(total_area_km2.mean())
+
+    gb_sources     = _glambie_sources_mwe(glambie_wide_df)
+    gb_combined_gt = _glambie_combined_gt(glambie_wide_df, total_area_mean)
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    _shade_ensemble(ax, years, mu,
+                    ensemble_mwe["std_epistemic"].values,
+                    ensemble_mwe["std_structural"].values,
+                    ensemble_mwe["std_total"].values)
+
+    # GLaMBIE combined converted back to MWE
+    if not gb_combined_gt.empty and total_area_mean > 0:
+        gb_mwe     = gb_combined_gt["gt"].values / (total_area_mean * 1e-3)
+        gb_mwe_err = gb_combined_gt["gt_err"].values / (total_area_mean * 1e-3)
+        ax.errorbar(gb_combined_gt["year"].values, gb_mwe, yerr=gb_mwe_err,
+                    fmt="o", color="black", ms=4, lw=1.0, capsize=3, label="GLaMBIE combined")
+
+    for source, color, marker in [("altimetry", "forestgreen", "s"), ("gravimetry", "purple", "^")]:
+        df = gb_sources[source]
+        if not df.empty:
+            ax.errorbar(df["year"].values, df["mwe"].values, yerr=df["mwe_err"].values,
+                        fmt=marker, color=color, ms=4, lw=1.0, capsize=3,
+                        label=f"GLaMBIE {source}")
+
+    if not oggm_df.empty:
+        ax.plot(oggm_df["year"].values, oggm_df["mwe"].values,
+                color="seagreen", lw=1.2, ls="--", label="OGGM")
+
+    ax.axhline(0, color="black", lw=0.6, ls="--")
+    ax.set_xlabel("Year"); ax.set_ylabel("MWE/yr")
+    ax.set_title("Regional mass balance — ensemble (MWE/yr)")
+    ax.legend(fontsize=8); fig.tight_layout()
+    _savefig(fig, output_dir / "ensemble_regional_mwe.png")
+
+
+def plot_ensemble_cumulative_gt(
+    ensemble_gt: pd.DataFrame,
+    glambie_wide_df,
+    oggm_df: pd.DataFrame,
+    total_area_km2: np.ndarray,
     output_dir: Path,
 ) -> None:
     """
-    Two-panel time series: regional MWE/yr (top) and Gt/yr (bottom).
-    Shaded bands show ±1 std for each uncertainty component.
+    Cumulative Gt from the first year GLaMBIE combined data is available
+    (or the first prediction year if GLaMBIE is absent).
+
+    Ensemble cumulative uncertainty propagated in quadrature assuming
+    year-to-year independence: cum_std_t = sqrt(Σ_{s≤t} std_total_s²).
     """
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    total_area_mean = float(total_area_km2.mean())
+    gb_combined = _glambie_combined_gt(glambie_wide_df, total_area_mean)
 
-    for ax, df, ylabel, title in [
-        (axes[0], regional_mwe, "MWE/yr", "Regional ensemble — MWE/yr"),
-        (axes[1], regional_gt,  "Gt/yr",  "Regional ensemble — Gt/yr"),
-    ]:
-        years = df["year"].values
-        mu    = df["median_mwe" if "median_mwe" in df.columns else "median_gt"].values
-        s_str = df["std_structural"].values
-        s_eps = df["std_epistemic"].values
-        s_tot = df["std_total"].values
+    start_year = int(gb_combined["year"].min()) if not gb_combined.empty \
+        else int(ensemble_gt["year"].min())
 
-        ax.fill_between(years, mu - s_tot, mu + s_tot,
-                        alpha=0.15, color="steelblue", label="±1σ total")
-        ax.fill_between(years, mu - s_str, mu + s_str,
-                        alpha=0.25, color="darkorange", label="±1σ structural")
-        ax.fill_between(years, mu - s_eps, mu + s_eps,
-                        alpha=0.30, color="steelblue", label="±1σ epistemic")
-        ax.plot(years, mu, color="steelblue", lw=1.8, label="ensemble median")
-        ax.axhline(0, color="k", lw=0.6, ls="--")
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
-        ax.legend(fontsize=8)
+    mask       = ensemble_gt["year"].values >= start_year
+    years      = ensemble_gt["year"].values[mask]
+    cum_median = np.cumsum(ensemble_gt["median_gt"].values[mask])
+    cum_std    = np.sqrt(np.cumsum(ensemble_gt["std_total"].values[mask] ** 2))
 
-    axes[1].set_xlabel("Year")
-    fig.tight_layout()
-    _savefig(fig, output_dir / "regional_uncertainty.png")
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    ax.fill_between(years, cum_median - 2 * cum_std, cum_median + 2 * cum_std,
+                    alpha=0.15, color="steelblue", label="±2σ total")
+    ax.plot(years, cum_median, color="steelblue", lw=1.8, label="Ensemble median")
+
+    if not oggm_df.empty:
+        og = oggm_df[oggm_df["year"] >= start_year].copy()
+        if not og.empty:
+            ax.plot(og["year"].values, np.cumsum(og["gt"].values),
+                    color="seagreen", lw=1.3, ls="--", label="OGGM")
+
+    if not gb_combined.empty:
+        gb_from = gb_combined[gb_combined["year"] >= start_year].copy()
+        if not gb_from.empty:
+            gb_cum     = gb_from["gt"].cumsum().values
+            gb_cum_err = np.sqrt(np.cumsum(gb_from["gt_err"].values ** 2))
+            ax.fill_between(gb_from["year"].values,
+                            gb_cum - 1.96 * gb_cum_err, gb_cum + 1.96 * gb_cum_err,
+                            alpha=0.20, color="black")
+            ax.plot(gb_from["year"].values, gb_cum, "k-", lw=1.5, label="GLaMBIE combined")
+
+    ax.axhline(0, color="black", lw=0.6, ls="--")
+    ax.set_xlabel("Year"); ax.set_ylabel("Cumulative mass balance (Gt)")
+    ax.set_title(f"Cumulative regional mass balance from {start_year} — ensemble")
+    ax.legend(fontsize=8); fig.tight_layout()
+    _savefig(fig, output_dir / "ensemble_cumulative_gt.png")
 
 
 # ---------------------------------------------------------------------------
@@ -337,9 +549,32 @@ def run_ensemble_uncertainty(cfg: dict) -> None:
     print(f"  Saved ensemble_regional_gt.csv")
 
     # ------------------------------------------------------------------
-    # 5. Plot
+    # 5. Load auxiliary data for plots (optional — skip gracefully if absent)
     # ------------------------------------------------------------------
-    plot_regional_uncertainty(ensemble_regional_mwe, ensemble_regional_gt, output_dir)
+    glambie_path = cfg.get("glambie_path", "")
+    inp_dir      = cfg.get("inp_dir", "")
+    reg_subdir   = cfg.get("reg_subdir", "")
+
+    glambie_wide_df = _load_glambie_wide(glambie_path)
+    if glambie_wide_df is not None:
+        print(f"  Loaded GLaMBIE data from {glambie_path}")
+    else:
+        print("  GLaMBIE path not set or file missing — GLaMBIE series skipped in plots.")
+
+    oggm_df = _load_oggm_regional(inp_dir, reg_subdir)
+    if not oggm_df.empty:
+        print(f"  Loaded OGGM regional series ({len(oggm_df)} years).")
+    else:
+        print("  OGGM data not loaded — OGGM series skipped in plots.")
+
+    # ------------------------------------------------------------------
+    # 6. Plots
+    # ------------------------------------------------------------------
+    print("\n--- Generating plots ---")
+    plot_ensemble_gt(ensemble_regional_gt, glambie_wide_df, oggm_df, total_area_km2, output_dir)
+    plot_ensemble_mwe(ensemble_regional_mwe, glambie_wide_df, oggm_df, total_area_km2, output_dir)
+    plot_ensemble_cumulative_gt(ensemble_regional_gt, glambie_wide_df, oggm_df,
+                                total_area_km2, output_dir)
     print(f"\nDone. Outputs written to {output_dir}/")
 
 
