@@ -287,21 +287,10 @@ def _savefig(fig: plt.Figure, path: Path, dpi: int = 150) -> None:
     print(f"  Saved {path}")
 
 
-def _shade_ensemble(ax, years, mu, s_eps, s_str, s_tot):
-    """
-    Draw three nested uncertainty bands and the ensemble median.
-
-    Bands (outermost to innermost):
-      ±2σ total       — lightest fill (steelblue)
-      ±1σ structural  — medium fill (darkorange)
-      ±1σ epistemic   — darkest fill (steelblue)
-    """
+def _shade_ensemble(ax, years, mu, s_tot):
+    """Draw ±2σ total uncertainty band and ensemble median."""
     ax.fill_between(years, mu - 2 * s_tot, mu + 2 * s_tot,
-                    alpha=0.12, color="steelblue", label="±2σ total")
-    ax.fill_between(years, mu - s_str, mu + s_str,
-                    alpha=0.25, color="darkorange", label="±1σ structural")
-    ax.fill_between(years, mu - s_eps, mu + s_eps,
-                    alpha=0.30, color="steelblue", label="±1σ epistemic")
+                    alpha=0.25, color="steelblue", label="±2σ total")
     ax.plot(years, mu, color="steelblue", lw=1.8, label="ensemble median")
 
 
@@ -321,10 +310,7 @@ def plot_ensemble_gt(
     gb_sources  = _glambie_sources_mwe(glambie_wide_df)
 
     fig, ax = plt.subplots(figsize=(12, 5))
-    _shade_ensemble(ax, years, mu,
-                    ensemble_gt["std_epistemic"].values,
-                    ensemble_gt["std_structural"].values,
-                    ensemble_gt["std_total"].values)
+    _shade_ensemble(ax, years, mu, ensemble_gt["std_total"].values)
 
     if not gb_combined.empty:
         ax.errorbar(gb_combined["year"].values, gb_combined["gt"].values,
@@ -342,7 +328,7 @@ def plot_ensemble_gt(
 
     if not oggm_df.empty:
         ax.plot(oggm_df["year"].values, oggm_df["gt"].values,
-                color="seagreen", lw=1.2, ls="--", label="OGGM")
+                color="red", lw=1.2, ls="--", label="OGGM")
 
     ax.axhline(0, color="black", lw=0.6, ls="--")
     ax.set_xlabel("Year"); ax.set_ylabel("Gt/yr")
@@ -367,10 +353,7 @@ def plot_ensemble_mwe(
     gb_combined_gt = _glambie_combined_gt(glambie_wide_df, total_area_mean)
 
     fig, ax = plt.subplots(figsize=(12, 5))
-    _shade_ensemble(ax, years, mu,
-                    ensemble_mwe["std_epistemic"].values,
-                    ensemble_mwe["std_structural"].values,
-                    ensemble_mwe["std_total"].values)
+    _shade_ensemble(ax, years, mu, ensemble_mwe["std_total"].values)
 
     # GLaMBIE combined converted back to MWE
     if not gb_combined_gt.empty and total_area_mean > 0:
@@ -388,7 +371,7 @@ def plot_ensemble_mwe(
 
     if not oggm_df.empty:
         ax.plot(oggm_df["year"].values, oggm_df["mwe"].values,
-                color="seagreen", lw=1.2, ls="--", label="OGGM")
+                color="red", lw=1.2, ls="--", label="OGGM")
 
     ax.axhline(0, color="black", lw=0.6, ls="--")
     ax.set_xlabel("Year"); ax.set_ylabel("MWE/yr")
