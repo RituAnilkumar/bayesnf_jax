@@ -34,6 +34,7 @@ from src.model.bnf_module import (
     compute_total_kl,
     extract_vi_params,
     make_standard_normal_prior,
+    mc_predict_chunked,
     T_MIN,
 )
 from src.loss.elbo import pretrain_elbo, make_beta_schedule
@@ -199,14 +200,18 @@ def evaluate_split(
 
     Returns dict with keys: rmse, bias, r2, n_points
     """
-    mc_preds = model.apply(
-        params,
+    # mc_predict uses jax.vmap over n_samples, creating an (n_samples, N, H)
+    # intermediate per layer.  For large N (hundreds of thousands of rows) and
+    # large H this exceeds GPU memory.  mc_predict_chunked runs one sample at a
+    # time (chunk_size=1), keeping peak memory at a plain (N, H) forward pass.
+    mc_preds = mc_predict_chunked(
+        model, params,
         arrays["time_index"],
         arrays["covariates"],
         rng,
         n_samples=n_samples,
-        method=model.mc_predict,
-    )  # (n_samples, N)
+        chunk_size=1,
+    )  # (n_samples, N) numpy array
     pred_mean = jnp.mean(mc_preds, axis=0)  # (N,)
     targets   = arrays["targets"]
 
