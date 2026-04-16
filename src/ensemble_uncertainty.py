@@ -92,6 +92,36 @@ def compute_weights(composite_scores: np.ndarray, weighting: str, temperature: f
 # Data loading helpers
 # ---------------------------------------------------------------------------
 
+def _read_run_model_cfg(run_dirs: list[Path]) -> dict:
+    """
+    Read model config paths from the first run that has a .hydra/config.yaml.
+
+    Extracts model.glambie_path, model.inp_dir, model.reg_subdir — the same
+    values the Hydra predict run used — so no manual duplication in the
+    ensemble config is needed.
+
+    Returns an empty dict if no run has a readable config.
+    """
+    for run_dir in run_dirs:
+        cfg_path = run_dir / ".hydra" / "config.yaml"
+        if not cfg_path.exists():
+            continue
+        try:
+            with open(cfg_path) as fh:
+                full_cfg = yaml.safe_load(fh)
+            model = full_cfg.get("model", {})
+            return {
+                "glambie_path": model.get("glambie_path", ""),
+                "inp_dir":      model.get("inp_dir", ""),
+                "reg_subdir":   model.get("reg_subdir", ""),
+            }
+        except Exception as exc:
+            warnings.warn(f"Could not read {cfg_path}: {exc}")
+            continue
+    warnings.warn("No readable .hydra/config.yaml found — auxiliary data paths unavailable.")
+    return {}
+
+
 def _load_glacier_preds(run_dir: Path) -> pd.DataFrame | None:
     """Load preds_full.csv from a run directory. Returns None if absent."""
     path = run_dir / "preds_full.csv"
@@ -549,11 +579,14 @@ def run_ensemble_uncertainty(cfg: dict) -> None:
     print(f"  Saved ensemble_regional_gt.csv")
 
     # ------------------------------------------------------------------
-    # 5. Load auxiliary data for plots (optional — skip gracefully if absent)
+    # 5. Load auxiliary data for plots
+    # Paths are read from the Hydra config of the first valid run, so they
+    # don't need to be duplicated in the ensemble config.
     # ------------------------------------------------------------------
-    glambie_path = cfg.get("glambie_path", "")
-    inp_dir      = cfg.get("inp_dir", "")
-    reg_subdir   = cfg.get("reg_subdir", "")
+    run_model_cfg = _read_run_model_cfg(run_dirs)
+    glambie_path  = run_model_cfg.get("glambie_path", "")
+    inp_dir       = run_model_cfg.get("inp_dir", "")
+    reg_subdir    = run_model_cfg.get("reg_subdir", "")
 
     glambie_wide_df = _load_glambie_wide(glambie_path)
     if glambie_wide_df is not None:

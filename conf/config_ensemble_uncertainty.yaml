@@ -34,8 +34,6 @@ softmax_temperature: 0.1
 # Skip ensemble if fewer than this many runs have complete metrics.
 min_runs_per_region: 5
 
-# Optional: auxiliary data paths for plots.
-# If omitted or empty, those observational series are silently skipped.
-glambie_path: ""   # e.g. data_for_model/r06/glambie_targets_r06.csv
-inp_dir: ""        # e.g. data_for_model  (parent dir containing reg_subdir/)
-reg_subdir: ""     # e.g. r06
+# Note: glambie_path, inp_dir and reg_subdir are read automatically from
+# .hydra/config.yaml inside the first valid run directory — no need to
+# specify them here.
