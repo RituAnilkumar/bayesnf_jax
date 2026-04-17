@@ -5,7 +5,7 @@ These functions return a *loss to be minimised* (not the ELBO to be maximised).
 The relationship is:  loss = -ELBO / n_data  (up to constants).
 
 Stage 1 loss:  L_oggm  + (beta / n_data) * KL(q || N(0,1))
-Stage 2 loss:  L_temporal_avg + L_glambie + (beta / n_data) * KL(q || q_pretrained)
+Stage 2 loss:  L_temporal_avg + glambie_weight * L_glambie + (beta / n_data) * KL(q || q_pretrained)
 
 Beta is annealed linearly from 0 → 1 over the first `beta_anneal_epochs`
 epochs (default 20% of total epochs). This prevents posterior collapse
@@ -61,7 +61,7 @@ def pretrain_elbo(
     variational parameters — dominates once beta annealing completes.
 
     Args:
-        oggm_loss_val: Scalar OGGM Huber loss (mean over data points)
+        oggm_loss_val: Scalar OGGM loss (mean over data points; Huber or MSE)
         kl_val:        Scalar KL divergence against standard normal prior (sum over params)
         beta:          Current annealing coefficient in [0, 1]
         n_data:        Number of training data points (normalises KL to per-point scale)
@@ -77,17 +77,23 @@ def pretrain_elbo(
 # ---------------------------------------------------------------------------
 
 def finetune_elbo(
-    temporal_avg_loss_val,  # scalar
-    glambie_loss_val,       # scalar (0.0 if no GLaMBIE data)
-    kl_val,                 # scalar
+    temporal_avg_loss_val,       # scalar
+    glambie_loss_val,             # scalar (0.0 if no GLaMBIE data)
+    kl_val,                       # scalar
     beta: float,
     n_data: int,
+    glambie_weight: float = 1.0,
 ) -> jnp.ndarray:
     """
-    ELBO = L_temporal_avg + L_glambie + (beta / n_data) * KL(q || q_pretrained)
+    ELBO = L_temporal_avg + glambie_weight * L_glambie + (beta / n_data) * KL(q || q_pretrained)
 
     KL is divided by n_data (n_glaciers + n_glambie_obs) for the same reason
     as in pretrain_elbo: KL is a sum over parameters, losses are means over obs.
+
+    Both L_temporal_avg and L_glambie are already normalised per-observation
+    (jnp.mean), so glambie_weight=1.0 gives equal per-observation weight to both
+    datasets. Reduce glambie_weight below 1.0 if GLaMBIE dominates and per-glacier
+    Hugonnet performance suffers; increase above 1.0 to prioritise regional fit.
 
     Args:
         temporal_avg_loss_val: Scalar temporal-avg inverse-variance MSE
@@ -95,8 +101,9 @@ def finetune_elbo(
         kl_val:                Scalar KL divergence against pretrained posterior
         beta:                  Current annealing coefficient in [0, 1]
         n_data:                Number of observations (n_glaciers + n_glambie_obs)
+        glambie_weight:        Relative weight of GLaMBIE loss vs Hugonnet (default 1.0)
 
     Returns:
         Scalar ELBO (to be minimised)
     """
-    return temporal_avg_loss_val + glambie_loss_val + beta * (kl_val / n_data)
+    return temporal_avg_loss_val + glambie_weight * glambie_loss_val + beta * (kl_val / n_data)

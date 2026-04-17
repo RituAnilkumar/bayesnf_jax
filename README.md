@@ -46,11 +46,11 @@ Finetuning automatically selects the single longest period (typically 2000–202
 **`glambie_targets_r{nn}.csv`**
 ```
 region, start_date, end_date,
-combined_gt, combined_gt_errors,
-altimetry_gt, altimetry_gt_errors,
-gravimetry_gt, gravimetry_gt_errors
+combined_mwe, combined_mwe_errors,
+altimetry_mwe, altimetry_mwe_errors,
+gravimetry_mwe, gravimetry_mwe_errors
 ```
-`start_date` / `end_date` are fractional years (e.g. 1999.75). Values are MWE/yr.
+`start_date` / `end_date` are fractional years (e.g. 1999.75). All values are in MWE/yr.
 Altimetry and gravimetry are used preferentially; combined is a fallback only if
 the entire file has zero valid primary observations.
 
@@ -147,7 +147,7 @@ outputs/
 
 **Stage 2 (finetune):**
 - No held-out data from temporal_avg (longest Hugonnet period fully used)
-- GLaMBIE years ≤ temporal_avg end year → training loss
+- GLaMBIE years < temporal_avg end year → training loss
 - GLaMBIE years > temporal_avg end year (typically 2021–2024) → test, automatically held out by construction
 - Early stopping monitors training loss only (no validation set); activates after beta annealing completes
 
@@ -155,19 +155,40 @@ outputs/
 
 ## Key config parameters
 
-All configurable in `conf/model/bnf_regional_seasonal.yaml` or overridden per-region:
+All configurable in `conf/model/bnf_regional_seasonal.yaml` or overridden per-region.
+
+### Stage 1 (pretrain)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `model_nlayers` | 2 | Number of hidden layers |
 | `model_nhidden` | 64 | Hidden layer width |
 | `n_fourier` | 8 | Fourier time encoding features (output: 2×n_fourier) |
-| `model_nepochs` | 2000 | Training epochs per stage |
+| `model_nepochs` | 100000 | Training epochs |
 | `lr` | 1e-3 | Adam learning rate |
-| `beta_anneal_epochs` | 400 | Epochs over which KL weight ramps 0→1 |
-| `model_nensemble` | 100 | MC samples for evaluation and inference |
-| `seed` | 0 | RNG seed (controls weight init, CV splits, MC samples) |
+| `beta_anneal_epochs` | 2000 | Epochs over which KL weight ramps 0→1 |
+| `oggm_loss_fn` | `rmse` | Point-level loss: `rmse` or `huber` |
+| `huber_delta` | 0.5 | Huber transition point in scaled units (only if `oggm_loss_fn=huber`) |
+| `pretrain_year_min` | 2000 | Restrict OGGM training to years ≥ this value |
+| `pretrain_year_max` | 2020 | Restrict OGGM training to years ≤ this value |
+| `train_split` | `full` | `full` for final model; `train` for CV run |
+| `model_nensemble` | 100 | MC samples for OOS evaluation |
+| `seed` | 0 | RNG seed |
 | `rm_fts` | `[]` | Feature columns to exclude at runtime |
+
+### Stage 2 (finetune)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `finetune_lr` | 3e-4 | Initial Adam LR (cosine-decayed after beta annealing) |
+| `grad_clip_norm` | 2.0 | Global gradient norm clip (0 = disabled) |
+| `glambie_weight` | 1.0 | GLaMBIE loss weight relative to Hugonnet temporal-avg loss |
+
+### Inference
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `model_nensemble` | 100 | MC samples for prediction quantiles |
 
 ---
 
@@ -180,10 +201,20 @@ All configurable in `conf/model/bnf_regional_seasonal.yaml` or overridden per-re
 3. Run the pipeline as shown above.
 
 
-# Ritu's Quick Runs
-python main_pipeline.py -m model=bnf_regional_seasonal/r06 model.model_nlayers=1,2,3 model.model_nhidden=8,16,32,64 model.inp_dir=/scratch/b5at/ranil.b5at/bayesnf_jax/data_for_model pipeline.stages=[pretrain_cv,pretrain_full,finetune,predict] model.beta_anneal_epochs=2000,10000,20000 model.finetune_lr=1e-4,3e-4,1e-3 model.uncertainty_floor=0.05,0.1,0.2
+## HPC sweep example
 
-Setup in the sh files for all regions. Run this:
+```bash
+# Hyperparameter sweep over architecture and annealing schedule:
+python main_pipeline.py -m \
+  model=bnf_regional_seasonal/r06 \
+  model.model_nlayers=1,2,3 \
+  model.model_nhidden=8,16,32,64,128 \
+  model.beta_anneal_epochs=2000,10000,20000 \
+  model.inp_dir=/scratch/.../data_for_model \
+  pipeline.stages=[pretrain_cv,pretrain_full,finetune,predict]
+
+# Submit all regions via SLURM:
 for r in $(seq -w 1 19); do
-  sbatch --export=ALL,REGION=r${r} --job-name=${r}_seasonal run_regs.sh 
+  sbatch --export=ALL,REGION=r${r} --job-name=${r}_seasonal run_regs.sh
 done
+```

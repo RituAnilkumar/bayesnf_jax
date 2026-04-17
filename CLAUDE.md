@@ -145,6 +145,9 @@ architectural components are needed.
 ### Stage 1 — Pretrain on OGGM (main_pretrain.py)
 - Data: per-glacier per-year mass balance in MWE/yr from OGGM
   (OGGM outputs in mm/yr — divide by 1000 before use)
+- Year filter: only rows with year in [pretrain_year_min, pretrain_year_max] are used.
+  Default 2000–2020 to align the pretrained prior with the Hugonnet/GLaMBIE observation
+  window, reducing conflict between Stage 1 prior and Stage 2 constraints.
 - Splits available: train, logo, loyo, loygo, for_preds, full
   (same structure as jungle3/data_for_model/)
 - Likelihood: mean over all (glacier × year) residuals
@@ -191,10 +194,9 @@ architectural components are needed.
   Loss (minimised) = L_temporal_avg + glambie_weight * L_glambie + (beta / n_data) * KL(finetuned || pretrained)
   where n_data = n_period_glaciers + n_glambie_obs
 
-- uncertainty_floor (default 0.1 MWE/yr): minimum σ used in 1/σ² weighting for both
-  temporal_avg and GLaMBIE losses. Observations with σ < floor are treated as equally
-  precise at the floor. Prevents very small reported uncertainties from dominating
-  gradients regardless of which dataset has smaller errors. Tune in [0.01, 0.5].
+- glambie_weight (default 1.0): scales GLaMBIE loss relative to Hugonnet. Both losses
+  are already per-observation normalised so 1.0 = equal weight per observation.
+  Reduce below 1.0 if GLaMBIE over-fits at the expense of per-glacier accuracy.
 - GLaMBIE may be absent for some regions (e.g. High Mountain Asia has no
   gravimetry) — handle gracefully, do not error if glambie file is missing
   or empty for a given source
@@ -222,6 +224,9 @@ Follow the same Hydra override pattern as jungle3:
   model.temporal_avg_path       (Stage 2 only)
   model.glambie_path            (Stage 2 only)
   model.beta_anneal_epochs      (epochs over which beta is annealed 0→1)
+  model.glambie_weight          (Stage 2 only; default 1.0)
+  model.pretrain_year_min       (Stage 1 only; default 2000)
+  model.pretrain_year_max       (Stage 1 only; default 2020)
 
 ---
 

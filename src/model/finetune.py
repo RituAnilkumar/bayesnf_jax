@@ -316,7 +316,7 @@ def make_train_step(
     n_data: int,
     target_mean: float = 0.0,
     target_std: float = 1.0,
-    uncertainty_floor: float = 1e-3,
+    glambie_weight: float = 1.0,
 ):
     """
     Factory: returns a JIT-compiled finetune train_step.
@@ -330,9 +330,9 @@ def make_train_step(
 
     n_data normalises KL to the per-observation scale of the likelihood terms.
 
-    uncertainty_floor: minimum σ [MWE/yr] used in 1/σ² weighting for both losses.
-    Observations with σ < floor are treated as equally precise at the floor value,
-    preventing any single dataset from dominating due to very small reported errors.
+    glambie_weight: relative weight of GLaMBIE loss vs Hugonnet temporal-avg loss.
+    Both losses are already per-observation normalised (jnp.mean), so 1.0 gives
+    equal per-observation weight. Reduce below 1.0 if GLaMBIE dominates.
 
     Returned function signature:
         train_step(params, opt_state, rng, beta)
@@ -364,7 +364,6 @@ def make_train_step(
                     period["n_glaciers"],
                     period["ta_targets"],
                     period["ta_errs"],
-                    uncertainty_floor=uncertainty_floor,
                 )
             l_ta = l_ta / sa["n_hugonnet_periods"]
 
@@ -385,7 +384,6 @@ def make_train_step(
                     sa["glambie_means"],
                     sa["glambie_errs"],
                     sa["glambie_areas"],
-                    uncertainty_floor=uncertainty_floor,
                 )
             else:
                 l_glambie = jnp.array(0.0)
@@ -394,7 +392,7 @@ def make_train_step(
             mu_dict, log_sigma_dict = extract_vi_params(params["params"])
             kl = compute_total_kl(mu_dict, log_sigma_dict, prior_mu, prior_log_sigma)
 
-            return finetune_elbo(l_ta, l_glambie, kl, beta, n_data)
+            return finetune_elbo(l_ta, l_glambie, kl, beta, n_data, glambie_weight)
 
         loss, grads = jax.value_and_grad(loss_fn)(params)
         updates, opt_state_new = optimizer.update(grads, opt_state, params)
@@ -651,14 +649,14 @@ def run_finetune(cfg: DictConfig) -> None:
 
     t_mean, t_std = target_scaler if target_scaler is not None else (0.0, 1.0)
 
-    uncertainty_floor = float(cfg.model.get("uncertainty_floor", 1e-3))
-    print(f"  Uncertainty floor: {uncertainty_floor:.4f} MWE/yr (applied to both temporal_avg and GLaMBIE)")
+    glambie_weight = float(cfg.model.get("glambie_weight", 1.0))
+    print(f"  GLaMBIE weight: {glambie_weight:.4f} (relative to Hugonnet temporal-avg loss)")
 
     beta_schedule = make_beta_schedule(cfg.model.model_nepochs, cfg.model.beta_anneal_epochs)
     train_step    = make_train_step(
         model, optimizer, prior_mu, prior_log_sigma, static_arrays,
         n_data=n_finetune_obs, target_mean=t_mean, target_std=t_std,
-        uncertainty_floor=uncertainty_floor,
+        glambie_weight=glambie_weight,
     )
 
     # --- Early stopping setup (monitors training loss, not validation) ---

@@ -60,43 +60,37 @@ def oggm_loss(
 # ---------------------------------------------------------------------------
 
 def temporal_avg_loss(
-    preds: jax.Array,           # shape (N,)  predictions for period rows [MWE/yr]
-    glacier_ids: jax.Array,     # shape (N,)  integer glacier codes
-    n_glaciers: int,             # number of distinct glaciers (static)
-    avg_mb: jax.Array,          # shape (n_glaciers,)  temporal-avg targets [MWE/yr]
-    uncertainty: jax.Array,     # shape (n_glaciers,)  temporal-avg uncertainties [MWE/yr]
-    uncertainty_floor: float = 1e-3,  # minimum uncertainty [MWE/yr] used in 1/σ² weighting
+    preds: jax.Array,       # shape (N,)  predictions for period rows [MWE/yr]
+    glacier_ids: jax.Array, # shape (N,)  integer glacier codes
+    n_glaciers: int,         # number of distinct glaciers (static)
+    avg_mb: jax.Array,      # shape (n_glaciers,)  temporal-avg targets [MWE/yr]
+    uncertainty: jax.Array, # shape (n_glaciers,)  temporal-avg uncertainties [MWE/yr]
 ) -> jax.Array:
     """
     Inverse-variance weighted MSE between predicted per-glacier period means
     and temporal-average observations (longest Hugonnet period, typically 2000-2020).
 
     L_temporal_avg = (1/N_glaciers) * sum_i [
-        (pred_period_mean_i - avg_mb_i)^2 / max(uncertainty_i, floor)^2
+        (pred_period_mean_i - avg_mb_i)^2 / uncertainty_i^2
     ]
 
     where pred_period_mean_i = mean of preds for glacier i over start_date–end_date rows.
-
-    uncertainty_floor prevents glaciers with very small reported uncertainties from
-    dominating the loss. Set via cfg.model.uncertainty_floor.
 
     Inputs are already in MWE/yr — no unit conversion needed.
     rgi_id ordering must match the factorize codes in glacier_ids (assert upstream).
 
     Args:
-        preds:             Predictions for the period window rows, shape (N,)
-        glacier_ids:       Integer glacier codes from pd.factorize, shape (N,)
-        n_glaciers:        Number of distinct glaciers
-        avg_mb:            Temporal-avg targets, shape (n_glaciers,)       [MWE/yr]
-        uncertainty:       Temporal-avg uncertainties, shape (n_glaciers,) [MWE/yr]
-        uncertainty_floor: Minimum uncertainty applied before 1/σ² weighting [MWE/yr]
+        preds:       Predictions for the period window rows, shape (N,)
+        glacier_ids: Integer glacier codes from pd.factorize, shape (N,)
+        n_glaciers:  Number of distinct glaciers
+        avg_mb:      Temporal-avg targets, shape (n_glaciers,)       [MWE/yr]
+        uncertainty: Temporal-avg uncertainties, shape (n_glaciers,) [MWE/yr]
 
     Returns:
         Scalar inverse-variance weighted MSE.
     """
     pred_means = glacier_annual_mean(preds, glacier_ids, n_glaciers)  # (n_glaciers,)
-    eff_uncertainty = jnp.maximum(uncertainty, uncertainty_floor)
-    return jnp.mean(((pred_means - avg_mb) / eff_uncertainty) ** 2)
+    return jnp.mean(((pred_means - avg_mb) / uncertainty) ** 2)
 
 
 # ---------------------------------------------------------------------------
@@ -104,14 +98,13 @@ def temporal_avg_loss(
 # ---------------------------------------------------------------------------
 
 def glambie_loss(
-    preds: jax.Array,             # shape (N,)    predictions for GLaMBIE year rows [MWE/yr]
-    year_ids: jax.Array,          # shape (N,)    integer year codes in [0, n_years)
-    n_years: int,                  # number of distinct years covered (static)
-    obs_year_idx: jax.Array,      # shape (N_obs,) index into [0, n_years) per observation
-    glambie_means: jax.Array,     # shape (N_obs,) GLaMBIE regional mean targets [MWE/yr]
-    glambie_errs: jax.Array,      # shape (N_obs,) GLaMBIE uncertainties [MWE/yr]
-    glacier_areas: jax.Array,     # shape (N,)    glacier area per row [km²]
-    uncertainty_floor: float = 1e-3,  # minimum uncertainty [MWE/yr] used in 1/σ² weighting
+    preds: jax.Array,         # shape (N,)    predictions for GLaMBIE year rows [MWE/yr]
+    year_ids: jax.Array,      # shape (N,)    integer year codes in [0, n_years)
+    n_years: int,              # number of distinct years covered (static)
+    obs_year_idx: jax.Array,  # shape (N_obs,) index into [0, n_years) per observation
+    glambie_means: jax.Array, # shape (N_obs,) GLaMBIE regional mean targets [MWE/yr]
+    glambie_errs: jax.Array,  # shape (N_obs,) GLaMBIE uncertainties [MWE/yr]
+    glacier_areas: jax.Array, # shape (N,)    glacier area per row [km²]
 ) -> jax.Array:
     """
     Inverse-variance weighted MSE between predicted regional annual means
@@ -126,26 +119,21 @@ def glambie_loss(
     N_obs = total (year, source) pairs; years with both sources count as 2.
 
     L_glambie = (1/N_obs) * sum_k [
-        (pred_regional_mean_t(k) - glambie_mean_t(k))^2 / max(glambie_err_t(k), floor)^2
+        (pred_regional_mean_t(k) - glambie_mean_t(k))^2 / glambie_err_t(k)^2
     ]
 
-    uncertainty_floor prevents observations with very small reported uncertainties from
-    dominating the loss. Set via cfg.model.uncertainty_floor.
-
     Args:
-        preds:             Predictions for rows whose year appears in GLaMBIE, shape (N,)
-        year_ids:          Integer year codes for each prediction row, shape (N,)
-        n_years:           Number of distinct years (static)
-        obs_year_idx:      Year index for each GLaMBIE observation, shape (N_obs,)
-        glambie_means:     GLaMBIE targets, shape (N_obs,)        [MWE/yr]
-        glambie_errs:      GLaMBIE uncertainties, shape (N_obs,)  [MWE/yr]
-        glacier_areas:     Glacier area per row, shape (N,)       [km²]
-        uncertainty_floor: Minimum uncertainty applied before 1/σ² weighting [MWE/yr]
+        preds:         Predictions for rows whose year appears in GLaMBIE, shape (N,)
+        year_ids:      Integer year codes for each prediction row, shape (N,)
+        n_years:       Number of distinct years (static)
+        obs_year_idx:  Year index for each GLaMBIE observation, shape (N_obs,)
+        glambie_means: GLaMBIE targets, shape (N_obs,)        [MWE/yr]
+        glambie_errs:  GLaMBIE uncertainties, shape (N_obs,)  [MWE/yr]
+        glacier_areas: Glacier area per row, shape (N,)       [km²]
 
     Returns:
         Scalar inverse-variance weighted MSE.
     """
     pred_regional_means = regional_annual_mean(preds, year_ids, n_years, glacier_areas)  # (n_years,)
     pred_at_obs = pred_regional_means[obs_year_idx]                                       # (N_obs,)
-    eff_errs = jnp.maximum(glambie_errs, uncertainty_floor)
-    return jnp.mean(((pred_at_obs - glambie_means) / eff_errs) ** 2)
+    return jnp.mean(((pred_at_obs - glambie_means) / glambie_errs) ** 2)

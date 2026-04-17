@@ -19,10 +19,9 @@ beta_anneal_epochs: 2000       # Set to 20-30% of model_nepochs — beta ramps 0
 seed: 0
 oggm_loss_fn: rmse           # 'huber' or 'rmse'
 huber_delta: 0.5              # Huber transition point in scaled target units (only used if oggm_loss_fn=huber)
-uncertainty_floor: 0.1        # Minimum uncertainty [MWE/yr] used in inverse-variance weighting.
-                              # Applied to both temporal_avg and GLaMBIE errors before computing 1/σ².
-                              # Observations with σ < floor are treated as equally precise at the floor.
-                              # Prevents very small uncertainties from dominating. Tune in [0.01, 0.5].
+glambie_weight: 1.0           # Relative weight of GLaMBIE loss vs Hugonnet temporal-avg loss.
+                              # Both losses are per-observation normalised so 1.0 = equal weight.
+                              # Reduce below 1.0 if GLaMBIE over-fits at the expense of per-glacier accuracy.
 early_stopping_patience: 100  # stop after this many eval intervals with no val improvement (0 = disabled)
 early_stopping_interval: 100 # evaluate val set every N epochs
 
@@ -32,6 +31,8 @@ model_nensemble: 100          # MC samples at prediction time
 # --- Data ---
 inp_dir: data_for_model
 train_split: full             # 'train' for CV run, 'full' for final pretrained model
+pretrain_year_min: 2000       # Only use OGGM rows with year >= this value (aligns prior with Hugonnet window)
+pretrain_year_max: 2020       # Only use OGGM rows with year <= this value
 
 # --- Seasonal feature columns (match actual CSV column names exactly) ---
 model_ftcols:

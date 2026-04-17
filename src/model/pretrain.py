@@ -281,6 +281,19 @@ def run_pretrain(cfg: DictConfig) -> None:
     train_split = cfg.model.train_split  # 'train' or 'full'
     train_df, held_years = load_oggm_split(cfg, train_split)
 
+    # Restrict to the observationally-constrained period to align the pretrained
+    # prior with the Hugonnet/GLaMBIE finetuning window.
+    pretrain_year_min = int(cfg.model.get("pretrain_year_min", 0))
+    pretrain_year_max = int(cfg.model.get("pretrain_year_max", 9999))
+    if pretrain_year_min > 0 or pretrain_year_max < 9999:
+        n_before = len(train_df)
+        train_df = train_df[
+            (train_df["year"] >= pretrain_year_min) &
+            (train_df["year"] <= pretrain_year_max)
+        ].reset_index(drop=True)
+        print(f"  Year filter [{pretrain_year_min}, {pretrain_year_max}]: "
+              f"{n_before} → {len(train_df)} rows")
+
     # Fit feature and target scalers on training data only (no leakage from eval splits)
     _, raw_covariates, _, _ = build_model_inputs(train_df, ft_cols)
     scaler = fit_scaler(raw_covariates)

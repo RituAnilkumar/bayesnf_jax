@@ -213,7 +213,9 @@ def extract_hugonnet_region(
     out = df[mask].reset_index(drop=True)
     if out.empty:
         raise ValueError(f"No Hugonnet rows found for reg={reg}, period='{period}'")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     out.to_csv(out_path, index=False)
     return out
 
