@@ -513,12 +513,13 @@ def run_ensemble_uncertainty(cfg: dict) -> None:
     # 3. Regional MWE ensemble
     # ------------------------------------------------------------------
     print("\n--- Regional MWE ensemble ---")
-    regional_dfs, regional_weights = [], []
+    regional_dfs, regional_weights, regional_run_dirs = [], [], []
     for run_dir, w in zip(run_dirs, weights):
         df = _load_regional_mwe(run_dir)
         if df is not None:
             regional_dfs.append(df)
             regional_weights.append(w)
+            regional_run_dirs.append(run_dir)
 
     _assert_grid_alignment(regional_dfs, ["year"], "regional_annual_mwe.csv")
 
@@ -530,9 +531,24 @@ def run_ensemble_uncertainty(cfg: dict) -> None:
 
     reg_comps = _ensemble_components(reg_means_mat, reg_stds_mat, regional_weights_arr)
 
-    ref_regional   = regional_dfs[0]
-    years          = ref_regional["year"].values
-    total_area_km2 = ref_regional["total_area_km2"].values  # same prediction grid across runs
+    ref_regional = regional_dfs[0]
+    years        = ref_regional["year"].values
+
+    if "total_area_km2" in ref_regional.columns:
+        total_area_km2 = ref_regional["total_area_km2"].values
+    else:
+        # Older predict outputs didn't write total_area_km2 to regional_annual_mwe.csv.
+        # Derive it from regional_annual_gt.csv: total_area = gt_mean / (mwe_mean * 1e-3).
+        gt_path = regional_run_dirs[0] / "regional_annual_gt.csv"
+        gt_df = pd.read_csv(gt_path).sort_values("year").reset_index(drop=True)
+        mwe_mean = ref_regional["mean"].values
+        gt_mean  = gt_df["mean"].values
+        total_area_km2 = np.where(
+            np.abs(mwe_mean) > 1e-10,
+            gt_mean / (mwe_mean * 1e-3),
+            0.0,
+        )
+        print("  Note: total_area_km2 derived from regional_annual_gt.csv (older run format)")
 
     ensemble_regional_mwe = pd.DataFrame({
         "year":           years,
