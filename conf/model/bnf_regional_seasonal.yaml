@@ -18,6 +18,8 @@ grad_clip_norm: 2.0           # global gradient norm clip for Stage 2 (0 = disab
 beta_anneal_epochs: 2000       # Set to 20-30% of model_nepochs — beta ramps 0→1 over this window
 seed: 0
 oggm_loss_fn: rmse           # 'huber' or 'rmse'
+heteroscedastic: false        # if true, model outputs (mu, log_sigma_noise) and uses NLL loss
+sigma_floor: 0.05             # minimum aleatoric sigma in scaled units (prevents collapse)
 huber_delta: 0.5              # Huber transition point in scaled target units (only used if oggm_loss_fn=huber)
 glambie_weight: 1.0           # Relative weight of GLaMBIE loss vs Hugonnet temporal-avg loss.
                               # Both losses are per-observation normalised so 1.0 = equal weight.

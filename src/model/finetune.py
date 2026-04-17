@@ -37,7 +37,7 @@ from src.model.bnf_module import (
     mc_predict_chunked,
 )
 from src.loss.elbo import finetune_elbo, make_beta_schedule
-from src.loss.likelihood import temporal_avg_loss, glambie_loss
+from src.loss.likelihood import temporal_avg_loss, glambie_loss, temporal_avg_nll, glambie_nll
 from src.loss.aggregation import regional_annual_mean
 from src.data_utils import (
     load_features,
@@ -338,7 +338,8 @@ def make_train_step(
         train_step(params, opt_state, rng, beta)
         -> (params, opt_state, loss_scalar)
     """
-    has_glambie = sa["has_glambie"]
+    has_glambie     = sa["has_glambie"]
+    heteroscedastic = model.heteroscedastic
 
     @jax.jit
     def train_step(params, opt_state, rng, beta):
@@ -346,45 +347,60 @@ def make_train_step(
             rng_period, rng_glambie = jax.random.split(rng)
 
             # --- Temporal-avg loss (single Hugonnet period) ---
-            # Loop kept for generality; n_hugonnet_periods == 1 in current usage.
-            # Dividing by n_periods is a no-op (÷1) but keeps scale correct if
-            # multiple periods are ever re-enabled.
             l_ta = jnp.array(0.0)
             for period in sa["hugonnet_periods"]:
-                period_preds_scaled = model.apply(
+                raw = model.apply(
                     params,
                     sa["time_index"][period["period_mask"]],
                     sa["covariates"][period["period_mask"]],
                     rng_period,
                 )
-                period_preds = period_preds_scaled * target_std + target_mean
-                l_ta += temporal_avg_loss(
-                    period_preds,
-                    period["glacier_ids"],
-                    period["n_glaciers"],
-                    period["ta_targets"],
-                    period["ta_errs"],
-                )
+                if heteroscedastic:
+                    mu_scaled, sigma_scaled = raw
+                    period_mu    = mu_scaled    * target_std + target_mean
+                    period_sigma = sigma_scaled * target_std          # scale only
+                    l_ta += temporal_avg_nll(
+                        period_mu, period_sigma,
+                        period["glacier_ids"], period["n_glaciers"],
+                        period["ta_targets"],  period["ta_errs"],
+                    )
+                else:
+                    period_preds = raw * target_std + target_mean
+                    l_ta += temporal_avg_loss(
+                        period_preds,
+                        period["glacier_ids"], period["n_glaciers"],
+                        period["ta_targets"],  period["ta_errs"],
+                    )
             l_ta = l_ta / sa["n_hugonnet_periods"]
 
-            # --- GLaMBIE loss (unscale model output → physical MWE/yr) ---
+            # --- GLaMBIE loss ---
             if has_glambie:
-                glambie_preds_scaled = model.apply(
+                raw_g = model.apply(
                     params,
                     sa["glambie_time_index"],
                     sa["glambie_covariates"],
                     rng_glambie,
                 )
-                glambie_preds = glambie_preds_scaled * target_std + target_mean
-                l_glambie = glambie_loss(
-                    glambie_preds,
-                    sa["glambie_year_ids"],
-                    sa["n_glambie_years"],
-                    sa["obs_year_idx"],
-                    sa["glambie_means"],
-                    sa["glambie_errs"],
-                    sa["glambie_areas"],
-                )
+                if heteroscedastic:
+                    gmu_scaled, gsigma_scaled = raw_g
+                    glambie_mu    = gmu_scaled    * target_std + target_mean
+                    glambie_sigma = gsigma_scaled * target_std
+                    l_glambie = glambie_nll(
+                        glambie_mu, glambie_sigma,
+                        sa["glambie_year_ids"], sa["n_glambie_years"],
+                        sa["obs_year_idx"],
+                        sa["glambie_means"], sa["glambie_errs"],
+                        sa["glambie_areas"],
+                    )
+                else:
+                    glambie_preds = raw_g * target_std + target_mean
+                    l_glambie = glambie_loss(
+                        glambie_preds,
+                        sa["glambie_year_ids"], sa["n_glambie_years"],
+                        sa["obs_year_idx"],
+                        sa["glambie_means"], sa["glambie_errs"],
+                        sa["glambie_areas"],
+                    )
             else:
                 l_glambie = jnp.array(0.0)
 
@@ -478,10 +494,11 @@ def evaluate_glambie_test(
     year_ids  = test_df["year"].map(year_to_idx).to_numpy(dtype=np.int32)
     areas     = test_df["Area"].to_numpy(dtype=np.float32)
 
-    # MC predictions → (n_samples, N) — chunked to bound peak GPU memory
-    mc_preds = mc_predict_chunked(
+    # MC predictions — chunked to bound peak GPU memory
+    mc_result = mc_predict_chunked(
         model, params, jnp.array(time_idx), jnp.array(covariates), rng, n_samples
     )
+    mc_preds = mc_result[0] if isinstance(mc_result, tuple) else mc_result  # (n_samples, N)
 
     # Area-weighted regional annual mean per sample → (n_samples, n_years)
     jnp_year_ids = jnp.array(year_ids)
@@ -602,6 +619,8 @@ def run_finetune(cfg: DictConfig) -> None:
     model = BayesianNeuralField(
         hidden_sizes=tuple([cfg.model.model_nhidden] * cfg.model.model_nlayers),
         n_fourier=cfg.model.n_fourier,
+        heteroscedastic=bool(cfg.model.get("heteroscedastic", False)),
+        sigma_floor=float(cfg.model.get("sigma_floor", 0.05)),
     )
     # Reconstruct full params dict from pretrained (mu, log_sigma)
     def _merge(d_mu, d_ls):

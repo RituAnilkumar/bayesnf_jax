@@ -101,6 +101,56 @@ def glacier_annual_mean(
     return segment_mean(preds, glacier_ids, n_glaciers)
 
 
+def glacier_period_sigma(
+    sigma: jax.Array,
+    glacier_ids: jax.Array,
+    n_glaciers: int,
+) -> jax.Array:
+    """
+    Propagate per-point aleatoric sigma to per-glacier period-mean sigma.
+
+    Under independence: sigma_period_i = sqrt(sum(sigma_j²) / T_i²)
+    where T_i = number of time steps for glacier i.
+
+    Args:
+        sigma:       Per-point aleatoric std, shape (N,)  [same units as preds]
+        glacier_ids: Integer glacier codes, shape (N,)
+        n_glaciers:  Number of distinct glaciers (static)
+
+    Returns:
+        Per-glacier propagated sigma, shape (n_glaciers,)
+    """
+    sum_var = jax.ops.segment_sum(sigma ** 2, glacier_ids, n_glaciers)
+    counts  = jax.ops.segment_sum(jnp.ones_like(sigma), glacier_ids, n_glaciers)
+    return jnp.sqrt(sum_var) / counts
+
+
+def regional_annual_sigma(
+    sigma: jax.Array,
+    weights: jax.Array,
+    year_ids: jax.Array,
+    n_years: int,
+) -> jax.Array:
+    """
+    Propagate per-point aleatoric sigma to per-year area-weighted regional sigma.
+
+    weighted regional mean = sum(w_i * x_i) / sum(w_i)
+    Under independence: sigma_regional_t = sqrt(sum(w_i² * sigma_i²)) / sum(w_i)
+
+    Args:
+        sigma:    Per-point aleatoric std, shape (N,)   [same units as preds]
+        weights:  Glacier areas per row, shape (N,)     [km²]
+        year_ids: Integer year codes, shape (N,)
+        n_years:  Number of distinct years (static)
+
+    Returns:
+        Per-year propagated sigma, shape (n_years,)
+    """
+    sum_w2_var  = jax.ops.segment_sum(weights ** 2 * sigma ** 2, year_ids, n_years)
+    weight_sums = jax.ops.segment_sum(weights, year_ids, n_years)
+    return jnp.sqrt(sum_w2_var) / weight_sums
+
+
 def regional_annual_mean(
     preds: jax.Array,
     year_ids: jax.Array,

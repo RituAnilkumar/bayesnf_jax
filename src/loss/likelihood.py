@@ -10,7 +10,10 @@ Units throughout: MWE/yr (metres water equivalent per year).
 
 import jax
 import jax.numpy as jnp
-from .aggregation import glacier_annual_mean, regional_annual_mean
+from .aggregation import (
+    glacier_annual_mean, regional_annual_mean,
+    glacier_period_sigma, regional_annual_sigma,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +59,33 @@ def oggm_loss(
 
 
 # ---------------------------------------------------------------------------
+# Stage 1 — OGGM NLL (heteroscedastic)
+# ---------------------------------------------------------------------------
+
+def oggm_nll(
+    mu: jax.Array,     # shape (N,)  predicted means (scaled units)
+    sigma: jax.Array,  # shape (N,)  predicted aleatoric std (scaled units, floored)
+    targets: jax.Array,# shape (N,)  OGGM targets (scaled units)
+) -> jax.Array:
+    """
+    Gaussian NLL for heteroscedastic regression on OGGM point observations.
+
+    NLL = mean[ 0.5*(y - mu)²/sigma² + log(sigma) ]
+
+    sigma is assumed to have been floor-clipped upstream (sigma >= sigma_floor).
+
+    Args:
+        mu:      Predicted means, shape (N,)
+        sigma:   Predicted aleatoric std, shape (N,)
+        targets: OGGM targets, shape (N,)
+
+    Returns:
+        Scalar mean NLL.
+    """
+    return jnp.mean(0.5 * ((targets - mu) / sigma) ** 2 + jnp.log(sigma))
+
+
+# ---------------------------------------------------------------------------
 # Stage 2 — temporal-average per-glacier mean likelihood
 # ---------------------------------------------------------------------------
 
@@ -91,6 +121,85 @@ def temporal_avg_loss(
     """
     pred_means = glacier_annual_mean(preds, glacier_ids, n_glaciers)  # (n_glaciers,)
     return jnp.mean(((pred_means - avg_mb) / uncertainty) ** 2)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 — temporal-average NLL (heteroscedastic)
+# ---------------------------------------------------------------------------
+
+def temporal_avg_nll(
+    mu: jax.Array,         # shape (N,)  predicted means for period rows [MWE/yr]
+    sigma: jax.Array,      # shape (N,)  predicted aleatoric std [MWE/yr, after unscaling]
+    glacier_ids: jax.Array,# shape (N,)  integer glacier codes
+    n_glaciers: int,
+    avg_mb: jax.Array,     # shape (n_glaciers,)  temporal-avg targets [MWE/yr]
+    uncertainty: jax.Array,# shape (n_glaciers,)  obs uncertainty [MWE/yr]
+) -> jax.Array:
+    """
+    Gaussian NLL for heteroscedastic temporal-average loss.
+
+    Propagates per-point aleatoric sigma to per-glacier period sigma, then
+    combines in quadrature with observation uncertainty:
+        combined_sigma_i = sqrt(sigma_period_i² + uncertainty_i²)
+    NLL = mean[ 0.5*(mu_period_i - avg_mb_i)²/combined_sigma_i² + log(combined_sigma_i) ]
+
+    Args:
+        mu:          Per-row predicted means, shape (N,)        [MWE/yr]
+        sigma:       Per-row aleatoric std, shape (N,)          [MWE/yr]
+        glacier_ids: Integer glacier codes, shape (N,)
+        n_glaciers:  Number of distinct glaciers
+        avg_mb:      Temporal-avg targets, shape (n_glaciers,)  [MWE/yr]
+        uncertainty: Obs uncertainties, shape (n_glaciers,)     [MWE/yr]
+
+    Returns:
+        Scalar mean NLL.
+    """
+    mu_period    = glacier_annual_mean(mu, glacier_ids, n_glaciers)         # (n_glaciers,)
+    sigma_period = glacier_period_sigma(sigma, glacier_ids, n_glaciers)     # (n_glaciers,)
+    combined_var = sigma_period ** 2 + uncertainty ** 2
+    return jnp.mean(0.5 * (mu_period - avg_mb) ** 2 / combined_var + 0.5 * jnp.log(combined_var))
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 — GLaMBIE NLL (heteroscedastic)
+# ---------------------------------------------------------------------------
+
+def glambie_nll(
+    mu: jax.Array,           # shape (N,)    predicted means for GLaMBIE year rows [MWE/yr]
+    sigma: jax.Array,        # shape (N,)    predicted aleatoric std [MWE/yr]
+    year_ids: jax.Array,     # shape (N,)    integer year codes
+    n_years: int,
+    obs_year_idx: jax.Array, # shape (N_obs,) index into [0, n_years)
+    glambie_means: jax.Array,# shape (N_obs,) GLaMBIE regional mean targets [MWE/yr]
+    glambie_errs: jax.Array, # shape (N_obs,) GLaMBIE uncertainties [MWE/yr]
+    glacier_areas: jax.Array,# shape (N,)    glacier area per row [km²]
+) -> jax.Array:
+    """
+    Gaussian NLL for heteroscedastic GLaMBIE regional annual mean loss.
+
+    Propagates per-point aleatoric sigma through area-weighted aggregation,
+    then combines with GLaMBIE observation uncertainty:
+        combined_sigma_t = sqrt(sigma_regional_t² + glambie_err_t²)
+
+    Args:
+        mu:            Per-row predicted means, shape (N,)         [MWE/yr]
+        sigma:         Per-row aleatoric std, shape (N,)           [MWE/yr]
+        year_ids:      Integer year codes, shape (N,)
+        n_years:       Number of distinct years
+        obs_year_idx:  Year index per GLaMBIE obs, shape (N_obs,)
+        glambie_means: GLaMBIE targets, shape (N_obs,)             [MWE/yr]
+        glambie_errs:  GLaMBIE uncertainties, shape (N_obs,)       [MWE/yr]
+        glacier_areas: Glacier areas per row, shape (N,)           [km²]
+
+    Returns:
+        Scalar mean NLL.
+    """
+    mu_regional    = regional_annual_mean(mu, year_ids, n_years, glacier_areas)    # (n_years,)
+    sigma_regional = regional_annual_sigma(sigma, glacier_areas, year_ids, n_years) # (n_years,)
+    mu_at_obs      = mu_regional[obs_year_idx]                                      # (N_obs,)
+    sigma_at_obs   = sigma_regional[obs_year_idx]                                   # (N_obs,)
+    combined_var   = sigma_at_obs ** 2 + glambie_errs ** 2
+    return jnp.mean(0.5 * (mu_at_obs - glambie_means) ** 2 / combined_var + 0.5 * jnp.log(combined_var))
 
 
 # ---------------------------------------------------------------------------

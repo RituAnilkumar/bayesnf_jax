@@ -115,17 +115,31 @@ def _run_mc(
     rng: jax.Array,
     n_samples: int,
     target_scaler,
-) -> np.ndarray:
+):
     """
-    Run MC inference and return unscaled predictions as numpy (n_samples, N).
+    Run MC inference and return unscaled predictions.
+
+    Returns:
+        heteroscedastic=False: numpy array (n_samples, N)
+        heteroscedastic=True:  tuple (mu_np, sigma_np), each (n_samples, N)
+                               mu unscaled with mean+std, sigma unscaled with std only.
     """
-    mc_np = mc_predict_chunked(
+    result = mc_predict_chunked(
         model, params, jnp.array(time_index), jnp.array(covariates), rng, n_samples
     )
-    if target_scaler is not None:
-        t_mean, t_std = target_scaler
-        mc_np = mc_np * t_std + t_mean
-    return mc_np
+    if isinstance(result, tuple):
+        mu_np, sigma_np = result
+        if target_scaler is not None:
+            t_mean, t_std = target_scaler
+            mu_np    = mu_np    * t_std + t_mean
+            sigma_np = sigma_np * t_std           # scale only — sigma is not shifted
+        return mu_np, sigma_np
+    else:
+        mc_np = result
+        if target_scaler is not None:
+            t_mean, t_std = target_scaler
+            mc_np = mc_np * t_std + t_mean
+        return mc_np
 
 
 # ---------------------------------------------------------------------------
@@ -143,9 +157,22 @@ def _summarise(samples: np.ndarray) -> dict:
     }
 
 
-def _predictions_to_df(pred_grid: pd.DataFrame, mc_preds_np: np.ndarray) -> pd.DataFrame:
+def _predictions_to_df(
+    pred_grid: pd.DataFrame,
+    mc_preds_np: np.ndarray,
+    mc_sigma_np: np.ndarray | None = None,
+) -> pd.DataFrame:
+    """
+    Build per-glacier prediction DataFrame.
+
+    If mc_sigma_np is provided (heteroscedastic mode):
+      - 'std' remains the epistemic std (spread of mu samples)
+      - 'aleatoric_std' = mean predicted noise sigma across samples
+      - 'total_std'     = sqrt(epistemic² + aleatoric²)
+    Quantiles (p2_5, p50, p97_5) are from mu samples only.
+    """
     q = _summarise(mc_preds_np)
-    return pd.DataFrame({
+    row = {
         "rgi_id": pred_grid["rgi_id"].values,
         "year":   pred_grid["year"].values,
         "p2_5":   q["p2_5"],
@@ -153,7 +180,13 @@ def _predictions_to_df(pred_grid: pd.DataFrame, mc_preds_np: np.ndarray) -> pd.D
         "p97_5":  q["p97_5"],
         "mean":   q["mean"],
         "std":    q["std"],
-    })
+    }
+    if mc_sigma_np is not None:
+        aleatoric_std = mc_sigma_np.mean(axis=0)                             # (N,)
+        row["aleatoric_std"] = aleatoric_std
+        row["epistemic_std"] = q["std"]
+        row["total_std"]     = np.sqrt(q["std"] ** 2 + aleatoric_std ** 2)
+    return pd.DataFrame(row)
 
 
 # ---------------------------------------------------------------------------
@@ -606,19 +639,30 @@ def run_predict(cfg: DictConfig) -> None:
         covariates = apply_scaler(covariates, scaler)
 
     # --- Model architecture ---
+    heteroscedastic = bool(cfg.model.get("heteroscedastic", False))
     model = BayesianNeuralField(
         hidden_sizes=tuple([cfg.model.model_nhidden] * cfg.model.model_nlayers),
         n_fourier=cfg.model.n_fourier,
+        heteroscedastic=heteroscedastic,
+        sigma_floor=float(cfg.model.get("sigma_floor", 0.05)),
     )
     n_samples = cfg.model.model_nensemble
-    print(f"Running {n_samples} MC samples over {len(pred_grid)} rows...")
+    print(f"Running {n_samples} MC samples over {len(pred_grid)} rows "
+          f"({'heteroscedastic' if heteroscedastic else 'homoscedastic'})...")
+
+    def _unpack_mc(result):
+        """Return (mc_mu, mc_sigma_or_None) from _run_mc output."""
+        if isinstance(result, tuple):
+            return result  # (mc_mu, mc_sigma)
+        return result, None
 
     # --- Finetuned inference ---
     params_fin = _load_params(cfg.model.finetuned_params_path)
     rng, rng_fin = jax.random.split(rng)
-    mc_fin = _run_mc(model, params_fin, time_index, covariates, rng_fin, n_samples, target_scaler)
+    mc_fin_raw = _run_mc(model, params_fin, time_index, covariates, rng_fin, n_samples, target_scaler)
+    mc_fin, mc_fin_sigma = _unpack_mc(mc_fin_raw)
 
-    preds_fin  = _predictions_to_df(pred_grid, mc_fin)
+    preds_fin = _predictions_to_df(pred_grid, mc_fin, mc_fin_sigma)
     preds_fin.to_csv(os.path.join(cfg.model.output_dir, "preds_full.csv"), index=False)
     print("Saved preds_full.csv")
 
@@ -634,9 +678,10 @@ def run_predict(cfg: DictConfig) -> None:
     if has_pretrain:
         params_pre = _load_params(pretrain_path)
         rng, rng_pre = jax.random.split(rng)
-        mc_pre = _run_mc(model, params_pre, time_index, covariates, rng_pre, n_samples, target_scaler)
+        mc_pre_raw = _run_mc(model, params_pre, time_index, covariates, rng_pre, n_samples, target_scaler)
+        mc_pre, mc_pre_sigma = _unpack_mc(mc_pre_raw)
 
-        preds_pre = _predictions_to_df(pred_grid, mc_pre)
+        preds_pre = _predictions_to_df(pred_grid, mc_pre, mc_pre_sigma)
         preds_pre.to_csv(os.path.join(cfg.model.output_dir, "preds_full_pretrain.csv"), index=False)
         print("Saved preds_full_pretrain.csv")
 

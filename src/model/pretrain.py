@@ -38,7 +38,7 @@ from src.model.bnf_module import (
     T_MIN,
 )
 from src.loss.elbo import pretrain_elbo, make_beta_schedule
-from src.loss.likelihood import oggm_loss
+from src.loss.likelihood import oggm_loss, oggm_nll
 from src.data_utils import (
     load_features,
     load_oggm,
@@ -150,12 +150,18 @@ def make_train_step(
     n_data must be the TOTAL dataset size (before sharding) so the KL
     normalisation in pretrain_elbo is correct after pmean.
     """
+    heteroscedastic = model.heteroscedastic
+
     @functools.partial(jax.pmap, axis_name='devices')
     def train_step(params, opt_state, rng, time_index, covariates, targets, beta):
         def loss_fn(params):
             rng_fwd, _ = jax.random.split(rng)
-            preds = model.apply(params, time_index, covariates, rng_fwd)
-            l_oggm = oggm_loss(preds, targets, loss_fn=loss_fn_name, delta=huber_delta)
+            if heteroscedastic:
+                mu, sigma = model.apply(params, time_index, covariates, rng_fwd)
+                l_oggm = oggm_nll(mu, sigma, targets)
+            else:
+                preds = model.apply(params, time_index, covariates, rng_fwd)
+                l_oggm = oggm_loss(preds, targets, loss_fn=loss_fn_name, delta=huber_delta)
 
             mu_dict, log_sigma_dict   = extract_vi_params(params["params"])
             prior_mu, prior_log_sigma = make_standard_normal_prior(mu_dict, log_sigma_dict)
@@ -204,14 +210,18 @@ def evaluate_split(
     # intermediate per layer.  For large N (hundreds of thousands of rows) and
     # large H this exceeds GPU memory.  mc_predict_chunked runs one sample at a
     # time (chunk_size=1), keeping peak memory at a plain (N, H) forward pass.
-    mc_preds = mc_predict_chunked(
+    mc_result = mc_predict_chunked(
         model, params,
         arrays["time_index"],
         arrays["covariates"],
         rng,
         n_samples=n_samples,
         chunk_size=1,
-    )  # (n_samples, N) numpy array
+    )
+    if isinstance(mc_result, tuple):
+        mc_preds = mc_result[0]  # mu samples only for evaluation
+    else:
+        mc_preds = mc_result    # (n_samples, N) numpy array
     pred_mean = jnp.mean(mc_preds, axis=0)  # (N,)
     targets   = arrays["targets"]
 
@@ -317,6 +327,8 @@ def run_pretrain(cfg: DictConfig) -> None:
     model = BayesianNeuralField(
         hidden_sizes=tuple([cfg.model.model_nhidden] * cfg.model.model_nlayers),
         n_fourier=cfg.model.n_fourier,
+        heteroscedastic=bool(cfg.model.get("heteroscedastic", False)),
+        sigma_floor=float(cfg.model.get("sigma_floor", 0.05)),
     )
     rng, rng_init, rng_fwd = jax.random.split(rng, 3)
     params = model.init(

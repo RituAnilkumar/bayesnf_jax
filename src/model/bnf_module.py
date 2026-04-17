@@ -173,17 +173,25 @@ class BayesianNeuralField(nn.Module):
 
     The network takes a time index and a vector of glacier covariates,
     encodes the time index via fixed Fourier features, concatenates with
-    the covariates, and passes through a mean-field VI MLP to produce
-    a scalar mass balance prediction (MWE/yr).
+    the covariates, and passes through a mean-field VI MLP.
+
+    When heteroscedastic=False (default): returns scalar mu, shape (batch,).
+    When heteroscedastic=True: returns (mu, sigma) tuple, each shape (batch,),
+    where sigma = softplus(raw_log_sigma) + sigma_floor is the predicted
+    aleatoric noise standard deviation.
 
     Args:
-        hidden_sizes: Sequence of hidden layer widths, e.g. (64, 64)
-        n_fourier:    Number of Fourier time features (output: 2*n_fourier)
-        fourier_seed: RNG seed for fixed frequency matrix
+        hidden_sizes:    Sequence of hidden layer widths, e.g. (64, 64)
+        n_fourier:       Number of Fourier time features (output: 2*n_fourier)
+        fourier_seed:    RNG seed for fixed frequency matrix
+        heteroscedastic: If True, output head emits (mu, sigma) pairs
+        sigma_floor:     Minimum aleatoric sigma (prevents collapse; scaled units)
     """
     hidden_sizes: Sequence[int] = (64, 64)
     n_fourier: int = 8
     fourier_seed: int = 42
+    heteroscedastic: bool = False
+    sigma_floor: float = 0.05
 
     def setup(self):
         self.time_encoder = FourierTimeEncoder(
@@ -201,41 +209,39 @@ class BayesianNeuralField(nn.Module):
         self.hidden_layers = [
             RematVIDense(features=h) for h in self.hidden_sizes
         ]
-        self.output_layer = VIDense(features=1)
+        out_features = 2 if self.heteroscedastic else 1
+        self.output_layer = VIDense(features=out_features)
 
     def __call__(
         self,
         time_index: jax.Array,   # shape (batch,)
         covariates: jax.Array,    # shape (batch, n_covariates)
         rng: jax.Array,           # PRNGKey for weight sampling
-    ) -> jax.Array:
+    ):
         """
         Forward pass — single weight sample (one reparameterisation draw).
 
-        Args:
-            time_index: Integer year indices, shape (batch,)
-            covariates: Non-time input features, shape (batch, n_covariates)
-            rng:        PRNGKey; consumed layer by layer
-
         Returns:
-            Predicted mass balance, shape (batch,)
+            heteroscedastic=False: shape (batch,)
+            heteroscedastic=True:  tuple (mu, sigma), each shape (batch,)
         """
-        # Encode time coordinate
         time_features = self.time_encoder(time_index)  # (batch, 2*n_fourier)
+        x = jnp.concatenate([time_features, covariates], axis=-1)
 
-        # Concatenate time encoding with covariates
-        x = jnp.concatenate([time_features, covariates], axis=-1)  # (batch, 2*n_fourier + n_cov)
-
-        # Pass through hidden layers with ReLU activations
         for layer in self.hidden_layers:
             rng, rng_layer = jax.random.split(rng)
             x = nn.relu(layer(x, rng_layer))
 
-        # Output layer — no activation (regression)
         rng, rng_out = jax.random.split(rng)
-        out = self.output_layer(x, rng_out)  # (batch, 1)
+        out = self.output_layer(x, rng_out)  # (batch, 1) or (batch, 2)
 
-        return out.squeeze(-1)  # (batch,)
+        if not self.heteroscedastic:
+            return out.squeeze(-1)  # (batch,)
+
+        mu  = out[:, 0]                                              # (batch,)
+        raw = out[:, 1]
+        sigma = nn.softplus(raw) + self.sigma_floor                  # (batch,) > sigma_floor
+        return mu, sigma
 
     def mc_predict(
         self,
@@ -243,26 +249,26 @@ class BayesianNeuralField(nn.Module):
         covariates: jax.Array,
         rng: jax.Array,
         n_samples: int = 100,
-    ) -> jax.Array:
+    ):
         """
         Monte Carlo predictive distribution via repeated forward passes,
         each with an independent weight sample.
 
-        Args:
-            time_index: shape (batch,)
-            covariates: shape (batch, n_covariates)
-            rng:        PRNGKey
-            n_samples:  Number of MC samples
-
         Returns:
-            Predictions of shape (n_samples, batch)
+            heteroscedastic=False: shape (n_samples, batch)
+            heteroscedastic=True:  tuple (mu_samples, sigma_samples), each (n_samples, batch)
         """
         rngs = jax.random.split(rng, n_samples)
 
         def single_sample(rng_i):
             return self.__call__(time_index, covariates, rng_i)
 
-        return jax.vmap(single_sample)(rngs)  # (n_samples, batch)
+        if not self.heteroscedastic:
+            return jax.vmap(single_sample)(rngs)  # (n_samples, batch)
+
+        # vmap over heteroscedastic outputs: returns (mu_mat, sigma_mat)
+        mu_mat, sigma_mat = jax.vmap(single_sample)(rngs)  # each (n_samples, batch)
+        return mu_mat, sigma_mat
 
 
 def mc_predict_chunked(
@@ -273,7 +279,7 @@ def mc_predict_chunked(
     rng: jax.Array,
     n_samples: int,
     chunk_size: int = 10,
-) -> "np.ndarray":
+):
     """
     MC prediction with chunked vmap to bound peak GPU memory.
 
@@ -281,19 +287,32 @@ def mc_predict_chunked(
     immediately moving results to CPU (numpy).  Peak GPU memory is proportional
     to chunk_size rather than n_samples, which prevents OOM on large regions.
 
-    Returns numpy array of shape (n_samples, batch).
+    Returns:
+        heteroscedastic=False: numpy array shape (n_samples, batch)
+        heteroscedastic=True:  tuple (mu_arr, sigma_arr), each (n_samples, batch)
     """
     import numpy as _np
-    chunks = []
+    mu_chunks, sigma_chunks = [], []
     for start in range(0, n_samples, chunk_size):
         end = min(start + chunk_size, n_samples)
         rng, rng_chunk = jax.random.split(rng)
-        chunk = model.apply(
+        result = model.apply(
             params, time_index, covariates, rng_chunk,
             n_samples=(end - start), method=model.mc_predict,
         )
-        chunks.append(_np.array(chunk))  # pull to CPU immediately
-    return _np.concatenate(chunks, axis=0)  # (n_samples, batch)
+        if model.heteroscedastic:
+            mu_c, sigma_c = result
+            mu_chunks.append(_np.array(mu_c))
+            sigma_chunks.append(_np.array(sigma_c))
+        else:
+            mu_chunks.append(_np.array(result))
+
+    if model.heteroscedastic:
+        return (
+            _np.concatenate(mu_chunks, axis=0),     # (n_samples, batch)
+            _np.concatenate(sigma_chunks, axis=0),  # (n_samples, batch)
+        )
+    return _np.concatenate(mu_chunks, axis=0)  # (n_samples, batch)
 
 
 # ---------------------------------------------------------------------------
