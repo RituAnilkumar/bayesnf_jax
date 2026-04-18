@@ -138,7 +138,15 @@ def _load_glambie_test_rmse(run_dir: Path, test_years: list[int]) -> float:
     """Return RMSE of finetune-stage predictions vs held-out GLaMBIE test years.
 
     Filters metrics_glambie_test.csv to stage=='finetune' and year in test_years.
-    Returns NaN if the file is absent, empty, or contains no matching rows.
+
+    Returns NaN when:
+      - file absent (run did not complete or region has no GLaMBIE data)
+      - all residuals are NaN (finetune diverged — NaN params → NaN predictions)
+      - no rows match test_years
+
+    NaN residuals typically indicate finetune loss diverged due to zero uncertainty
+    values in the Hugonnet temporal_avg data (affects r13-r15, r17). Fix: re-run
+    with the uncertainty_floor in prepare_finetune_arrays.
     """
     path = run_dir / "metrics_glambie_test.csv"
     if not path.exists():
@@ -151,7 +159,11 @@ def _load_glambie_test_rmse(run_dir: Path, test_years: list[int]) -> float:
     df = df[(df["stage"] == "finetune") & (df["year"].isin(test_years))]
     if df.empty:
         return float("nan")
-    return float(np.sqrt((df["residual"] ** 2).mean()))
+
+    residuals = df["residual"].dropna()
+    if residuals.empty:
+        return float("nan")  # all NaN — finetune diverged
+    return float(np.sqrt((residuals ** 2).mean()))
 
 
 def _load_loyo_rmse(run_dir: Path) -> float:
@@ -269,7 +281,14 @@ def add_composite_score(
 
     Each metric is normalised per-region to [0, 1] (min-max) before combining,
     so regions with different absolute error scales contribute equally.
-    Rows with NaN in either metric get NaN score.
+
+    Fallback behaviour when glambie_rmse is NaN for all runs in a region
+    (e.g. r13-r15, r17 where finetune loss diverged due to zero uncertainties in
+    the Hugonnet data, or regions with no GLaMBIE test coverage):
+      - composite is computed from loyo_rmse only (weight effectively = 1.0)
+      - a warning is printed so the user knows glambie is excluded
+
+    Rows with NaN loyo_rmse always get NaN composite (pretrain failed).
     """
     df = df.copy()
 
@@ -287,7 +306,24 @@ def add_composite_score(
         df.loc[idx, "norm_loyo"]    = _minmax_norm(grp["loyo_rmse"]).values
         df.loc[idx, "norm_glambie"] = _minmax_norm(grp["glambie_rmse"]).values
 
-    df["composite"] = loyo_weight * df["norm_loyo"] + glambie_weight * df["norm_glambie"]
+    # Build composite, falling back to loyo-only per row when glambie is NaN.
+    # This handles regions where glambie is unavailable or finetune diverged.
+    has_glambie_mask = df["norm_glambie"].notna()
+    all_loyo_only = (~has_glambie_mask).all()
+
+    if all_loyo_only:
+        print("  WARNING: glambie_rmse is NaN for all runs. "
+              "Scoring by loyo_rmse only. "
+              "If finetune produced NaN loss, re-run after the uncertainty_floor fix.")
+        df["composite"] = df["norm_loyo"]
+    else:
+        if (~has_glambie_mask).any():
+            n_missing = (~has_glambie_mask).sum()
+            print(f"  NOTE: {n_missing} runs have NaN glambie_rmse — those use loyo-only composite.")
+        # Per row: use full formula when glambie is available, loyo-only otherwise
+        full_score = loyo_weight * df["norm_loyo"] + glambie_weight * df["norm_glambie"]
+        df["composite"] = np.where(has_glambie_mask, full_score, df["norm_loyo"])
+
     return df
 
 

@@ -244,6 +244,18 @@ def prepare_finetune_arrays(
         period_df_sorted = period_df.set_index("rgi_id").loc[period_unique].reset_index()
         p_tgt   = period_df_sorted["avg_mb_mwe"].to_numpy(dtype=np.float32)
         p_errs  = period_df_sorted["uncertainty_mwe"].to_numpy(dtype=np.float32)
+
+        # Floor near-zero uncertainties to prevent division-by-zero in the loss.
+        # Some regions (e.g. tropical glaciers r17, Central/South Asia r13-r15) have
+        # Hugonnet uncertainty values of exactly 0 for some glaciers, which causes
+        # loss = inf → NaN gradients → corrupted params after the first optimizer step.
+        # 0.001 MWE/yr (1 mm w.e./yr) is below any real measurement uncertainty.
+        n_zero = (p_errs == 0).sum()
+        if n_zero > 0:
+            print(f"  WARNING: {n_zero}/{len(p_errs)} glaciers have uncertainty_mwe=0 "
+                  f"for period {pstart}-{pend}. Applying floor of 0.001 MWE/yr.")
+        p_errs = np.maximum(p_errs, 0.001)
+
         hugonnet_periods.append({
             "period_mask": jnp.array(pmask),
             "glacier_ids": jnp.array(p_gids_local, dtype=jnp.int32),
@@ -289,6 +301,13 @@ def prepare_finetune_arrays(
         # Per-observation year index (one per GLaMBIE row)
         obs_year_idx = glambie_train_df["year"].map(year_to_idx).to_numpy(dtype=np.int32)
 
+        g_errs = glambie_train_df["error_mwe"].to_numpy(dtype=np.float32)
+        n_zero_g = (g_errs == 0).sum()
+        if n_zero_g > 0:
+            print(f"  WARNING: {n_zero_g} GLaMBIE training observations have error_mwe=0. "
+                  f"Applying floor of 0.001 MWE/yr.")
+        g_errs = np.maximum(g_errs, 0.001)
+
         out.update({
             "glambie_time_index":  jnp.array(g_time_idx),
             "glambie_covariates":  jnp.array(g_covariates),
@@ -297,7 +316,7 @@ def prepare_finetune_arrays(
             "n_glambie_years":     n_glambie_years,
             "obs_year_idx":        jnp.array(obs_year_idx),
             "glambie_means":       jnp.array(glambie_train_df["value_mwe"].to_numpy(dtype=np.float32)),
-            "glambie_errs":        jnp.array(glambie_train_df["error_mwe"].to_numpy(dtype=np.float32)),
+            "glambie_errs":        jnp.array(g_errs),
         })
 
     return out
@@ -695,6 +714,7 @@ def run_finetune(cfg: DictConfig) -> None:
     # --- Training loop ---
     losses = []
     stopped_epoch = cfg.model.model_nepochs
+    nan_streak = 0
 
     for epoch in range(cfg.model.model_nepochs):
         rng, rng_step = jax.random.split(rng)
@@ -702,6 +722,22 @@ def run_finetune(cfg: DictConfig) -> None:
         params, opt_state, loss = train_step(params, opt_state, rng_step, beta)
         loss_val = float(loss)
         losses.append(loss_val)
+
+        # Detect NaN/Inf loss — params are now corrupted; stop immediately.
+        if not np.isfinite(loss_val):
+            nan_streak += 1
+            if nan_streak == 1:
+                print(f"  ERROR: NaN/Inf loss at epoch {epoch+1} (beta={beta:.3f}). "
+                      f"Params are corrupted — check for zero uncertainties in "
+                      f"temporal_avg or GLaMBIE data (uncertainty_floor may be needed).")
+            if nan_streak >= 10:
+                print(f"  Stopping: NaN/Inf loss persisted for 10 epochs. "
+                      f"Saved params will be unusable.")
+                stopped_epoch = epoch + 1
+                break
+        else:
+            nan_streak = 0
+
         if (epoch + 1) % max(1, cfg.model.model_nepochs // 10) == 0:
             print(f"  epoch {epoch+1}/{cfg.model.model_nepochs}  loss={loss_val:.6f}  beta={beta:.3f}")
 
