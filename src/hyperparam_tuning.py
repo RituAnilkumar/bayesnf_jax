@@ -45,29 +45,35 @@ import yaml
 SWEEP_PARAMS = [
     "model.model_nlayers",
     "model.model_nhidden",
-    "model.beta_anneal_epochs",
+    "model.glambie_weight",
 ]
 
 # Short names used in plot labels / column headers
 PARAM_SHORT = {
-    "model.model_nlayers":        "nlayers",
-    "model.model_nhidden":        "nhidden",
-    "model.beta_anneal_epochs":   "beta_epochs",
+    "model.model_nlayers":  "nlayers",
+    "model.model_nhidden":  "nhidden",
+    "model.glambie_weight": "glambie_weight",
 }
 
 # Human-readable axis labels for plots
 PARAM_LABEL = {
-    "nlayers":     "N layers",
-    "nhidden":     "Hidden width",
-    "beta_epochs": "Beta anneal epochs",
+    "nlayers":        "N layers",
+    "nhidden":        "Hidden width",
+    "glambie_weight": "GLaMBIE weight",
 }
 
 # Key 2-D pairs to show in heatmaps (short names)
 HEATMAP_PAIRS = [
-    ("nlayers",     "nhidden"),
-    ("beta_epochs", "nlayers"),
-    ("beta_epochs", "nhidden"),
+    ("nlayers",        "nhidden"),
+    ("glambie_weight", "nlayers"),
+    ("glambie_weight", "nhidden"),
 ]
+
+# Non-sweep overrides tracked as metadata columns (not used in scoring)
+EXTRA_OVERRIDES = {
+    "model.heteroscedastic": "heteroscedastic",
+    "model.beta_anneal_epochs": "beta_anneal_epochs",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +116,21 @@ def _parse_overrides(overrides_path: Path) -> dict:
                 out[short] = val_str
         else:
             out[short] = float("nan")
+
+    for full_key, short in EXTRA_OVERRIDES.items():
+        val_str = raw.get(full_key)
+        if val_str is not None:
+            # Coerce booleans; try numeric; fall back to string
+            if val_str.lower() in ("true", "false"):
+                out[short] = val_str.lower() == "true"
+            else:
+                try:
+                    out[short] = float(val_str)
+                except ValueError:
+                    out[short] = val_str
+        else:
+            out[short] = None
+
     return out
 
 
@@ -216,6 +237,7 @@ def build_results_df(
             "run_id":  run_dir.name,
             "run_dir": str(run_dir),
             **{k: params[k] for k in PARAM_SHORT.values()},
+            **{k: params.get(k) for k in EXTRA_OVERRIDES.values()},
             "loyo_rmse":    loyo_rmse,
             "glambie_rmse": glambie_rmse,
         })
@@ -667,7 +689,7 @@ def plot_regional_ranking(df: pd.DataFrame, output_dir: Path, top_n: int = 10) -
 
     # Build label for each config row
     def _config_label(row) -> str:
-        return f"L={int(row.nlayers)} H={int(row.nhidden)} β={int(row.beta_epochs)}"
+        return f"L={int(row.nlayers)} H={int(row.nhidden)} gw={row.glambie_weight:.1f}"
 
     config_labels = [_config_label(r) for _, r in top_configs.iterrows()]
 
@@ -720,6 +742,8 @@ def save_top_runs(df: pd.DataFrame, output_dir: Path, top_n: int = 10) -> None:
     param_cols = list(PARAM_SHORT.values())
     valid = df.dropna(subset=["composite"])
 
+    extra_cols = [c for c in EXTRA_OVERRIDES.values() if c in valid.columns]
+
     top = (
         valid.groupby(param_cols)
         .agg(
@@ -731,19 +755,19 @@ def save_top_runs(df: pd.DataFrame, output_dir: Path, top_n: int = 10) -> None:
             mean_composite=   ("composite",    "mean"),
             mean_rank=        ("rank_in_region","mean"),
             n_regions=        ("region",        "nunique"),
+            **{c: (c, "first") for c in extra_cols},
         )
         .reset_index()
         .sort_values("mean_composite")
         .head(top_n)
     )
 
-    # Put run_id first so it's immediately visible
-    col_order = ["run_id"] + param_cols + [
+    col_order = ["run_id"] + param_cols + extra_cols + [
         "mean_loyo_rmse", "std_loyo_rmse",
         "mean_glambie_rmse", "std_glambie_rmse",
         "mean_composite", "mean_rank", "n_regions",
     ]
-    top = top[col_order]
+    top = top[[c for c in col_order if c in top.columns]]
 
     path = output_dir / "top_runs.csv"
     top.to_csv(path, index=False, float_format="%.5f")

@@ -2,17 +2,19 @@
 src/ensemble_uncertainty.py
 
 Combines per-run predictions from a Hydra multirun sweep into a single ensemble
-uncertainty estimate, decomposed into structural and epistemic components.
+uncertainty estimate, decomposed into structural, epistemic, and aleatoric components.
 
 Uncertainty decomposition via the law of total variance:
 
     Var[y] = E_m[Var[y|m]]  +  Var_m[E[y|m]]
              └─ epistemic ──┘   └─ structural ─┘
 
-    std_epistemic  = sqrt( Σ_k w_k * std_k² )
+    std_epistemic  = sqrt( Σ_k w_k * epistemic_std_k² )
     std_structural = sqrt( Σ_k w_k * (mean_k - mu_ensemble)² )
-    std_aleatoric  = NaN  (placeholder — requires heteroscedastic output head)
-    std_total      = sqrt( std_epistemic² + std_structural² )
+    std_aleatoric  = sqrt( Σ_k w_k * aleatoric_std_k² )
+                     (NaN when preds_full.csv lacks aleatoric_std column,
+                      i.e. when runs were trained without heteroscedastic=true)
+    std_total      = sqrt( std_epistemic² + std_structural² [+ std_aleatoric²] )
 
 where:
   - mean_k, std_k   are the per-model predicted mean and MC std from preds_full.csv
@@ -159,17 +161,20 @@ def _ensemble_components(
     means_mat: np.ndarray,
     stds_mat: np.ndarray,
     weights: np.ndarray,
+    aleatoric_mat: np.ndarray | None = None,
 ) -> dict:
     """
     Compute ensemble uncertainty components from stacked per-model arrays.
 
     Args:
-        means_mat: (K, N) array of per-model predicted means
-        stds_mat:  (K, N) array of per-model within-model MC stds
-        weights:   (K,) normalised model weights
+        means_mat:     (K, N) array of per-model predicted means
+        stds_mat:      (K, N) array of per-model epistemic MC stds
+        weights:       (K,) normalised model weights
+        aleatoric_mat: (K, N) array of per-model predicted aleatoric stds,
+                       or None when runs were trained homoscedastically.
 
     Returns dict with keys: median_mwe, std_structural, std_epistemic,
-                             std_aleatoric, std_total
+                             std_aleatoric (NaN if aleatoric_mat is None), std_total
     """
     w = weights[:, np.newaxis]                        # (K, 1) for broadcasting
 
@@ -178,8 +183,13 @@ def _ensemble_components(
         (w * (means_mat - mu_ensemble[np.newaxis]) ** 2).sum(axis=0)
     )
     std_epistemic  = np.sqrt((w * stds_mat ** 2).sum(axis=0))
-    std_aleatoric  = np.full_like(mu_ensemble, np.nan)
-    std_total      = np.sqrt(std_structural ** 2 + std_epistemic ** 2)
+
+    if aleatoric_mat is not None:
+        std_aleatoric = np.sqrt((w * aleatoric_mat ** 2).sum(axis=0))
+        std_total     = np.sqrt(std_structural ** 2 + std_epistemic ** 2 + std_aleatoric ** 2)
+    else:
+        std_aleatoric = np.full_like(mu_ensemble, np.nan)
+        std_total     = np.sqrt(std_structural ** 2 + std_epistemic ** 2)
 
     return {
         "median_mwe":     mu_ensemble,
@@ -274,6 +284,64 @@ def _load_oggm_regional(inp_dir: str, reg_subdir: str) -> pd.DataFrame:
             rows.append({"year": yr, "gt": w_mwe * total_area * 1e-3, "mwe": w_mwe})
 
     return pd.DataFrame(rows).sort_values("year").reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Regional aleatoric aggregation
+# ---------------------------------------------------------------------------
+
+def _aggregate_aleatoric_to_regional(
+    ensemble_glacier_df: pd.DataFrame,
+    inp_dir: str,
+    reg_subdir: str,
+) -> pd.DataFrame | None:
+    """
+    Propagate per-glacier aleatoric sigma to regional sigma via area-weighted aggregation.
+
+    sigma_regional_t = sqrt( Σ_i (area_i/total_area_t)² * sigma_i² )
+
+    This is the correct propagation for a weighted mean:
+        regional_mwe_t = Σ_i w_i * pred_i,  w_i = area_i / total_area_t
+    Under independence: Var[regional_t] = Σ_i w_i² * sigma_i²
+
+    Args:
+        ensemble_glacier_df: ensemble_glacier.csv with columns rgi_id, year, std_aleatoric
+        inp_dir:             OGGM feature file base directory
+        reg_subdir:          Region subdirectory (e.g. 'r06')
+
+    Returns:
+        DataFrame with columns year, std_aleatoric (regional), or None if unavailable.
+    """
+    if "std_aleatoric" not in ensemble_glacier_df.columns:
+        return None
+    if ensemble_glacier_df["std_aleatoric"].isna().all():
+        return None
+
+    feat_path = os.path.join(inp_dir, reg_subdir, f"main_features_{reg_subdir}.csv")
+    if not os.path.exists(feat_path):
+        warnings.warn(f"Feature file not found at {feat_path} — regional aleatoric skipped.")
+        return None
+
+    try:
+        feats = pd.read_csv(feat_path, usecols=["rgi_id", "year", "Area"])
+    except Exception as exc:
+        warnings.warn(f"Could not load {feat_path}: {exc} — regional aleatoric skipped.")
+        return None
+
+    merged = ensemble_glacier_df[["rgi_id", "year", "std_aleatoric"]].merge(
+        feats, on=["rgi_id", "year"], how="inner"
+    )
+
+    rows = []
+    for yr, grp in merged.groupby("year"):
+        total_area = grp["Area"].sum()
+        if total_area <= 0:
+            continue
+        w = grp["Area"].values / total_area
+        sigma_regional = np.sqrt((w ** 2 * grp["std_aleatoric"].values ** 2).sum())
+        rows.append({"year": yr, "std_aleatoric": sigma_regional})
+
+    return pd.DataFrame(rows).sort_values("year").reset_index(drop=True) if rows else None
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +541,14 @@ def run_ensemble_uncertainty(cfg: dict) -> None:
     run_dirs = [Path(d) for d in valid["run_dir"].values]
 
     # ------------------------------------------------------------------
+    # 1b. Read model config paths from first run (needed for aux data + aleatoric)
+    # ------------------------------------------------------------------
+    run_model_cfg = _read_run_model_cfg(run_dirs)
+    glambie_path  = run_model_cfg.get("glambie_path", "")
+    inp_dir       = run_model_cfg.get("inp_dir", "")
+    reg_subdir    = run_model_cfg.get("reg_subdir", "")
+
+    # ------------------------------------------------------------------
     # 2. Per-glacier ensemble
     # ------------------------------------------------------------------
     print("\n--- Per-glacier ensemble ---")
@@ -492,9 +568,22 @@ def run_ensemble_uncertainty(cfg: dict) -> None:
     glacier_weights_arr /= glacier_weights_arr.sum()   # renormalise after any exclusions
 
     means_mat = np.stack([df["mean"].values for df in glacier_dfs])   # (K, N)
-    stds_mat  = np.stack([df["std"].values  for df in glacier_dfs])   # (K, N)
 
-    comps = _ensemble_components(means_mat, stds_mat, glacier_weights_arr)
+    # Use epistemic_std when available (heteroscedastic runs); fall back to std
+    # (which equals epistemic std in homoscedastic runs).
+    epistemic_col = "epistemic_std" if all("epistemic_std" in df.columns for df in glacier_dfs) else "std"
+    stds_mat = np.stack([df[epistemic_col].values for df in glacier_dfs])  # (K, N)
+
+    # Aleatoric: available only when all runs were trained with heteroscedastic=true
+    has_aleatoric = all("aleatoric_std" in df.columns for df in glacier_dfs)
+    aleatoric_mat = (
+        np.stack([df["aleatoric_std"].values for df in glacier_dfs])
+        if has_aleatoric else None
+    )
+    if has_aleatoric:
+        print(f"  Heteroscedastic runs detected — aleatoric uncertainty will be included.")
+
+    comps = _ensemble_components(means_mat, stds_mat, glacier_weights_arr, aleatoric_mat)
 
     ref = glacier_dfs[0]
     ensemble_glacier = pd.DataFrame({
@@ -528,8 +617,10 @@ def run_ensemble_uncertainty(cfg: dict) -> None:
 
     reg_means_mat = np.stack([df["mean"].values for df in regional_dfs])   # (K, n_years)
     reg_stds_mat  = np.stack([df["std"].values  for df in regional_dfs])   # (K, n_years)
+    # regional_annual_mwe.csv std is always epistemic (computed from mu samples only)
 
     reg_comps = _ensemble_components(reg_means_mat, reg_stds_mat, regional_weights_arr)
+    # Note: regional aleatoric is computed separately below via area-weighted propagation.
 
     ref_regional = regional_dfs[0]
     years        = ref_regional["year"].values
@@ -550,13 +641,31 @@ def run_ensemble_uncertainty(cfg: dict) -> None:
         )
         print("  Note: total_area_km2 derived from regional_annual_gt.csv (older run format)")
 
+    # Aggregate per-glacier aleatoric sigma to regional via area-weighting.
+    # This requires the ensemble_glacier_df (already computed above) and the
+    # glacier area data from the OGGM feature file.
+    reg_aleatoric_df = _aggregate_aleatoric_to_regional(ensemble_glacier, inp_dir, reg_subdir)
+    if reg_aleatoric_df is not None:
+        year_to_reg_aleatoric = dict(zip(reg_aleatoric_df["year"], reg_aleatoric_df["std_aleatoric"]))
+        reg_aleatoric_arr = np.array([year_to_reg_aleatoric.get(y, np.nan) for y in years])
+        # Recompute std_total for regional to include aleatoric
+        valid_mask = ~np.isnan(reg_aleatoric_arr)
+        reg_std_total = np.sqrt(
+            reg_comps["std_structural"] ** 2 + reg_comps["std_epistemic"] ** 2
+            + np.where(valid_mask, reg_aleatoric_arr ** 2, 0.0)
+        )
+        print(f"  Regional aleatoric propagated from per-glacier ensemble ({valid_mask.sum()}/{len(years)} years).")
+    else:
+        reg_aleatoric_arr = np.full(len(years), np.nan)
+        reg_std_total     = reg_comps["std_total"]
+
     ensemble_regional_mwe = pd.DataFrame({
         "year":           years,
         "median_mwe":     reg_comps["median_mwe"],
         "std_structural": reg_comps["std_structural"],
         "std_epistemic":  reg_comps["std_epistemic"],
-        "std_aleatoric":  reg_comps["std_aleatoric"],
-        "std_total":      reg_comps["std_total"],
+        "std_aleatoric":  reg_aleatoric_arr,
+        "std_total":      reg_std_total,
     })
     ensemble_regional_mwe.to_csv(output_dir / "ensemble_regional_mwe.csv", index=False)
     print(f"  Saved ensemble_regional_mwe.csv  ({len(years)} years)")
@@ -571,21 +680,16 @@ def run_ensemble_uncertainty(cfg: dict) -> None:
         "median_gt":      reg_comps["median_mwe"]     * scale,
         "std_structural": reg_comps["std_structural"] * scale,
         "std_epistemic":  reg_comps["std_epistemic"]  * scale,
-        "std_aleatoric":  reg_comps["std_aleatoric"],         # NaN — no scaling applied
-        "std_total":      reg_comps["std_total"]      * scale,
+        "std_aleatoric":  np.where(~np.isnan(reg_aleatoric_arr), reg_aleatoric_arr * scale, np.nan),
+        "std_total":      reg_std_total                          * scale,
     })
     ensemble_regional_gt.to_csv(output_dir / "ensemble_regional_gt.csv", index=False)
     print(f"  Saved ensemble_regional_gt.csv")
 
     # ------------------------------------------------------------------
     # 5. Load auxiliary data for plots
-    # Paths are read from the Hydra config of the first valid run, so they
-    # don't need to be duplicated in the ensemble config.
+    # Paths already read into run_model_cfg above (step 1b).
     # ------------------------------------------------------------------
-    run_model_cfg = _read_run_model_cfg(run_dirs)
-    glambie_path  = run_model_cfg.get("glambie_path", "")
-    inp_dir       = run_model_cfg.get("inp_dir", "")
-    reg_subdir    = run_model_cfg.get("reg_subdir", "")
 
     glambie_wide_df = _load_glambie_wide(glambie_path)
     if glambie_wide_df is not None:
