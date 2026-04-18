@@ -11,14 +11,14 @@ n_fourier: 8
 fourier_seed: 42
 
 # --- Training ---
-model_nepochs: 100000
+model_nepochs: 50000
 lr: 1.0e-3
 finetune_lr: 3.0e-4          # Stage 2 initial LR (lower than pretrain; cosine-decayed after beta annealing)
 grad_clip_norm: 2.0           # global gradient norm clip for Stage 2 (0 = disabled)
-beta_anneal_epochs: 2000       # Set to 20-30% of model_nepochs — beta ramps 0→1 over this window
+beta_anneal_epochs: 15000       # Set to 20-30% of model_nepochs — beta ramps 0→1 over this window
 seed: 0
 oggm_loss_fn: rmse           # 'huber' or 'rmse'
-heteroscedastic: false        # if true, model outputs (mu, log_sigma_noise) and uses NLL loss
+heteroscedastic: true        # if true, model outputs (mu, log_sigma_noise) and uses NLL loss
 sigma_floor: 0.05             # minimum aleatoric sigma in scaled units (prevents collapse)
 huber_delta: 0.5              # Huber transition point in scaled target units (only used if oggm_loss_fn=huber)
 glambie_weight: 1.0           # Relative weight of GLaMBIE loss vs Hugonnet temporal-avg loss.
@@ -33,7 +33,7 @@ model_nensemble: 100          # MC samples at prediction time
 # --- Data ---
 inp_dir: data_for_model
 train_split: full             # 'train' for CV run, 'full' for final pretrained model
-pretrain_year_min: 2000       # Only use OGGM rows with year >= this value (aligns prior with Hugonnet window)
+pretrain_year_min: 1940       # Only use OGGM rows with year >= this value (aligns prior with Hugonnet window)
 pretrain_year_max: 2020       # Only use OGGM rows with year <= this value
 
 # --- Seasonal feature columns (match actual CSV column names exactly) ---
