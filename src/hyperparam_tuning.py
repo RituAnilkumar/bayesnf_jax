@@ -45,33 +45,33 @@ import yaml
 SWEEP_PARAMS = [
     "model.model_nlayers",
     "model.model_nhidden",
-    "model.glambie_weight",
+    "model.heteroscedastic",
 ]
 
 # Short names used in plot labels / column headers
 PARAM_SHORT = {
-    "model.model_nlayers":  "nlayers",
-    "model.model_nhidden":  "nhidden",
-    "model.glambie_weight": "glambie_weight",
+    "model.model_nlayers":   "nlayers",
+    "model.model_nhidden":   "nhidden",
+    "model.heteroscedastic": "heteroscedastic",
 }
 
 # Human-readable axis labels for plots
 PARAM_LABEL = {
-    "nlayers":        "N layers",
-    "nhidden":        "Hidden width",
-    "glambie_weight": "GLaMBIE weight",
+    "nlayers":         "N layers",
+    "nhidden":         "Hidden width",
+    "heteroscedastic": "Heteroscedastic",
 }
 
 # Key 2-D pairs to show in heatmaps (short names)
 HEATMAP_PAIRS = [
-    ("nlayers",        "nhidden"),
-    ("glambie_weight", "nlayers"),
-    ("glambie_weight", "nhidden"),
+    ("nlayers",         "nhidden"),
+    ("heteroscedastic", "nlayers"),
+    ("heteroscedastic", "nhidden"),
 ]
 
 # Non-sweep overrides tracked as metadata columns (not used in scoring)
 EXTRA_OVERRIDES = {
-    "model.heteroscedastic": "heteroscedastic",
+    "model.glambie_weight":     "glambie_weight",
     "model.beta_anneal_epochs": "beta_anneal_epochs",
 }
 
@@ -110,10 +110,13 @@ def _parse_overrides(overrides_path: Path) -> dict:
     for full_key, short in PARAM_SHORT.items():
         val_str = raw.get(full_key)
         if val_str is not None:
-            try:
-                out[short] = float(val_str)
-            except ValueError:
-                out[short] = val_str
+            if val_str.lower() in ("true", "false"):
+                out[short] = val_str.lower() == "true"
+            else:
+                try:
+                    out[short] = float(val_str)
+                except ValueError:
+                    out[short] = val_str
         else:
             out[short] = float("nan")
 
@@ -220,8 +223,8 @@ def build_results_df(
 ) -> pd.DataFrame:
     """Load metrics for every discovered run and return a combined DataFrame.
 
-    Columns: region, run_id, run_dir, nlayers, nhidden, beta_epochs,
-             lr, unc_floor, loyo_rmse, glambie_rmse
+    Columns: region, run_id, run_dir, nlayers, nhidden, heteroscedastic,
+             glambie_weight, beta_anneal_epochs, loyo_rmse, glambie_rmse
     """
     run_dirs = discover_runs(multirun_root)
     # Region is derived from the multirun_root dir name (e.g. r06_3645680 → r06)
@@ -505,8 +508,12 @@ def plot_parallel_coords(df: pd.DataFrame, output_dir: Path) -> None:
     param_cols = list(PARAM_SHORT.values())
 
     # Normalise each param axis to [0, 1] for visual alignment
+    # Booleans are cast to int (False=0, True=1) before normalisation.
     norm_df = valid[param_cols].copy()
     for col in param_cols:
+        if norm_df[col].dropna().apply(lambda x: isinstance(x, bool)).any():
+            norm_df[col] = norm_df[col].map(lambda x: int(x) if isinstance(x, bool) else x)
+        norm_df[col] = pd.to_numeric(norm_df[col], errors="coerce")
         lo, hi = norm_df[col].min(), norm_df[col].max()
         norm_df[col] = (norm_df[col] - lo) / (hi - lo) if hi > lo else 0.0
 
@@ -533,10 +540,11 @@ def plot_parallel_coords(df: pd.DataFrame, output_dir: Path) -> None:
     # Draw vertical guide lines with actual param values annotated
     for j, col in enumerate(param_cols):
         ax.axvline(j, color="grey", linewidth=0.6, alpha=0.5)
-        vals = sorted(valid[col].dropna().unique())
-        lo, hi = valid[col].min(), valid[col].max()
-        for v in vals:
-            y_pos = (v - lo) / (hi - lo) if hi > lo else 0.5
+        vals = sorted(valid[col].dropna().unique(), key=lambda x: int(x) if isinstance(x, bool) else x)
+        num_vals = [int(v) if isinstance(v, bool) else v for v in vals]
+        lo = min(num_vals); hi = max(num_vals)
+        for v, nv in zip(vals, num_vals):
+            y_pos = (nv - lo) / (hi - lo) if hi > lo else 0.5
             ax.annotate(
                 str(v), xy=(j, y_pos), xytext=(-4, 0), textcoords="offset points",
                 fontsize=6, ha="right", va="center", color="dimgray",
@@ -557,19 +565,23 @@ def plot_parallel_coords(df: pd.DataFrame, output_dir: Path) -> None:
 
 
 def plot_nhidden_vs_rmse(df: pd.DataFrame, output_dir: Path) -> None:
-    """nhidden on x-axis, RMSE on y-axis, one line per nlayers value.
+    """nhidden on x-axis, RMSE on y-axis, one line per (nlayers, heteroscedastic) combo.
 
-    Each point is the mean RMSE across all regions and beta_anneal_epochs values
-    for that (nhidden, nlayers) combination. Error bars show ±1 std.
-    Two subplots: LOYO RMSE (pretrain) and GLaMBIE test RMSE (finetune).
+    Each point is the mean RMSE across all regions for that combination.
+    Error bars show ±1 std. Two subplots: LOYO RMSE and GLaMBIE test RMSE.
+    When heteroscedastic is not a sweep param, lines are split by nlayers only.
     """
     markers = {1: "o", 2: "s", 3: "^", 4: "D", 5: "v"}
     colors  = {1: "steelblue", 2: "darkorange", 3: "forestgreen", 4: "purple", 5: "crimson"}
+    linestyles = {True: "-", False: "--"}
 
     metrics = [
         ("loyo_rmse",    "LOYO RMSE (MWE/yr)"),
         ("glambie_rmse", "GLaMBIE test RMSE (MWE/yr)"),
     ]
+
+    has_hetero = "heteroscedastic" in df.columns and df["heteroscedastic"].notna().any()
+    hetero_vals = sorted(df["heteroscedastic"].dropna().unique(), key=lambda x: int(x) if isinstance(x, bool) else x) if has_hetero else [None]
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=False)
 
@@ -583,41 +595,112 @@ def plot_nhidden_vs_rmse(df: pd.DataFrame, output_dir: Path) -> None:
         nlayers_vals = sorted(valid["nlayers"].unique())
 
         for nl in nlayers_vals:
-            sub = valid[valid["nlayers"] == nl]
-            means, stds, xs = [], [], []
-            for nh in nhidden_vals:
-                cell = sub[sub["nhidden"] == nh][metric_col]
-                if len(cell) == 0:
+            for hv in hetero_vals:
+                if hv is None:
+                    sub = valid[valid["nlayers"] == nl]
+                    ls = "-"
+                    lbl = f"{int(nl)} layer{'s' if nl > 1 else ''}"
+                else:
+                    sub = valid[(valid["nlayers"] == nl) & (valid["heteroscedastic"] == hv)]
+                    ls = linestyles.get(hv, "-")
+                    het_tag = "aleatoric" if hv else "ep+struct"
+                    lbl = f"{int(nl)}L {het_tag}"
+
+                means, stds, xs = [], [], []
+                for nh in nhidden_vals:
+                    cell = sub[sub["nhidden"] == nh][metric_col]
+                    if len(cell) == 0:
+                        continue
+                    xs.append(nh)
+                    means.append(cell.mean())
+                    stds.append(cell.std() if len(cell) > 1 else 0.0)
+
+                if not xs:
                     continue
-                xs.append(nh)
-                means.append(cell.mean())
-                stds.append(cell.std() if len(cell) > 1 else 0.0)
 
-            if not xs:
-                continue
-
-            marker = markers.get(int(nl), "o")
-            color  = colors.get(int(nl), "grey")
-            ax.errorbar(
-                xs, means, yerr=stds,
-                marker=marker, color=color, lw=1.5, ms=6, capsize=4,
-                label=f"{int(nl)} layer{'s' if nl > 1 else ''}",
-            )
+                marker = markers.get(int(nl), "o")
+                color  = colors.get(int(nl), "grey")
+                ax.errorbar(
+                    xs, means, yerr=stds,
+                    marker=marker, color=color, lw=1.5, ms=6, capsize=4,
+                    linestyle=ls, label=lbl,
+                )
 
         ax.set_xlabel("Hidden width (neurons)", fontsize=10)
         ax.set_ylabel(metric_label, fontsize=10)
         ax.set_title(metric_label, fontsize=11)
         ax.set_xticks(nhidden_vals)
-        ax.legend(fontsize=9, title="N layers")
+        legend_title = "N layers × heteroscedastic" if has_hetero else "N layers"
+        ax.legend(fontsize=8, title=legend_title)
         ax.grid(alpha=0.35)
 
-    fig.suptitle(
-        "RMSE vs hidden width by number of layers\n"
-        "(mean ± std across regions and beta_anneal_epochs)",
-        fontsize=12,
-    )
+    subtitle = "(mean ± std across regions; solid=aleatoric, dashed=ep+struct)" if has_hetero else "(mean ± std across regions)"
+    fig.suptitle(f"RMSE vs hidden width by number of layers\n{subtitle}", fontsize=12)
     fig.tight_layout()
     _savefig(fig, output_dir / "plots" / "nhidden_vs_rmse.png")
+
+
+def plot_heteroscedastic_comparison(df: pd.DataFrame, output_dir: Path) -> None:
+    """Box plots comparing aleatoric (heteroscedastic=True) vs epistemic+structural
+    (heteroscedastic=False) groups for each metric, broken down by region.
+
+    Skipped silently when heteroscedastic is not a sweep parameter.
+    """
+    if "heteroscedastic" not in df.columns or df["heteroscedastic"].isna().all():
+        return
+    if df["heteroscedastic"].nunique() < 2:
+        print("  Skipping heteroscedastic comparison — only one group found")
+        return
+
+    metrics = [
+        ("loyo_rmse",    "LOYO RMSE (MWE/yr)"),
+        ("glambie_rmse", "GLaMBIE test RMSE (MWE/yr)"),
+        ("composite",    "Composite score (normalised)"),
+    ]
+    regions = sorted(df["region"].dropna().unique())
+    group_labels = ["ep+struct (False)", "aleatoric (True)"]
+
+    for metric_col, metric_label in metrics:
+        valid = df.dropna(subset=[metric_col, "heteroscedastic"])
+        if valid.empty:
+            continue
+
+        ncols = min(4, len(regions))
+        nrows = int(np.ceil(len(regions) / ncols))
+        fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 4 * nrows), squeeze=False)
+        axes_flat = axes.flatten()
+        fig.suptitle(
+            f"{metric_label}: aleatoric vs epistemic+structural\n(per region)",
+            fontsize=12,
+        )
+
+        for ax_idx, region in enumerate(regions):
+            ax = axes_flat[ax_idx]
+            sub = valid[valid["region"] == region]
+            grp_false = sub[sub["heteroscedastic"] == False][metric_col].values
+            grp_true  = sub[sub["heteroscedastic"] == True][metric_col].values
+            groups = [g for g in [grp_false, grp_true] if len(g) > 0]
+            lbls   = [gl for g, gl in [(grp_false, group_labels[0]), (grp_true, group_labels[1])] if len(g) > 0]
+            if not groups:
+                ax.set_visible(False)
+                continue
+            bp = ax.boxplot(groups, tick_labels=lbls, patch_artist=True)
+            colors_box = ["steelblue", "darkorange"]
+            for patch, c in zip(bp["boxes"], colors_box):
+                patch.set_facecolor(c)
+                patch.set_alpha(0.6)
+            ax.set_title(region, fontsize=9)
+            ax.tick_params(axis="x", labelsize=7, rotation=15)
+            ax.grid(axis="y", alpha=0.4)
+            if ax_idx % ncols == 0:
+                ax.set_ylabel(metric_label, fontsize=8)
+
+        for ax in axes_flat[len(regions):]:
+            ax.set_visible(False)
+
+        fig.tight_layout()
+        fname = f"heteroscedastic_comparison_{metric_col}.png"
+        _savefig(fig, output_dir / "plots" / fname)
 
 
 def plot_pretrain_vs_finetune(df: pd.DataFrame, output_dir: Path) -> None:
@@ -725,7 +808,10 @@ def plot_regional_ranking(df: pd.DataFrame, output_dir: Path, top_n: int = 10) -
 
     # Build label for each config row
     def _config_label(row) -> str:
-        return f"L={int(row.nlayers)} H={int(row.nhidden)} gw={row.glambie_weight:.1f}"
+        parts = [f"L={int(row.nlayers)}", f"H={int(row.nhidden)}"]
+        if "heteroscedastic" in row.index:
+            parts.append("het=" + ("Y" if row.heteroscedastic else "N"))
+        return " ".join(parts)
 
     config_labels = [_config_label(r) for _, r in top_configs.iterrows()]
 
@@ -865,26 +951,29 @@ def main() -> None:
     # ---- Plots ----
     print("\nGenerating plots...")
 
-    print("  [1/7] Marginal box plots")
+    print("  [1/8] Marginal box plots")
     plot_marginals(df, output_dir)
 
-    print("  [2/7] 2-D heatmaps")
+    print("  [2/8] 2-D heatmaps")
     plot_heatmaps(df, output_dir)
 
-    print("  [3/7] Parallel coordinates")
+    print("  [3/8] Parallel coordinates")
     plot_parallel_coords(df, output_dir)
 
-    print("  [4/7] Pretrain vs finetune scatter")
+    print("  [4/8] Pretrain vs finetune scatter")
     plot_pretrain_vs_finetune(df, output_dir)
 
-    print("  [5/7] Parameter importance")
+    print("  [5/8] Parameter importance")
     plot_param_importance(df, output_dir)
 
-    print("  [6/7] Regional ranking heatmap")
+    print("  [6/8] Regional ranking heatmap")
     plot_regional_ranking(df, output_dir, top_n=top_n)
 
-    print("  [7/7] Hidden width vs RMSE by n_layers")
+    print("  [7/8] Hidden width vs RMSE by n_layers")
     plot_nhidden_vs_rmse(df, output_dir)
+
+    print("  [8/8] Heteroscedastic group comparison")
+    plot_heteroscedastic_comparison(df, output_dir)
 
     # ---- Summary table ----
     print("\nTop runs:")
