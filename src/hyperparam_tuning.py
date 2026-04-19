@@ -507,13 +507,19 @@ def plot_parallel_coords(df: pd.DataFrame, output_dir: Path) -> None:
         return
     param_cols = list(PARAM_SHORT.values())
 
+    def _to_num(v) -> float:
+        """Convert any scalar (including numpy/Python bool) to Python float."""
+        if pd.isna(v) if not isinstance(v, (list, np.ndarray)) else False:
+            return float("nan")
+        if isinstance(v, (bool, np.bool_)):
+            return float(int(v))
+        return float(v)
+
     # Normalise each param axis to [0, 1] for visual alignment
-    # Booleans are cast to int (False=0, True=1) before normalisation.
+    # Booleans (Python and numpy) are cast to 0/1 before normalisation.
     norm_df = valid[param_cols].copy()
     for col in param_cols:
-        if norm_df[col].dropna().apply(lambda x: isinstance(x, bool)).any():
-            norm_df[col] = norm_df[col].map(lambda x: int(x) if isinstance(x, bool) else x)
-        norm_df[col] = pd.to_numeric(norm_df[col], errors="coerce")
+        norm_df[col] = norm_df[col].map(_to_num)
         lo, hi = norm_df[col].min(), norm_df[col].max()
         norm_df[col] = (norm_df[col] - lo) / (hi - lo) if hi > lo else 0.0
 
@@ -540,9 +546,9 @@ def plot_parallel_coords(df: pd.DataFrame, output_dir: Path) -> None:
     # Draw vertical guide lines with actual param values annotated
     for j, col in enumerate(param_cols):
         ax.axvline(j, color="grey", linewidth=0.6, alpha=0.5)
-        vals = sorted(valid[col].dropna().unique(), key=lambda x: int(x) if isinstance(x, bool) else x)
-        num_vals = [int(v) if isinstance(v, bool) else v for v in vals]
-        lo = min(num_vals); hi = max(num_vals)
+        vals = sorted(valid[col].dropna().unique(), key=_to_num)
+        num_vals = [_to_num(v) for v in vals]
+        lo = float(min(num_vals)); hi = float(max(num_vals))
         for v, nv in zip(vals, num_vals):
             y_pos = (nv - lo) / (hi - lo) if hi > lo else 0.5
             ax.annotate(
