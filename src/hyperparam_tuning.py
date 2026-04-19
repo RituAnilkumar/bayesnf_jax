@@ -20,6 +20,12 @@ Usage:
   python src/hyperparam_tuning.py
   python src/hyperparam_tuning.py --config conf/config_hyperparam_tuning.yaml
   python src/hyperparam_tuning.py --multirun_root /path/to/multirun --output_dir outputs/analysis
+
+Batch usage:
+for i in $(seq -w 1 19); do
+  python src/hyperparam_tuning.py \
+    --multirun_root /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r${i}_397*/
+done
 """
 
 from __future__ import annotations

@@ -41,6 +41,13 @@ Usage:
   python src/ensemble_uncertainty.py --config conf/config_ensemble_uncertainty.yaml
   python src/ensemble_uncertainty.py --multirun_root /path/to/r06_3645680 \\
                                      --output_dir outputs/ensemble/r06
+
+Batch usage:
+for i in $(seq -w 1 19); do
+  python src/ensemble_uncertainty_split.py \
+    --multirun_root /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r${i}_397*/ \
+    --output_dir outputs/all_regs/r${i}
+done
 """
 
 from __future__ import annotations
