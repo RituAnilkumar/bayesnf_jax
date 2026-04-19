@@ -1,0 +1,41 @@
+# Explainability config — Integrated Gradients attributions + seaborn plots
+# Override region via: model=bnf_regional_seasonal/r01
+
+defaults:
+  - model: bnf_regional_seasonal
+  - _self_
+
+model:
+  output_dir: .    # resolved to hydra.run.dir by chdir:true
+
+explain:
+  # --- Which params to explain ---
+  stage: finetune          # 'finetune' or 'pretrain'
+
+  # --- Which data split to run on ---
+  explain_split: train     # 'train', 'full', 'logo', 'loyo', 'loygo'
+
+  # --- IG hyperparameters ---
+  n_mc: 20                 # MC weight samples to average over
+  n_steps: 50              # Riemann integration steps along the IG path
+  baseline: zero           # 'zero' or 'mean'
+
+  # --- Subsampling ---
+  max_points: 2000         # cap on data points; subsamples randomly if exceeded
+  chunk_size: 500          # inner vmap batch size (reduce if OOM)
+  seed: 0                  # numpy seed for reproducible subsampling
+
+  # --- Plots ---
+  beeswarm_n_max: 1000     # max points in beeswarm (further subsampled for speed)
+  importance_top_k: null   # show all features in importance bar; set e.g. 10 to limit
+  dependence_top_k: 6      # top-k features for which dependence plots are saved
+
+  # --- Waterfall: pick one example glacier-year (leave null to skip) ---
+  waterfall_rgi_id: null   # e.g. "RGI60-01.00001"
+  waterfall_year: null     # e.g. 2010
+
+hydra:
+  run:
+    dir: outputs/explain/${model.reg_subdir}_${model.input_type}
+  job:
+    chdir: true
