@@ -1,40 +1,37 @@
 """
 src/ensemble_ep_alea.py
 
-Selects the best single model from a Hydra multirun sweep and decomposes
-its predictive uncertainty into epistemic (parameter) and aleatoric components.
+Selects the top-N models by GLaMBIE test RMSE and decomposes their combined
+predictive uncertainty into epistemic, aleatoric, and structural components.
 
-No structural/model uncertainty is computed — this script is for a single best
-model rather than an ensemble. Use ensemble_uncertainty.py when structural
-uncertainty from model configuration spread is also required.
+Uncertainty decomposition (law of total variance across top-N models):
 
-Uncertainty decomposition (single model, law of total variance):
+    std_epistemic  = sqrt( Σ_k w_k * epistemic_std_k² )
+                     weighted MC-parameter uncertainty within each model
+    std_aleatoric  = sqrt( Σ_k w_k * aleatoric_std_k² )
+                     weighted predicted noise sigma (heteroscedastic=true only)
+    std_structural = sqrt( Σ_k w_k * (mean_k - mu_ensemble)² )
+                     spread of model means around the ensemble mean
+    std_total      = sqrt( std_epistemic² + std_aleatoric² + std_structural² )
 
-    std_epistemic = MC std of mu samples
-                    (spread of n_ensemble weight posterior draws in predict.py)
-    std_aleatoric = mean predicted noise sigma across weight draws
-                    (non-NaN only when heteroscedastic=true was used in training)
-    std_total     = sqrt(std_epistemic² + std_aleatoric²)
-                    (equals std_epistemic when aleatoric is unavailable)
+Only heteroscedastic runs (model.heteroscedastic=true) are considered.
+Model selection criterion: lowest glambie_rmse over test_years (default 2020-2024).
+Equal weights are used across the top-N models.
 
-The best model is selected by the lowest composite score from hyperparam_tuning
-scoring (loyo_rmse + glambie_rmse, same weights as the ensemble config).
-
-Inputs (all read from the selected run directory):
-    preds_full.csv            — rgi_id, year, mean, std
-                                [+ aleatoric_std, epistemic_std, total_std
-                                   when run with heteroscedastic=true]
+Inputs (read from each selected run directory):
+    preds_full.csv            — rgi_id, year, mean, std, aleatoric_std,
+                                epistemic_std, total_std
     regional_annual_mwe.csv   — year, total_area_km2, mean, std
 
 Outputs written to {output_dir}/:
-    best_model_info.csv          — which run was selected and its scores
-    best_model_glacier.csv       — per (rgi_id, year): mean_mwe, epistemic_std,
-                                   aleatoric_std, total_std
-    best_model_regional_mwe.csv  — per year MWE/yr: same uncertainty columns
-    best_model_regional_gt.csv   — per year Gt/yr:  same uncertainty columns
-    best_model_regional_gt.png
-    best_model_regional_mwe.png
-    best_model_cumulative_gt.png
+    top_models_info.csv          — selected runs and their scores
+    top_models_glacier.csv       — per (rgi_id, year): mean_mwe, epistemic_std,
+                                   aleatoric_std, structural_std, total_std
+    top_models_regional_mwe.csv  — per year MWE/yr: same uncertainty columns
+    top_models_regional_gt.csv   — per year Gt/yr:  same uncertainty columns
+    top_models_regional_gt.png
+    top_models_regional_mwe.png
+    top_models_cumulative_gt.png
 
 Usage:
     python src/ensemble_ep_alea.py
