@@ -37,6 +37,7 @@ Usage:
 import os
 import re
 import cloudpickle
+from collections import Counter
 import jax
 import numpy as np
 import pandas as pd
@@ -103,24 +104,40 @@ def _load_target_scaler(params_dir: str):
 # Architecture helpers
 # ---------------------------------------------------------------------------
 
-def _detect_heteroscedastic(params: dict) -> bool:
+def _get_arch_key(params: dict):
     """
-    Infer heteroscedastic mode from the output layer weight shape in a params dict.
-    output_layer.w_mu shape (in_features, 2) → heteroscedastic=True
-    output_layer.w_mu shape (in_features, 1) → heteroscedastic=False
+    Extract a (n_layers, nhidden, out_features) fingerprint from params shapes.
+
+    Handles both plain hidden_layers_N and remat(hidden_layers_N) key names
+    produced by nn.remat in BayesianNeuralField.
+
+    Returns None if the structure cannot be parsed.
     """
     try:
-        w_mu = params["params"]["output_layer"]["w_mu"]
-        return int(w_mu.shape[-1]) == 2
-    except (KeyError, TypeError, IndexError):
-        return False
+        p = params["params"]
+        n_layers, nhidden = 0, None
+        while True:
+            # nn.remat wraps the key name; try both forms
+            for key in (f"remat(hidden_layers_{n_layers})", f"hidden_layers_{n_layers}"):
+                if key in p:
+                    nhidden = int(p[key]["w_mu"].shape[-1])
+                    n_layers += 1
+                    break
+            else:
+                break   # no more hidden layers found
+        out_features = int(p["output_layer"]["w_mu"].shape[-1])
+        return (n_layers, nhidden, out_features)
+    except (KeyError, TypeError, IndexError, AttributeError):
+        return None
 
 
-def _build_bnf_model(mc, heteroscedastic: bool) -> "BayesianNeuralField":
+def _build_bnf_model(mc, arch_key: tuple) -> "BayesianNeuralField":
+    """Build a BayesianNeuralField from a (n_layers, nhidden, out_features) arch key."""
+    n_layers, nhidden, out_features = arch_key
     return BayesianNeuralField(
-        hidden_sizes=tuple([int(mc.model_nhidden)] * int(mc.model_nlayers)),
+        hidden_sizes=tuple([nhidden] * n_layers),
         n_fourier=int(mc.n_fourier),
-        heteroscedastic=heteroscedastic,
+        heteroscedastic=(out_features == 2),
         sigma_floor=float(mc.get("sigma_floor", 0.05)),
     )
 
@@ -287,27 +304,42 @@ def main(cfg: DictConfig) -> None:
         covariates_sc  = apply_scaler(covariates, scaler) if scaler is not None \
                          else covariates.astype(np.float32)
 
-        # Load all params and detect heteroscedastic from the actual weight shapes.
-        # The config value is unreliable if some runs used different CLI overrides.
+        # Load all params and detect full architecture from weight shapes.
+        # Config values are unreliable when the multirun swept hyperparameters.
         pkl_name = f"{stage}d_params.pkl"
         all_params_raw = [
             (d, _load_params(os.path.join(d, pkl_name))) for d in run_subdirs
         ]
-        heteroscedastic = _detect_heteroscedastic(all_params_raw[0][1])
-        expected_out = 2 if heteroscedastic else 1
+
+        arch_keys = [_get_arch_key(p) for _, p in all_params_raw]
+        valid_keys = [k for k in arch_keys if k is not None]
+        if not valid_keys:
+            raise RuntimeError("Could not detect architecture from any ensemble member.")
+
+        # Pick the most common architecture across all members
+        arch_counts = Counter(valid_keys)
+        majority_arch = arch_counts.most_common(1)[0][0]
+        n_layers, nhidden, out_features = majority_arch
+        heteroscedastic = (out_features == 2)
+
+        if len(arch_counts) > 1:
+            print(f"[explain] Multiple architectures detected across ensemble members:")
+            for k, cnt in arch_counts.most_common():
+                tag = " ← selected (majority)" if k == majority_arch else ""
+                print(f"  layers={k[0]} nhidden={k[1]} out={k[2]}  ×{cnt} runs{tag}")
+
         all_params = []
-        for d, p in all_params_raw:
-            actual_out = int(p["params"]["output_layer"]["w_mu"].shape[-1])
-            if actual_out == expected_out:
+        for (d, p), key in zip(all_params_raw, arch_keys):
+            if key == majority_arch:
                 all_params.append(p)
             else:
                 print(f"[explain] Skipping {os.path.basename(d)} — "
-                      f"output features={actual_out}, expected={expected_out} "
-                      f"(architecture mismatch)")
-        print(f"[explain] Using {len(all_params)}/{len(all_params_raw)} compatible ensemble members "
-              f"(heteroscedastic={heteroscedastic})")
+                      f"arch {key} != majority {majority_arch}")
 
-        model = _build_bnf_model(mc, heteroscedastic)
+        print(f"[explain] Using {len(all_params)}/{len(all_params_raw)} compatible ensemble members "
+              f"(layers={n_layers} nhidden={nhidden} heteroscedastic={heteroscedastic})")
+
+        model = _build_bnf_model(mc, majority_arch)
 
         mean_attrs, std_attrs, sample_idx = compute_ensemble_attributions(
             model=model,
@@ -344,9 +376,10 @@ def main(cfg: DictConfig) -> None:
         pkl_path  = os.path.join(run_dir, pkl_name)
         if not os.path.exists(pkl_path):
             raise FileNotFoundError(f"{pkl_name} not found in {run_dir}")
-        run_params    = _load_params(pkl_path)
-        heteroscedastic = _detect_heteroscedastic(run_params)
-        model = _build_bnf_model(mc, heteroscedastic)
+        run_params      = _load_params(pkl_path)
+        arch_key        = _get_arch_key(run_params)
+        heteroscedastic = (arch_key[2] == 2) if arch_key else False
+        model           = _build_bnf_model(mc, arch_key)
 
         mean_attrs, std_attrs, sample_idx = compute_attributions(
             model=model,
@@ -408,9 +441,10 @@ def main(cfg: DictConfig) -> None:
         time_index, covariates, rgi_ids, cols_used = build_model_inputs(features_df, ft_cols)
         years = features_df["year"].to_numpy()
 
-        loaded_params = _load_params(actual_pkl)
-        heteroscedastic = _detect_heteroscedastic(loaded_params)
-        model = _build_bnf_model(mc, heteroscedastic)
+        loaded_params   = _load_params(actual_pkl)
+        arch_key        = _get_arch_key(loaded_params)
+        heteroscedastic = (arch_key[2] == 2) if arch_key else False
+        model           = _build_bnf_model(mc, arch_key)
 
         scaler        = _load_scaler(params_dir)
         target_scaler = _load_target_scaler(params_dir)
