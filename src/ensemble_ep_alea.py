@@ -60,11 +60,13 @@ import yaml
 from src.hyperparam_tuning import build_results_df
 from src.ensemble_uncertainty import (
     _read_run_model_cfg,
+    _load_glacier_preds,
     _load_glambie_wide,
     _glambie_combined_gt,
     _glambie_sources_mwe,
     _load_oggm_regional,
     _aggregate_aleatoric_to_regional,
+    _ensemble_components,
     _savefig,
 )
 
@@ -73,17 +75,19 @@ from src.ensemble_uncertainty import (
 # Best-model selection
 # ---------------------------------------------------------------------------
 
-def pick_best_run(
+def pick_top_runs(
     multirun_root: Path,
     test_years: list[int],
     min_runs: int,
-) -> pd.Series:
+    top_n: int = 5,
+) -> pd.DataFrame:
     """
-    Return the single heteroscedastic run with the lowest GLaMBIE test RMSE.
+    Return the top-N heteroscedastic runs sorted by lowest GLaMBIE test RMSE.
 
     Selection criterion: glambie_rmse over test_years (default 2020-2024).
     Only runs with heteroscedastic=True in their Hydra overrides are considered.
     Raises if no such runs are found or none have a valid glambie_rmse.
+    Returns a DataFrame of up to top_n rows sorted ascending by glambie_rmse.
     """
     results_df = build_results_df(multirun_root, test_years, min_runs_per_region=min_runs)
 
@@ -105,7 +109,7 @@ def pick_best_run(
         print("  WARNING: 'heteroscedastic' column not found in overrides — "
               "cannot pre-filter. Will validate after loading preds_full.csv.")
 
-    valid = results_df.dropna(subset=["glambie_rmse"]).reset_index(drop=True)
+    valid = results_df.dropna(subset=["glambie_rmse"]).sort_values("glambie_rmse").reset_index(drop=True)
     if valid.empty:
         raise RuntimeError(
             "No heteroscedastic runs have a valid GLaMBIE test RMSE. "
@@ -113,12 +117,14 @@ def pick_best_run(
             "metrics_glambie_test.csv exists in each run directory."
         )
 
-    best_idx = valid["glambie_rmse"].idxmin()
-    best_row = valid.loc[best_idx]
-    print(f"  Best run: {best_row['run_id']}  glambie_rmse={best_row['glambie_rmse']:.4f}  "
-          f"loyo_rmse={best_row.get('loyo_rmse', float('nan')):.4f}")
-    print(f"  Run dir: {best_row['run_dir']}")
-    return best_row
+    top = valid.head(top_n).reset_index(drop=True)
+    if len(top) < top_n:
+        print(f"  WARNING: only {len(top)} valid runs available (requested top {top_n}).")
+    print(f"  Top {len(top)} runs by GLaMBIE RMSE:")
+    for _, row in top.iterrows():
+        print(f"    {row['run_id']}  glambie_rmse={row['glambie_rmse']:.4f}  "
+              f"loyo_rmse={row.get('loyo_rmse', float('nan')):.4f}")
+    return top
 
 
 # ---------------------------------------------------------------------------
