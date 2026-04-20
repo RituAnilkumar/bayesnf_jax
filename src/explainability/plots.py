@@ -63,9 +63,15 @@ def plot_importance_bar(
     fig, ax = plt.subplots(figsize=(8, max(3, len(order) * 0.35 + 1)))
     y_pos = np.arange(len(order))
 
+    # xerr must be a 2-row array [left_err, right_err] to avoid bars going negative
+    if err_sorted is not None:
+        xerr_clipped = np.array([np.minimum(err_sorted, imp_sorted), err_sorted])
+    else:
+        xerr_clipped = None
+
     bars = ax.barh(
         y_pos, imp_sorted,
-        xerr=err_sorted,
+        xerr=xerr_clipped,
         color=_POS_COLOR, alpha=0.85,
         ecolor="grey", capsize=3,
         height=0.65,
