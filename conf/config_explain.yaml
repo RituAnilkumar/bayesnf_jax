@@ -9,22 +9,38 @@ model:
   output_dir: .    # resolved to hydra.run.dir by chdir:true
 
 explain:
-  # --- Direct path to the params pkl (takes precedence over the model config paths).
-  #     Set this when your run used Hydra multirun or custom output dirs on the HPC,
-  #     so the actual pkl is not at the path hardcoded in the model config.
-  #     The scaler.pkl and target_scaler.pkl are expected in the same directory.
-  #     Example:
-  #       explain.params_path=/path/to/multirun/2024-01-15/3/finetuned_params.pkl
-  params_path: null
+  # ---------------------------------------------------------------------------
+  # Input source — three mutually exclusive options (highest priority first):
+  #
+  #   ensemble_dir   Point at a region multirun folder (e.g. multirun/r01_3977063/).
+  #                  Scans all numbered subdirectories (0/, 1/, …), loads every
+  #                  finetuned_params.pkl found, and reads architecture + data config
+  #                  from the first subdir's .hydra/config.yaml.
+  #                  Captures both VI uncertainty (n_mc_per_model draws per run)
+  #                  and structural uncertainty (variation across ensemble members).
+  #
+  #   run_dir        Point at a single run directory (e.g. multirun/r01_3977063/0/).
+  #                  Reads .hydra/config.yaml for architecture + data paths.
+  #                  No need to supply model=bnf_regional_seasonal/r01.
+  #
+  #   params_path    Direct path to a single pkl file.
+  #                  Still requires model=bnf_regional_seasonal/r01 for architecture.
+  #
+  # When ensemble_dir or run_dir is set, model=... on the command line is not needed.
+  # ---------------------------------------------------------------------------
+  ensemble_dir: null   # e.g. /path/to/multirun/r01_3977063
+  run_dir: null        # e.g. /path/to/multirun/r01_3977063/0
+  params_path: null    # e.g. /path/to/finetuned_params.pkl  (+ model= required)
 
-  # --- Fallback: which stage params to use when params_path is null ---
-  stage: finetune          # 'finetune' or 'pretrain' (ignored when params_path is set)
+  # --- Fallback stage when only params_path or model config is used ---
+  stage: finetune      # 'finetune' or 'pretrain'
 
   # --- Which data split to run on ---
   explain_split: train     # 'train', 'full', 'logo', 'loyo', 'loygo'
 
   # --- IG hyperparameters ---
-  n_mc: 20                 # MC weight samples to average over
+  n_mc: 20                 # MC samples per model (single-model modes)
+  n_mc_per_model: 5        # MC samples per model in ensemble mode (total = n_models × this)
   n_steps: 50              # Riemann integration steps along the IG path
   baseline: zero           # 'zero' or 'mean'
 

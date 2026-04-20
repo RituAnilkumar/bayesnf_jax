@@ -88,12 +88,65 @@ def make_ig_batch_fn(model, n_steps: int, heteroscedastic: bool):
     return ig_batch
 
 
+def _subsample(time_index, covariates, max_points, seed):
+    """Return (t_sub, c_sub, sample_idx) subsampled to at most max_points."""
+    N = len(time_index)
+    rng_np = np.random.default_rng(seed)
+    if N > max_points:
+        idx = np.sort(rng_np.choice(N, max_points, replace=False))
+    else:
+        idx = np.arange(N)
+    return time_index[idx].astype(np.float32), covariates[idx].astype(np.float32), idx
+
+
+def _make_baselines(t_sub, c_sub, baseline):
+    n_cov = c_sub.shape[1]
+    if baseline == "mean":
+        return (
+            jnp.array(float(t_sub.mean()), dtype=jnp.float32),
+            jnp.array(c_sub.mean(axis=0), dtype=jnp.float32),
+        )
+    return jnp.array(0.0, dtype=jnp.float32), jnp.zeros(n_cov, dtype=jnp.float32)
+
+
+def _run_ig_for_params(
+    ig_batch_fn,
+    params: dict,
+    t_arr: "jax.Array",
+    c_arr: "jax.Array",
+    rng: "jax.Array",
+    n_mc: int,
+    chunk_size: int,
+    t_base: "jax.Array",
+    c_base: "jax.Array",
+    label: str = "",
+) -> np.ndarray:
+    """
+    Collect raw per-MC-sample attributions for one params dict.
+
+    Returns: (n_mc, N', 1+n_cov) numpy array.
+    """
+    n_sub = len(t_arr)
+    all_mc: list[np.ndarray] = []
+    for mc_i in range(n_mc):
+        rng, rng_mc = jax.random.split(rng)
+        chunks = []
+        for start in range(0, n_sub, chunk_size):
+            end = min(start + chunk_size, n_sub)
+            chunks.append(np.array(
+                ig_batch_fn(params, t_arr[start:end], c_arr[start:end], rng_mc, t_base, c_base)
+            ))
+        all_mc.append(np.concatenate(chunks, axis=0))
+        print(f"  IG{label}: MC sample {mc_i + 1}/{n_mc} done")
+    return np.stack(all_mc)   # (n_mc, N', 1+n_cov)
+
+
 def compute_attributions(
     model,
     params: dict,
     time_index: np.ndarray,
     covariates: np.ndarray,
-    rng: jax.Array,
+    rng: "jax.Array",
     n_mc: int = 20,
     n_steps: int = 50,
     heteroscedastic: bool = False,
@@ -106,79 +159,87 @@ def compute_attributions(
     """
     Compute MC-averaged Integrated Gradients for up to max_points data points.
 
-    Args:
-        model:            BayesianNeuralField instance.
-        params:           Flax params dict (from _load_params).
-        time_index:       (N,) int/float — year - T_MIN.
-        covariates:       (N, n_cov) float32 — (standardised) covariate matrix.
-        rng:              JAX PRNGKey.
-        n_mc:             Number of MC weight samples to average over.
-        n_steps:          Riemann integration steps along the IG path.
-        heteroscedastic:  Whether model outputs (mu, sigma).
-        baseline:         "zero" (time=0, covariates=0) or "mean" (dataset mean).
-        target_scaler:    (t_mean, t_std) tuple or None. If provided, attributions
-                          are scaled to physical MWE/yr units.
-        max_points:       Cap on number of data points; subsamples randomly if exceeded.
-        chunk_size:       Batch size for the vmap inner loop (reduce if OOM).
-        seed:             Numpy random seed for subsampling reproducibility.
-
     Returns:
         mean_attrs:  (N', 1+n_cov) mean attribution across MC samples per point.
         std_attrs:   (N', 1+n_cov) std of attribution across MC samples per point.
-        sample_idx:  (N',) indices into the original arrays (identity if no subsampling).
+        sample_idx:  (N',) indices into the original arrays.
     """
-    N = len(time_index)
-    rng_np = np.random.default_rng(seed)
+    t_sub, c_sub, sample_idx = _subsample(time_index, covariates, max_points, seed)
+    t_base, c_base = _make_baselines(t_sub, c_sub, baseline)
+    ig_batch = make_ig_batch_fn(model, n_steps, heteroscedastic)
 
-    if N > max_points:
-        sample_idx = rng_np.choice(N, max_points, replace=False)
-        sample_idx = np.sort(sample_idx)
-    else:
-        sample_idx = np.arange(N)
+    raw = _run_ig_for_params(
+        ig_batch, params,
+        jnp.array(t_sub), jnp.array(c_sub),
+        rng, n_mc, chunk_size, t_base, c_base,
+    )                               # (n_mc, N', 1+n_cov)
 
-    t_sub = time_index[sample_idx].astype(np.float32)
-    c_sub = covariates[sample_idx].astype(np.float32)
-    n_sub = len(sample_idx)
-    n_cov = c_sub.shape[1]
+    mean_attrs = raw.mean(axis=0)
+    std_attrs  = raw.std(axis=0)
 
-    # Build baselines
-    if baseline == "mean":
-        t_base = jnp.array(float(t_sub.mean()), dtype=jnp.float32)
-        c_base = jnp.array(c_sub.mean(axis=0), dtype=jnp.float32)
-    else:
-        t_base = jnp.array(0.0, dtype=jnp.float32)
-        c_base = jnp.zeros(n_cov, dtype=jnp.float32)
+    if target_scaler is not None:
+        _, t_std = target_scaler
+        mean_attrs = mean_attrs * float(t_std)
+        std_attrs  = std_attrs  * float(t_std)
 
+    return mean_attrs, std_attrs, sample_idx
+
+
+def compute_ensemble_attributions(
+    model,
+    all_params: list[dict],
+    time_index: np.ndarray,
+    covariates: np.ndarray,
+    rng: "jax.Array",
+    n_mc_per_model: int = 5,
+    n_steps: int = 50,
+    heteroscedastic: bool = False,
+    baseline: str = "zero",
+    target_scaler=None,
+    max_points: int = 2000,
+    chunk_size: int = 500,
+    seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute IG attributions across an ensemble of models (e.g. multirun subdirs).
+
+    For each model in all_params, draws n_mc_per_model independent weight samples,
+    giving n_models * n_mc_per_model total attribution samples per data point.
+    The resulting mean/std therefore capture both:
+      - VI weight uncertainty  (n_mc_per_model draws within each run's posterior)
+      - Structural uncertainty (variation across the ensemble of trained models)
+
+    Args:
+        all_params:      List of Flax params dicts, one per ensemble member.
+        n_mc_per_model:  MC weight samples per model (total = n_models × this).
+        (other args same as compute_attributions)
+
+    Returns:
+        mean_attrs:  (N', 1+n_cov) mean attribution across all (model × MC) samples.
+        std_attrs:   (N', 1+n_cov) std  across all (model × MC) samples.
+        sample_idx:  (N',) indices into the original arrays.
+    """
+    t_sub, c_sub, sample_idx = _subsample(time_index, covariates, max_points, seed)
+    t_base, c_base = _make_baselines(t_sub, c_sub, baseline)
     ig_batch = make_ig_batch_fn(model, n_steps, heteroscedastic)
 
     t_arr = jnp.array(t_sub)
     c_arr = jnp.array(c_sub)
 
-    all_mc: list[np.ndarray] = []
-    for mc_i in range(n_mc):
-        rng, rng_mc = jax.random.split(rng)
+    all_raw: list[np.ndarray] = []
+    for model_i, params in enumerate(all_params):
+        rng, rng_model = jax.random.split(rng)
+        raw = _run_ig_for_params(
+            ig_batch, params, t_arr, c_arr,
+            rng_model, n_mc_per_model, chunk_size, t_base, c_base,
+            label=f" [model {model_i + 1}/{len(all_params)}]",
+        )                           # (n_mc_per_model, N', 1+n_cov)
+        all_raw.append(raw)
 
-        chunk_results = []
-        for start in range(0, n_sub, chunk_size):
-            end = min(start + chunk_size, n_sub)
-            attrs_chunk = ig_batch(
-                params,
-                t_arr[start:end],
-                c_arr[start:end],
-                rng_mc,
-                t_base,
-                c_base,
-            )
-            chunk_results.append(np.array(attrs_chunk))
+    combined = np.concatenate(all_raw, axis=0)  # (n_models*n_mc, N', 1+n_cov)
+    mean_attrs = combined.mean(axis=0)
+    std_attrs  = combined.std(axis=0)
 
-        all_mc.append(np.concatenate(chunk_results, axis=0))  # (n_sub, 1+n_cov)
-        print(f"  IG: MC sample {mc_i + 1}/{n_mc} done")
-
-    all_mc_arr = np.stack(all_mc)            # (n_mc, n_sub, 1+n_cov)
-    mean_attrs = all_mc_arr.mean(axis=0)     # (n_sub, 1+n_cov)
-    std_attrs  = all_mc_arr.std(axis=0)      # (n_sub, 1+n_cov)
-
-    # Scale to physical units if target_scaler provided
     if target_scaler is not None:
         _, t_std = target_scaler
         mean_attrs = mean_attrs * float(t_std)

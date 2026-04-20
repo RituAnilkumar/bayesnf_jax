@@ -1,4 +1,4 @@
-from src.explainability.integrated_gradients import compute_attributions
+from src.explainability.integrated_gradients import compute_attributions, compute_ensemble_attributions
 from src.explainability.plots import (
     plot_importance_bar,
     plot_beeswarm,
@@ -9,6 +9,7 @@ from src.explainability.plots import (
 
 __all__ = [
     "compute_attributions",
+    "compute_ensemble_attributions",
     "plot_importance_bar",
     "plot_beeswarm",
     "plot_dependence",

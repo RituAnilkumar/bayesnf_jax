@@ -1,26 +1,43 @@
 """
 Explainability entry point — Integrated Gradients attributions for one region.
 
-Loads a trained model (finetuned or pretrained), computes per-feature
-Integrated Gradients attributions for a chosen data split, saves the results
-as CSVs, and produces four plot types:
-  - importance_bar.png       — global mean |attribution| per feature
-  - beeswarm.png             — distribution of attributions across data points
-  - dependence_{feat}.png    — attribution vs feature value for top-k features
-  - waterfall_{id}_{yr}.png  — local attribution for a single glacier-year
+Three input modes (highest priority first):
+
+  ensemble_dir   Region multirun folder containing numbered subdirectories (0/, 1/, …).
+                 Each subdir must contain finetuned_params.pkl (or pretrained_params.pkl)
+                 and a .hydra/config.yaml.  Architecture and data paths are read from
+                 the first valid subdir's Hydra config — no model= override needed.
+                 Attributions are computed across all ensemble members, capturing both
+                 VI uncertainty (n_mc_per_model draws per run) and structural uncertainty
+                 (variation across the ensemble).
+
+  run_dir        Single run directory (e.g. multirun/r01_3977063/0/).
+                 Reads .hydra/config.yaml for architecture + data paths automatically.
+                 No model= override needed.
+
+  params_path    Explicit path to a single pkl file.
+                 Requires model=bnf_regional_seasonal/r01 for architecture config.
 
 Usage:
-    python main_explain.py model=bnf_regional_seasonal/r01
-    python main_explain.py model=bnf_regional_seasonal/r01 explain.stage=pretrain
-    python main_explain.py model=bnf_regional_seasonal/r01 explain.n_mc=50 explain.max_points=5000
+    # Ensemble mode — full structural + VI uncertainty, no model= needed:
+    python main_explain.py explain.ensemble_dir=/path/to/multirun/r01_3977063
+
+    # Single run from HPC — no model= needed:
+    python main_explain.py explain.run_dir=/path/to/multirun/r01_3977063/0
+
+    # Explicit pkl — still needs model= for architecture:
     python main_explain.py model=bnf_regional_seasonal/r01 \\
+        explain.params_path=/path/to/finetuned_params.pkl
+
+    # Waterfall for a specific glacier-year:
+    python main_explain.py explain.ensemble_dir=/path/to/multirun/r01_3977063 \\
         explain.waterfall_rgi_id=RGI60-01.00001 explain.waterfall_year=2010
 """
 
 import os
+import re
 import cloudpickle
 import jax
-import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 import hydra
@@ -36,6 +53,7 @@ from src.data_utils import (
 )
 from src.explainability import (
     compute_attributions,
+    compute_ensemble_attributions,
     plot_importance_bar,
     plot_beeswarm,
     plot_dependence_grid,
@@ -44,7 +62,7 @@ from src.explainability import (
 
 
 # ---------------------------------------------------------------------------
-# Helpers — reuse param loading from predict.py
+# Param / scaler loading
 # ---------------------------------------------------------------------------
 
 def _load_params(path: str) -> dict:
@@ -66,19 +84,108 @@ def _load_params(path: str) -> dict:
 
 
 def _load_scaler(params_dir: str):
-    path = os.path.join(params_dir, "scaler.pkl")
-    if not os.path.exists(path):
+    p = os.path.join(params_dir, "scaler.pkl")
+    if not os.path.exists(p):
         return None
-    with open(path, "rb") as f:
+    with open(p, "rb") as f:
         return cloudpickle.load(f)
 
 
 def _load_target_scaler(params_dir: str):
-    path = os.path.join(params_dir, "target_scaler.pkl")
-    if not os.path.exists(path):
+    p = os.path.join(params_dir, "target_scaler.pkl")
+    if not os.path.exists(p):
         return None
-    with open(path, "rb") as f:
+    with open(p, "rb") as f:
         return cloudpickle.load(f)
+
+
+# ---------------------------------------------------------------------------
+# Hydra config loading from a run directory
+# ---------------------------------------------------------------------------
+
+def _load_run_cfg(run_dir: str) -> DictConfig:
+    """Load the saved Hydra config from a run directory's .hydra/config.yaml."""
+    cfg_path = os.path.join(run_dir, ".hydra", "config.yaml")
+    if not os.path.exists(cfg_path):
+        raise FileNotFoundError(
+            f"No .hydra/config.yaml found in {run_dir}\n"
+            "Make sure you are pointing at a directory produced by a Hydra run."
+        )
+    return OmegaConf.load(cfg_path)
+
+
+# ---------------------------------------------------------------------------
+# Ensemble directory scanning
+# ---------------------------------------------------------------------------
+
+def _find_run_subdirs(ensemble_dir: str, stage: str) -> list[str]:
+    """
+    Return sorted list of run subdirs under ensemble_dir that contain a pkl.
+
+    Numbered directories (0, 1, 2, …) are preferred; any subdirectory containing
+    the expected pkl qualifies.
+    """
+    pkl_name = f"{stage}d_params.pkl"   # finetuned_params.pkl / pretrained_params.pkl
+    subdirs = []
+    for entry in sorted(os.scandir(ensemble_dir), key=lambda e: (
+        int(e.name) if e.name.isdigit() else float("inf"), e.name
+    )):
+        if not entry.is_dir():
+            continue
+        if os.path.exists(os.path.join(entry.path, pkl_name)):
+            subdirs.append(entry.path)
+    if not subdirs:
+        raise FileNotFoundError(
+            f"No subdirectories containing '{pkl_name}' found under {ensemble_dir}"
+        )
+    return subdirs
+
+
+# ---------------------------------------------------------------------------
+# Model + data setup from a resolved config
+# ---------------------------------------------------------------------------
+
+def _build_model_and_data(run_cfg: DictConfig, orig_cwd: str):
+    """
+    Given a (Hydra-saved) model config, build the BNF model and load data arrays.
+
+    Returns:
+        model, time_index, covariates (original), covariates_scaled,
+        rgi_ids, years, ft_cols, target_scaler, scaler
+    """
+    mc = run_cfg.model
+
+    ft_cols = list(mc.model_ftcols) if mc.get("model_ftcols") else FEATURE_COLS
+    rm_fts  = list(mc.rm_fts) if mc.get("rm_fts") else []
+    ft_cols = [c for c in ft_cols if c not in rm_fts]
+
+    inp_dir = mc.inp_dir
+    if not os.path.isabs(inp_dir):
+        inp_dir = os.path.join(orig_cwd, inp_dir)
+
+    region  = mc.reg_subdir
+    base    = os.path.join(inp_dir, region)
+    feat_file = os.path.join(base, f"main_features_{region}.csv")
+
+    features_df = load_features(feat_file, feature_cols=ft_cols)
+
+    # Restrict to training year window to avoid far-future extrapolation artefacts
+    yr_min = int(mc.get("pretrain_year_min", 2000))
+    yr_max = int(mc.get("pretrain_year_max", 2020))
+    features_df = features_df[features_df["year"].between(yr_min, yr_max)].copy()
+
+    time_index, covariates, rgi_ids, cols_used = build_model_inputs(features_df, ft_cols)
+    years = features_df["year"].to_numpy()
+
+    heteroscedastic = bool(mc.get("heteroscedastic", False))
+    model = BayesianNeuralField(
+        hidden_sizes=tuple([int(mc.model_nhidden)] * int(mc.model_nlayers)),
+        n_fourier=int(mc.n_fourier),
+        heteroscedastic=heteroscedastic,
+        sigma_floor=float(mc.get("sigma_floor", 0.05)),
+    )
+
+    return model, time_index, covariates, rgi_ids, years, cols_used, heteroscedastic
 
 
 # ---------------------------------------------------------------------------
@@ -90,160 +197,217 @@ def main(cfg: DictConfig) -> None:
     os.makedirs(cfg.model.output_dir, exist_ok=True)
     rng = jax.random.PRNGKey(cfg.model.seed)
     orig = get_original_cwd()
-
-    # Resolve relative paths
-    cfg_mut = OmegaConf.to_container(cfg, resolve=True)
-    for key in ("finetuned_params_path", "pretrained_params_path", "inp_dir"):
-        if key in cfg_mut["model"] and cfg_mut["model"][key]:
-            cfg_mut["model"][key] = os.path.join(orig, cfg_mut["model"][key])
-    cfg = OmegaConf.create(cfg_mut)
-
     ex = cfg.explain
-    stage = ex.stage   # 'finetune' or 'pretrain' (used for output filenames)
+    stage = ex.stage   # used for pkl filename and output naming
 
-    # --- Select params path ---
-    # explain.params_path (direct) takes precedence over the model config paths.
-    # Use it whenever your HPC run used --multirun or custom output dirs, so the
-    # actual pkl lives somewhere other than what r{nn}.yaml has hardcoded.
-    explicit_path = ex.get("params_path")
-    if explicit_path:
-        params_path = os.path.join(orig, explicit_path) if not os.path.isabs(explicit_path) else explicit_path
-        # Infer stage label from filename for output naming, but don't override
-        # the user-supplied stage string (they know which pkl they pointed at).
+    # ------------------------------------------------------------------
+    # Resolve absolute paths for the three source options
+    # ------------------------------------------------------------------
+    def _abs(p):
+        return p if (p and os.path.isabs(p)) else (os.path.join(orig, p) if p else None)
+
+    ensemble_dir = _abs(ex.get("ensemble_dir"))
+    run_dir      = _abs(ex.get("run_dir"))
+    params_path  = _abs(ex.get("params_path"))
+
+    # ------------------------------------------------------------------
+    # Mode 1: ensemble_dir — scan all numbered subdirs
+    # ------------------------------------------------------------------
+    if ensemble_dir:
+        print(f"[explain] Mode: ensemble  ({ensemble_dir})")
+        run_subdirs = _find_run_subdirs(ensemble_dir, stage)
+        print(f"[explain] Found {len(run_subdirs)} ensemble members")
+
+        # Architecture + data config from the first subdir
+        run_cfg = _load_run_cfg(run_subdirs[0])
+        model, time_index, covariates, rgi_ids, years, cols_used, heteroscedastic = \
+            _build_model_and_data(run_cfg, orig)
+
+        # Scalers from the first subdir (all members trained with the same scaler)
+        scaler         = _load_scaler(run_subdirs[0])
+        target_scaler  = _load_target_scaler(run_subdirs[0])
+        covariates_sc  = apply_scaler(covariates, scaler) if scaler is not None \
+                         else covariates.astype(np.float32)
+
+        pkl_name = f"{stage}d_params.pkl"
+        all_params = [_load_params(os.path.join(d, pkl_name)) for d in run_subdirs]
+
+        mean_attrs, std_attrs, sample_idx = compute_ensemble_attributions(
+            model=model,
+            all_params=all_params,
+            time_index=time_index,
+            covariates=covariates_sc,
+            rng=rng,
+            n_mc_per_model=int(ex.n_mc_per_model),
+            n_steps=int(ex.n_steps),
+            heteroscedastic=heteroscedastic,
+            baseline=ex.baseline,
+            target_scaler=target_scaler,
+            max_points=int(ex.max_points),
+            chunk_size=int(ex.chunk_size),
+            seed=int(ex.seed),
+        )
+        label = f"{stage}_ensemble{len(all_params)}"
+
+    # ------------------------------------------------------------------
+    # Mode 2: run_dir — single run, reads its own Hydra config
+    # ------------------------------------------------------------------
+    elif run_dir:
+        print(f"[explain] Mode: run_dir  ({run_dir})")
+        run_cfg = _load_run_cfg(run_dir)
+        model, time_index, covariates, rgi_ids, years, cols_used, heteroscedastic = \
+            _build_model_and_data(run_cfg, orig)
+
+        scaler        = _load_scaler(run_dir)
+        target_scaler = _load_target_scaler(run_dir)
+        covariates_sc = apply_scaler(covariates, scaler) if scaler is not None \
+                        else covariates.astype(np.float32)
+
+        pkl_name  = f"{stage}d_params.pkl"
+        pkl_path  = os.path.join(run_dir, pkl_name)
+        if not os.path.exists(pkl_path):
+            raise FileNotFoundError(f"{pkl_name} not found in {run_dir}")
+
+        mean_attrs, std_attrs, sample_idx = compute_attributions(
+            model=model,
+            params=_load_params(pkl_path),
+            time_index=time_index,
+            covariates=covariates_sc,
+            rng=rng,
+            n_mc=int(ex.n_mc),
+            n_steps=int(ex.n_steps),
+            heteroscedastic=heteroscedastic,
+            baseline=ex.baseline,
+            target_scaler=target_scaler,
+            max_points=int(ex.max_points),
+            chunk_size=int(ex.chunk_size),
+            seed=int(ex.seed),
+        )
+        label = stage
+
+    # ------------------------------------------------------------------
+    # Mode 3: params_path or model config fallback — needs model= on CLI
+    # ------------------------------------------------------------------
     else:
-        if stage == "pretrain":
-            params_path = cfg.model.pretrained_params_path
-        else:
-            params_path = cfg.model.finetuned_params_path
+        # Resolve paths that Hydra placed relative to original cwd
+        cfg_mut = OmegaConf.to_container(cfg, resolve=True)
+        for key in ("finetuned_params_path", "pretrained_params_path", "inp_dir"):
+            if key in cfg_mut["model"] and cfg_mut["model"][key]:
+                cfg_mut["model"][key] = os.path.join(orig, cfg_mut["model"][key])
+        cfg = OmegaConf.create(cfg_mut)
 
-    if not os.path.exists(params_path):
-        raise FileNotFoundError(
-            f"Params not found: {params_path}\n"
-            "If your run used Hydra --multirun or a custom output dir, set:\n"
-            "  explain.params_path=/absolute/path/to/finetuned_params.pkl"
+        if params_path:
+            print(f"[explain] Mode: params_path  ({params_path})")
+            actual_pkl = params_path
+        else:
+            print(f"[explain] Mode: model config  (stage={stage})")
+            actual_pkl = cfg.model.finetuned_params_path if stage == "finetune" \
+                         else cfg.model.pretrained_params_path
+
+        if not os.path.exists(actual_pkl):
+            raise FileNotFoundError(
+                f"Params not found: {actual_pkl}\n"
+                "Use explain.run_dir or explain.ensemble_dir to point directly at "
+                "a Hydra run directory and avoid relying on hardcoded config paths."
+            )
+
+        params_dir = os.path.dirname(actual_pkl)
+        mc = cfg.model
+        ft_cols  = list(mc.model_ftcols) if mc.get("model_ftcols") else FEATURE_COLS
+        rm_fts   = list(mc.rm_fts) if mc.get("rm_fts") else []
+        ft_cols  = [c for c in ft_cols if c not in rm_fts]
+        region   = mc.reg_subdir
+        base     = os.path.join(mc.inp_dir, region)
+        features_df = load_features(
+            os.path.join(base, f"main_features_{region}.csv"), feature_cols=ft_cols
+        )
+        yr_min = int(mc.get("pretrain_year_min", 2000))
+        yr_max = int(mc.get("pretrain_year_max", 2020))
+        features_df = features_df[features_df["year"].between(yr_min, yr_max)].copy()
+
+        time_index, covariates, rgi_ids, cols_used = build_model_inputs(features_df, ft_cols)
+        years = features_df["year"].to_numpy()
+
+        heteroscedastic = bool(mc.get("heteroscedastic", False))
+        model = BayesianNeuralField(
+            hidden_sizes=tuple([int(mc.model_nhidden)] * int(mc.model_nlayers)),
+            n_fourier=int(mc.n_fourier),
+            heteroscedastic=heteroscedastic,
+            sigma_floor=float(mc.get("sigma_floor", 0.05)),
         )
 
-    params_dir = os.path.dirname(params_path)
+        scaler        = _load_scaler(params_dir)
+        target_scaler = _load_target_scaler(params_dir)
+        covariates_sc = apply_scaler(covariates, scaler) if scaler is not None \
+                        else covariates.astype(np.float32)
 
-    print(f"[explain] Stage: {stage}  |  region: {cfg.model.reg_subdir}")
-    print(f"[explain] Params: {params_path}")
+        mean_attrs, std_attrs, sample_idx = compute_attributions(
+            model=model,
+            params=_load_params(actual_pkl),
+            time_index=time_index,
+            covariates=covariates_sc,
+            rng=rng,
+            n_mc=int(ex.n_mc),
+            n_steps=int(ex.n_steps),
+            heteroscedastic=heteroscedastic,
+            baseline=ex.baseline,
+            target_scaler=target_scaler,
+            max_points=int(ex.max_points),
+            chunk_size=int(ex.chunk_size),
+            seed=int(ex.seed),
+        )
+        label = stage
 
-    # --- Feature columns ---
-    ft_cols = list(cfg.model.model_ftcols) if cfg.model.model_ftcols else FEATURE_COLS
-    rm_fts  = list(cfg.model.rm_fts) if cfg.model.get("rm_fts") else []
-    ft_cols = [c for c in ft_cols if c not in rm_fts]
-
-    # --- Load data ---
-    region  = cfg.model.reg_subdir
-    base    = os.path.join(cfg.model.inp_dir, region)
-
-    split = ex.explain_split
-    split_file = os.path.join(base, f"main_features_{region}.csv")
-    if not os.path.exists(split_file):
-        # Fall back to old naming
-        split_file = os.path.join(base, f"{split}.csv")
-    features_df = load_features(split_file, feature_cols=ft_cols)
-
-    # Filter to a sensible year window to avoid far-future extrapolation artefacts
-    features_df = features_df[features_df["year"].between(
-        cfg.model.get("pretrain_year_min", 2000),
-        cfg.model.get("pretrain_year_max", 2020),
-    )].copy()
-
-    time_index, covariates, rgi_ids, cols_used = build_model_inputs(features_df, ft_cols)
-    years = features_df["year"].to_numpy()
-
-    # --- Apply feature scaler (same as training) ---
-    scaler = _load_scaler(params_dir)
-    if scaler is not None:
-        covariates_scaled = apply_scaler(covariates, scaler)
-    else:
-        covariates_scaled = covariates.astype(np.float32)
-        print("WARNING: no scaler.pkl found — using raw covariate values")
-
-    target_scaler = _load_target_scaler(params_dir)
-
-    # --- Load params ---
-    params = _load_params(params_path)
-
-    # --- Build model ---
-    heteroscedastic = bool(cfg.model.get("heteroscedastic", False))
-    model = BayesianNeuralField(
-        hidden_sizes=tuple([cfg.model.model_nhidden] * cfg.model.model_nlayers),
-        n_fourier=cfg.model.n_fourier,
-        heteroscedastic=heteroscedastic,
-        sigma_floor=float(cfg.model.get("sigma_floor", 0.05)),
-    )
-
-    # --- Feature names for plots: year + covariate names ---
+    # ------------------------------------------------------------------
+    # Shared: feature names + unscaled feature values for plots
+    # ------------------------------------------------------------------
     feature_names = ["year"] + list(cols_used)
 
-    # --- Compute attributions ---
-    print(f"[explain] Computing IG attributions: n_mc={ex.n_mc}, n_steps={ex.n_steps}, "
-          f"baseline={ex.baseline}, max_points={ex.max_points}")
+    fval_time = (time_index[sample_idx].reshape(-1, 1).astype(np.float32) + T_MIN)
+    fval_covs = covariates[sample_idx].astype(np.float32)   # original unscaled
+    feature_values = np.concatenate([fval_time, fval_covs], axis=1)
 
-    mean_attrs, std_attrs, sample_idx = compute_attributions(
-        model=model,
-        params=params,
-        time_index=time_index,
-        covariates=covariates_scaled,
-        rng=rng,
-        n_mc=int(ex.n_mc),
-        n_steps=int(ex.n_steps),
-        heteroscedastic=heteroscedastic,
-        baseline=ex.baseline,
-        target_scaler=target_scaler,
-        max_points=int(ex.max_points),
-        chunk_size=int(ex.chunk_size),
-        seed=int(ex.seed),
+    # ------------------------------------------------------------------
+    # Save attributions CSV
+    # ------------------------------------------------------------------
+    attr_df = pd.DataFrame(
+        {"rgi_id": rgi_ids[sample_idx], "year": years[sample_idx]},
     )
+    for i, n in enumerate(feature_names):
+        attr_df[f"attr_{n}"] = mean_attrs[:, i]
+        attr_df[f"std_{n}"]  = std_attrs[:, i]
 
-    # Covariate feature values for colour encoding — use (unscaled) originals
-    # for interpretable axes; scaled values are fine for beeswarm colouring
-    fval_time = time_index[sample_idx].reshape(-1, 1).astype(np.float32) + T_MIN  # actual year
-    fval_covs = covariates[sample_idx].astype(np.float32)  # original unscaled
-    feature_values = np.concatenate([fval_time, fval_covs], axis=1)  # (N', n_features)
-
-    # --- Save attributions CSV ---
-    attr_mean_cols = {f"attr_{n}": mean_attrs[:, i] for i, n in enumerate(feature_names)}
-    attr_std_cols  = {f"std_{n}":  std_attrs[:, i]  for i, n in enumerate(feature_names)}
-    attr_df = pd.DataFrame({
-        "rgi_id": rgi_ids[sample_idx],
-        "year":   years[sample_idx],
-        **attr_mean_cols,
-        **attr_std_cols,
-    })
-    attr_path = os.path.join(cfg.model.output_dir, f"attributions_{stage}.csv")
+    out_dir = cfg.model.output_dir
+    attr_path = os.path.join(out_dir, f"attributions_{label}.csv")
     attr_df.to_csv(attr_path, index=False)
     print(f"[explain] Saved {attr_path}  ({len(attr_df)} rows)")
 
-    # --- Global importance bar ---
+    # ------------------------------------------------------------------
+    # Plots
+    # ------------------------------------------------------------------
     plot_importance_bar(
         mean_attrs, feature_names,
-        output_path=os.path.join(cfg.model.output_dir, f"importance_bar_{stage}.png"),
+        output_path=os.path.join(out_dir, f"importance_bar_{label}.png"),
         std_attrs=std_attrs,
         top_k=ex.get("importance_top_k") or None,
     )
 
-    # --- Beeswarm ---
     plot_beeswarm(
         mean_attrs, feature_values, feature_names,
-        output_path=os.path.join(cfg.model.output_dir, f"beeswarm_{stage}.png"),
+        output_path=os.path.join(out_dir, f"beeswarm_{label}.png"),
         n_max=int(ex.beeswarm_n_max),
         seed=int(ex.seed),
     )
 
-    # --- Dependence plots (top-k features) ---
     plot_dependence_grid(
         mean_attrs, feature_values, feature_names,
-        output_dir=cfg.model.output_dir,
+        output_dir=out_dir,
         top_k=int(ex.dependence_top_k),
     )
 
-    # --- Waterfall for a specific glacier-year ---
+    # Waterfall for a specific glacier-year
     wf_rgi  = ex.get("waterfall_rgi_id")
     wf_year = ex.get("waterfall_year")
-
     if wf_rgi and wf_year:
         wf_year = int(wf_year)
         mask = (rgi_ids[sample_idx] == wf_rgi) & (years[sample_idx] == wf_year)
@@ -253,14 +417,14 @@ def main(cfg: DictConfig) -> None:
             plot_waterfall(
                 mean_attrs[row], feature_names,
                 output_path=os.path.join(
-                    cfg.model.output_dir, f"waterfall_{safe_id}_{wf_year}_{stage}.png"
+                    out_dir, f"waterfall_{safe_id}_{wf_year}_{label}.png"
                 ),
                 std_attr_1d=std_attrs[row],
-                title=f"Local attribution — {wf_rgi}  {wf_year}  [{stage}]",
+                title=f"Local attribution — {wf_rgi}  {wf_year}  [{label}]",
             )
         else:
-            print(f"WARNING: rgi_id={wf_rgi} year={wf_year} not found in the sampled data — "
-                  "try increasing max_points or choosing a different example.")
+            print(f"WARNING: {wf_rgi} year={wf_year} not found in sampled data — "
+                  "try increasing explain.max_points or choosing a different example.")
 
     print("[explain] Done.")
 
