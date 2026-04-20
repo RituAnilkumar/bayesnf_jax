@@ -36,8 +36,10 @@ Usage:
 
 import os
 import re
+import warnings
 import cloudpickle
 from collections import Counter
+from pathlib import Path
 import jax
 import numpy as np
 import pandas as pd
@@ -155,6 +157,77 @@ def _load_run_cfg(run_dir: str) -> DictConfig:
             "Make sure you are pointing at a directory produced by a Hydra run."
         )
     return OmegaConf.load(cfg_path)
+
+
+# ---------------------------------------------------------------------------
+# Ensemble model weighting
+# ---------------------------------------------------------------------------
+
+def _compute_ensemble_weights(
+    run_dirs: list[str],
+    weighting: str,
+    temperature: float,
+    loyo_weight: float,
+    glambie_weight: float,
+    test_years: list[int],
+    min_runs: int,
+) -> "np.ndarray | None":
+    """
+    Load per-run metrics and compute model weights via build_results_df +
+    add_composite_score + compute_weights (mirrors ensemble_uncertainty.py).
+
+    Returns a (n_runs,) weights array, or None if weighting=='equal' or loading fails.
+    """
+    if weighting == "equal":
+        return None
+
+    try:
+        from src.hyperparam_tuning import build_results_df, add_composite_score
+        from src.ensemble_uncertainty import compute_weights
+    except ImportError as e:
+        warnings.warn(f"[explain] Cannot import weighting helpers: {e} — falling back to equal weights.")
+        return None
+
+    # build_results_df needs a single Path pointing at the parent of the run dirs
+    # (all run_dirs must share the same parent).
+    parents = {os.path.dirname(d) for d in run_dirs}
+    if len(parents) != 1:
+        warnings.warn("[explain] Ensemble members span multiple parents — equal weights used.")
+        return None
+
+    ensemble_root = Path(next(iter(parents)))
+    try:
+        df = build_results_df(ensemble_root, test_years, min_runs_per_region=min_runs)
+        df = add_composite_score(df, loyo_weight=loyo_weight, glambie_weight=glambie_weight)
+    except Exception as e:
+        warnings.warn(f"[explain] build_results_df failed: {e} — equal weights used.")
+        return None
+
+    valid = df.dropna(subset=["composite"]).copy().reset_index(drop=True)
+    if len(valid) == 0:
+        warnings.warn("[explain] No runs with complete metrics — equal weights used.")
+        return None
+
+    # Map composite scores back to the ordered run_dirs list
+    run_id_to_composite = dict(zip(valid["run_id"].values, valid["composite"].values))
+    composites = []
+    for d in run_dirs:
+        rid = os.path.basename(d)
+        composites.append(run_id_to_composite.get(rid, float("nan")))
+
+    composites = np.array(composites)
+    missing = np.sum(np.isnan(composites))
+    if missing > 0:
+        warnings.warn(
+            f"[explain] {missing}/{len(run_dirs)} ensemble members have no metrics — "
+            "those receive the worst (highest) composite score."
+        )
+        # Assign worst score to members with no metrics
+        worst = np.nanmax(composites) if not np.all(np.isnan(composites)) else 1.0
+        composites = np.where(np.isnan(composites), worst, composites)
+
+    weights = compute_weights(composites, weighting, temperature)
+    return weights
 
 
 # ---------------------------------------------------------------------------
@@ -328,9 +401,11 @@ def main(cfg: DictConfig) -> None:
                 tag = " ← selected (majority)" if k == majority_arch else ""
                 print(f"  layers={k[0]} nhidden={k[1]} out={k[2]}  ×{cnt} runs{tag}")
 
+        compatible_dirs = []
         all_params = []
         for (d, p), key in zip(all_params_raw, arch_keys):
             if key == majority_arch:
+                compatible_dirs.append(d)
                 all_params.append(p)
             else:
                 print(f"[explain] Skipping {os.path.basename(d)} — "
@@ -338,6 +413,45 @@ def main(cfg: DictConfig) -> None:
 
         print(f"[explain] Using {len(all_params)}/{len(all_params_raw)} compatible ensemble members "
               f"(layers={n_layers} nhidden={nhidden} heteroscedastic={heteroscedastic})")
+
+        # ------------------------------------------------------------------
+        # Compute model weights (performance-based or equal)
+        # ------------------------------------------------------------------
+        weighting      = str(ex.get("weighting", "equal"))
+        temperature    = float(ex.get("softmax_temperature", 0.1))
+        loyo_w         = float(ex.get("loyo_weight", 0.0))
+        glambie_w_cfg  = float(ex.get("glambie_weight", 1.0))
+        test_years_cfg = list(ex.get("glambie_test_years") or [2021, 2022, 2023])
+        min_runs_cfg   = int(ex.get("min_runs", 5))
+        top_k_models   = ex.get("top_k_models")
+        top_k_models   = int(top_k_models) if top_k_models else None
+
+        ensemble_weights = _compute_ensemble_weights(
+            compatible_dirs, weighting, temperature,
+            loyo_w, glambie_w_cfg, test_years_cfg, min_runs_cfg,
+        )
+
+        if ensemble_weights is not None:
+            print(f"[explain] Weighting='{weighting}', temperature={temperature}")
+            print(f"  Weight range: [{ensemble_weights.min():.4f}, {ensemble_weights.max():.4f}]")
+        else:
+            print(f"[explain] Weighting='equal' ({len(all_params)} members)")
+
+        # ------------------------------------------------------------------
+        # Optional top-k filtering (applied BEFORE IG to save compute)
+        # ------------------------------------------------------------------
+        if top_k_models is not None and top_k_models < len(all_params):
+            if ensemble_weights is not None:
+                top_idx = np.argsort(ensemble_weights)[::-1][:top_k_models]
+            else:
+                # No scores — just take first top_k
+                top_idx = np.arange(top_k_models)
+            compatible_dirs = [compatible_dirs[i] for i in top_idx]
+            all_params      = [all_params[i]      for i in top_idx]
+            if ensemble_weights is not None:
+                ensemble_weights = ensemble_weights[top_idx]
+                ensemble_weights = ensemble_weights / ensemble_weights.sum()
+            print(f"[explain] top_k_models={top_k_models}: reduced to {len(all_params)} members")
 
         model = _build_bnf_model(mc, majority_arch)
 
@@ -355,6 +469,7 @@ def main(cfg: DictConfig) -> None:
             max_points=int(ex.max_points),
             chunk_size=int(ex.chunk_size),
             seed=int(ex.seed),
+            weights=ensemble_weights,
         )
         label = f"{stage}_ensemble{len(all_params)}"
 

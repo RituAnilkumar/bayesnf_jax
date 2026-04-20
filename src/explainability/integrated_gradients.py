@@ -199,26 +199,29 @@ def compute_ensemble_attributions(
     max_points: int = 2000,
     chunk_size: int = 500,
     seed: int = 0,
+    weights: "np.ndarray | None" = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute IG attributions across an ensemble of models (e.g. multirun subdirs).
 
-    For each model in all_params, draws n_mc_per_model independent weight samples,
-    giving n_models * n_mc_per_model total attribution samples per data point.
-    The resulting mean/std therefore capture both:
-      - VI weight uncertainty  (n_mc_per_model draws within each run's posterior)
-      - Structural uncertainty (variation across the ensemble of trained models)
+    For each model in all_params, draws n_mc_per_model independent weight samples.
+    Uses law of total variance to decompose uncertainty into epistemic (within-model
+    MC weight variance) and structural (between-model variation) components.
 
     Args:
         all_params:      List of Flax params dicts, one per ensemble member.
-        n_mc_per_model:  MC weight samples per model (total = n_models × this).
+        n_mc_per_model:  MC weight samples per model.
+        weights:         (n_models,) normalised model weights.  If None, equal weights.
+                         Use performance-based weights from build_results_df +
+                         compute_weights (ensemble_uncertainty.py) for best results.
         (other args same as compute_attributions)
 
     Returns:
-        mean_attrs:  (N', 1+n_cov) mean attribution across all (model × MC) samples.
-        std_attrs:   (N', 1+n_cov) std  across all (model × MC) samples.
+        mean_attrs:  (N', 1+n_cov) weighted mean attribution across all models.
+        std_attrs:   (N', 1+n_cov) total std = sqrt(epistemic² + structural²).
         sample_idx:  (N',) indices into the original arrays.
     """
+    n_models = len(all_params)
     t_sub, c_sub, sample_idx = _subsample(time_index, covariates, max_points, seed)
     t_base, c_base = _make_baselines(t_sub, c_sub, baseline)
     ig_batch = make_ig_batch_fn(model, n_steps, heteroscedastic)
@@ -226,19 +229,40 @@ def compute_ensemble_attributions(
     t_arr = jnp.array(t_sub)
     c_arr = jnp.array(c_sub)
 
-    all_raw: list[np.ndarray] = []
+    # Normalise weights; default to equal
+    if weights is None:
+        w = np.ones(n_models) / n_models
+    else:
+        w = np.array(weights, dtype=np.float64)
+        w = w / w.sum()
+
+    # Collect per-model mean and MC-std attributions
+    per_model_means: list[np.ndarray] = []   # each (N', F)
+    per_model_stds:  list[np.ndarray] = []   # each (N', F)
+
     for model_i, params in enumerate(all_params):
         rng, rng_model = jax.random.split(rng)
         raw = _run_ig_for_params(
             ig_batch, params, t_arr, c_arr,
             rng_model, n_mc_per_model, chunk_size, t_base, c_base,
-            label=f" [model {model_i + 1}/{len(all_params)}]",
-        )                           # (n_mc_per_model, N', 1+n_cov)
-        all_raw.append(raw)
+            label=f" [model {model_i + 1}/{n_models}]",
+        )                           # (n_mc_per_model, N', F)
+        per_model_means.append(raw.mean(axis=0))   # (N', F)
+        per_model_stds.append(raw.std(axis=0))     # (N', F)
 
-    combined = np.concatenate(all_raw, axis=0)  # (n_models*n_mc, N', 1+n_cov)
-    mean_attrs = combined.mean(axis=0)
-    std_attrs  = combined.std(axis=0)
+    means_mat = np.stack(per_model_means)   # (K, N', F)
+    stds_mat  = np.stack(per_model_stds)    # (K, N', F)
+    ww = w[:, np.newaxis, np.newaxis]       # (K, 1, 1) for broadcasting
+
+    # Weighted mean
+    mean_attrs = (ww * means_mat).sum(axis=0)                          # (N', F)
+
+    # Law of total variance: Var[y] = E_m[Var[y|m]] + Var_m[E[y|m]]
+    std_epistemic  = np.sqrt((ww * stds_mat  ** 2).sum(axis=0))        # (N', F)
+    std_structural = np.sqrt(
+        (ww * (means_mat - mean_attrs[np.newaxis]) ** 2).sum(axis=0)   # (N', F)
+    )
+    std_attrs = np.sqrt(std_epistemic ** 2 + std_structural ** 2)      # (N', F)
 
     if target_scaler is not None:
         _, t_std = target_scaler

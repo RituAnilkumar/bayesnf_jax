@@ -68,6 +68,18 @@ explain:
   importance_top_k: null   # show all features; set e.g. 10 to limit
   dependence_top_k: 6      # top-k features for which dependence plots are saved
 
+  # --- Ensemble model weighting (only used in ensemble_dir mode) ---
+  # 'equal' gives every model the same weight (default, always works).
+  # 'performance' uses softmax over the composite score from hyperparam_tuning.py
+  # (requires metrics_glambie_test.csv / ._cv/metrics_oos.csv in each run subdir).
+  weighting: equal               # 'equal' or 'performance'
+  softmax_temperature: 0.1       # lower = sharper weighting
+  loyo_weight: 0.0               # weight on LOYO RMSE in composite score
+  glambie_weight: 1.0            # weight on GLaMBIE RMSE in composite score
+  glambie_test_years: [2021, 2022, 2023]
+  min_runs: 5                    # minimum runs required to attempt performance weighting
+  top_k_models: null             # restrict to top-k models before computing IG (saves time)
+
   # Features to exclude from a second set of plots (suffix _masked).
   # Useful when dominant features (year, coordinates) compress the scale
   # and obscure variation in the remaining climate/geometry features.
