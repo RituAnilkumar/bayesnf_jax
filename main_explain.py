@@ -210,6 +210,25 @@ def main(cfg: DictConfig) -> None:
     params_path  = _abs(ex.get("params_path"))
 
     # ------------------------------------------------------------------
+    # Auto-detect: if run_dir has no .hydra/config.yaml but contains
+    # numbered subdirs with pkls, the user pointed at a region folder —
+    # promote it to ensemble_dir automatically.
+    # ------------------------------------------------------------------
+    if run_dir and not ensemble_dir:
+        if not os.path.exists(os.path.join(run_dir, ".hydra", "config.yaml")):
+            pkl_name = f"{stage}d_params.pkl"
+            has_run_subdirs = any(
+                entry.is_dir() and os.path.exists(os.path.join(entry.path, pkl_name))
+                for entry in os.scandir(run_dir)
+                if entry.name.isdigit()
+            )
+            if has_run_subdirs:
+                print(f"[explain] run_dir has no .hydra/config.yaml — "
+                      f"detected ensemble folder, switching to ensemble mode")
+                ensemble_dir = run_dir
+                run_dir = None
+
+    # ------------------------------------------------------------------
     # Determine output directory.
     # hydra.run.dir is now always "outputs/explain" (no model interpolation),
     # so we create a meaningful subdir from the source path or model config.
