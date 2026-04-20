@@ -232,8 +232,10 @@ def compute_regional_uncertainties(
     # Regional epistemic: std column in regional_annual_mwe.csv is from MC spread
     epistemic_std = mwe_df["std"].values
 
-    # Regional aleatoric: propagate from per-glacier via area-weighted aggregation
-    reg_alea_df = _aggregate_aleatoric_to_regional(glacier_df, inp_dir, reg_subdir)
+    # Regional aleatoric: propagate from per-glacier via area-weighted aggregation.
+    # _aggregate_aleatoric_to_regional expects column 'std_aleatoric', so rename.
+    glacier_for_agg = glacier_df.rename(columns={"aleatoric_std": "std_aleatoric"})
+    reg_alea_df = _aggregate_aleatoric_to_regional(glacier_for_agg, inp_dir, reg_subdir)
     if reg_alea_df is not None:
         year_to_alea = dict(zip(reg_alea_df["year"], reg_alea_df["std_aleatoric"]))
         aleatoric_std = np.array([year_to_alea.get(y, np.nan) for y in years])
