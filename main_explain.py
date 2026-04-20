@@ -100,6 +100,32 @@ def _load_target_scaler(params_dir: str):
 
 
 # ---------------------------------------------------------------------------
+# Architecture helpers
+# ---------------------------------------------------------------------------
+
+def _detect_heteroscedastic(params: dict) -> bool:
+    """
+    Infer heteroscedastic mode from the output layer weight shape in a params dict.
+    output_layer.w_mu shape (in_features, 2) → heteroscedastic=True
+    output_layer.w_mu shape (in_features, 1) → heteroscedastic=False
+    """
+    try:
+        w_mu = params["params"]["output_layer"]["w_mu"]
+        return int(w_mu.shape[-1]) == 2
+    except (KeyError, TypeError, IndexError):
+        return False
+
+
+def _build_bnf_model(mc, heteroscedastic: bool) -> "BayesianNeuralField":
+    return BayesianNeuralField(
+        hidden_sizes=tuple([int(mc.model_nhidden)] * int(mc.model_nlayers)),
+        n_fourier=int(mc.n_fourier),
+        heteroscedastic=heteroscedastic,
+        sigma_floor=float(mc.get("sigma_floor", 0.05)),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Hydra config loading from a run directory
 # ---------------------------------------------------------------------------
 
@@ -177,15 +203,9 @@ def _build_model_and_data(run_cfg: DictConfig, orig_cwd: str):
     time_index, covariates, rgi_ids, cols_used = build_model_inputs(features_df, ft_cols)
     years = features_df["year"].to_numpy()
 
-    heteroscedastic = bool(mc.get("heteroscedastic", False))
-    model = BayesianNeuralField(
-        hidden_sizes=tuple([int(mc.model_nhidden)] * int(mc.model_nlayers)),
-        n_fourier=int(mc.n_fourier),
-        heteroscedastic=heteroscedastic,
-        sigma_floor=float(mc.get("sigma_floor", 0.05)),
-    )
-
-    return model, time_index, covariates, rgi_ids, years, cols_used, heteroscedastic
+    # Return mc so the caller can rebuild the model after detecting heteroscedastic
+    # from actual params (more reliable than the config for mixed-version runs).
+    return mc, time_index, covariates, rgi_ids, years, cols_used
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +278,7 @@ def main(cfg: DictConfig) -> None:
 
         # Architecture + data config from the first subdir
         run_cfg = _load_run_cfg(run_subdirs[0])
-        model, time_index, covariates, rgi_ids, years, cols_used, heteroscedastic = \
+        mc, time_index, covariates, rgi_ids, years, cols_used = \
             _build_model_and_data(run_cfg, orig)
 
         # Scalers from the first subdir (all members trained with the same scaler)
@@ -267,8 +287,27 @@ def main(cfg: DictConfig) -> None:
         covariates_sc  = apply_scaler(covariates, scaler) if scaler is not None \
                          else covariates.astype(np.float32)
 
+        # Load all params and detect heteroscedastic from the actual weight shapes.
+        # The config value is unreliable if some runs used different CLI overrides.
         pkl_name = f"{stage}d_params.pkl"
-        all_params = [_load_params(os.path.join(d, pkl_name)) for d in run_subdirs]
+        all_params_raw = [
+            (d, _load_params(os.path.join(d, pkl_name))) for d in run_subdirs
+        ]
+        heteroscedastic = _detect_heteroscedastic(all_params_raw[0][1])
+        expected_out = 2 if heteroscedastic else 1
+        all_params = []
+        for d, p in all_params_raw:
+            actual_out = int(p["params"]["output_layer"]["w_mu"].shape[-1])
+            if actual_out == expected_out:
+                all_params.append(p)
+            else:
+                print(f"[explain] Skipping {os.path.basename(d)} — "
+                      f"output features={actual_out}, expected={expected_out} "
+                      f"(architecture mismatch)")
+        print(f"[explain] Using {len(all_params)}/{len(all_params_raw)} compatible ensemble members "
+              f"(heteroscedastic={heteroscedastic})")
+
+        model = _build_bnf_model(mc, heteroscedastic)
 
         mean_attrs, std_attrs, sample_idx = compute_ensemble_attributions(
             model=model,
@@ -293,7 +332,7 @@ def main(cfg: DictConfig) -> None:
     elif run_dir:
         print(f"[explain] Mode: run_dir  ({run_dir})")
         run_cfg = _load_run_cfg(run_dir)
-        model, time_index, covariates, rgi_ids, years, cols_used, heteroscedastic = \
+        mc, time_index, covariates, rgi_ids, years, cols_used = \
             _build_model_and_data(run_cfg, orig)
 
         scaler        = _load_scaler(run_dir)
@@ -305,10 +344,13 @@ def main(cfg: DictConfig) -> None:
         pkl_path  = os.path.join(run_dir, pkl_name)
         if not os.path.exists(pkl_path):
             raise FileNotFoundError(f"{pkl_name} not found in {run_dir}")
+        run_params    = _load_params(pkl_path)
+        heteroscedastic = _detect_heteroscedastic(run_params)
+        model = _build_bnf_model(mc, heteroscedastic)
 
         mean_attrs, std_attrs, sample_idx = compute_attributions(
             model=model,
-            params=_load_params(pkl_path),
+            params=run_params,
             time_index=time_index,
             covariates=covariates_sc,
             rng=rng,
@@ -366,13 +408,9 @@ def main(cfg: DictConfig) -> None:
         time_index, covariates, rgi_ids, cols_used = build_model_inputs(features_df, ft_cols)
         years = features_df["year"].to_numpy()
 
-        heteroscedastic = bool(mc.get("heteroscedastic", False))
-        model = BayesianNeuralField(
-            hidden_sizes=tuple([int(mc.model_nhidden)] * int(mc.model_nlayers)),
-            n_fourier=int(mc.n_fourier),
-            heteroscedastic=heteroscedastic,
-            sigma_floor=float(mc.get("sigma_floor", 0.05)),
-        )
+        loaded_params = _load_params(actual_pkl)
+        heteroscedastic = _detect_heteroscedastic(loaded_params)
+        model = _build_bnf_model(mc, heteroscedastic)
 
         scaler        = _load_scaler(params_dir)
         target_scaler = _load_target_scaler(params_dir)
@@ -381,7 +419,7 @@ def main(cfg: DictConfig) -> None:
 
         mean_attrs, std_attrs, sample_idx = compute_attributions(
             model=model,
-            params=_load_params(actual_pkl),
+            params=loaded_params,
             time_index=time_index,
             covariates=covariates_sc,
             rng=rng,
