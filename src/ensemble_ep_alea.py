@@ -60,7 +60,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from src.hyperparam_tuning import build_results_df, add_composite_score
+from src.hyperparam_tuning import build_results_df
 from src.ensemble_uncertainty import (
     _read_run_model_cfg,
     _load_glambie_wide,
@@ -79,18 +79,16 @@ from src.ensemble_uncertainty import (
 def pick_best_run(
     multirun_root: Path,
     test_years: list[int],
-    loyo_weight: float,
-    glambie_weight: float,
     min_runs: int,
 ) -> pd.Series:
     """
-    Return the single heteroscedastic run with the lowest composite score.
+    Return the single heteroscedastic run with the lowest GLaMBIE test RMSE.
 
+    Selection criterion: glambie_rmse over test_years (default 2020-2024).
     Only runs with heteroscedastic=True in their Hydra overrides are considered.
-    Raises if no such runs are found or none have a valid composite score.
+    Raises if no such runs are found or none have a valid glambie_rmse.
     """
     results_df = build_results_df(multirun_root, test_years, min_runs_per_region=min_runs)
-    results_df = add_composite_score(results_df, loyo_weight=loyo_weight, glambie_weight=glambie_weight)
 
     # Filter to heteroscedastic runs only
     if "heteroscedastic" in results_df.columns:
@@ -110,19 +108,18 @@ def pick_best_run(
         print("  WARNING: 'heteroscedastic' column not found in overrides — "
               "cannot pre-filter. Will validate after loading preds_full.csv.")
 
-    valid = results_df.dropna(subset=["composite"]).reset_index(drop=True)
+    valid = results_df.dropna(subset=["glambie_rmse"]).reset_index(drop=True)
     if valid.empty:
         raise RuntimeError(
-            "No heteroscedastic runs have a valid composite score. "
-            "Check that pretrain_cv completed (metrics_oos.csv present) and "
-            "that uncertainty floors are applied in finetune for this region."
+            "No heteroscedastic runs have a valid GLaMBIE test RMSE. "
+            "Check that finetune completed without NaN loss and that "
+            "metrics_glambie_test.csv exists in each run directory."
         )
 
-    best_idx  = valid["composite"].idxmin()
-    best_row  = valid.loc[best_idx]
-    print(f"  Best run: {best_row['run_id']}  composite={best_row['composite']:.4f}  "
-          f"loyo_rmse={best_row['loyo_rmse']:.4f}  "
-          f"glambie_rmse={best_row.get('glambie_rmse', float('nan')):.4f}")
+    best_idx = valid["glambie_rmse"].idxmin()
+    best_row = valid.loc[best_idx]
+    print(f"  Best run: {best_row['run_id']}  glambie_rmse={best_row['glambie_rmse']:.4f}  "
+          f"loyo_rmse={best_row.get('loyo_rmse', float('nan')):.4f}")
     print(f"  Run dir: {best_row['run_dir']}")
     return best_row
 
@@ -431,17 +428,16 @@ def run_ep_alea(cfg: dict) -> None:
     output_dir    = Path(cfg["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    loyo_w     = float(cfg.get("loyo_weight", 0.0))
-    glambie_w  = float(cfg.get("glambie_weight", 1.0))
-    test_years = list(cfg.get("glambie_test_years", [2021, 2022, 2023]))
+    test_years = list(cfg.get("glambie_test_years", [2020, 2021, 2022, 2023, 2024]))
     min_runs   = int(cfg.get("min_runs_per_region", 1))
 
     print(f"\n=== Best-model epistemic + aleatoric: {multirun_root.name} ===")
+    print(f"  Selecting best run by GLaMBIE test RMSE over years {test_years}")
 
     # ------------------------------------------------------------------
     # 1. Select best run
     # ------------------------------------------------------------------
-    best_row = pick_best_run(multirun_root, test_years, loyo_w, glambie_w, min_runs)
+    best_row = pick_best_run(multirun_root, test_years, min_runs)
     run_dir  = Path(best_row["run_dir"])
 
     pd.DataFrame([best_row]).to_csv(output_dir / "best_model_info.csv", index=False)
