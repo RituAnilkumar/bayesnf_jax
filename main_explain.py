@@ -194,7 +194,6 @@ def _build_model_and_data(run_cfg: DictConfig, orig_cwd: str):
 
 @hydra.main(config_path="conf", config_name="config_explain", version_base=None)
 def main(cfg: DictConfig) -> None:
-    os.makedirs(cfg.model.output_dir, exist_ok=True)
     rng = jax.random.PRNGKey(cfg.model.seed)
     orig = get_original_cwd()
     ex = cfg.explain
@@ -209,6 +208,26 @@ def main(cfg: DictConfig) -> None:
     ensemble_dir = _abs(ex.get("ensemble_dir"))
     run_dir      = _abs(ex.get("run_dir"))
     params_path  = _abs(ex.get("params_path"))
+
+    # ------------------------------------------------------------------
+    # Determine output directory.
+    # hydra.run.dir is now always "outputs/explain" (no model interpolation),
+    # so we create a meaningful subdir from the source path or model config.
+    # ------------------------------------------------------------------
+    if ensemble_dir:
+        region_tag = os.path.basename(ensemble_dir.rstrip("/"))
+    elif run_dir:
+        # run_dir is e.g. .../r01_3977063/0 — use the parent folder name
+        region_tag = os.path.basename(os.path.dirname(run_dir.rstrip("/")))
+    else:
+        reg = getattr(cfg.model, "reg_subdir", "unknown")
+        itype = getattr(cfg.model, "input_type", "run")
+        region_tag = f"{reg}_{itype}"
+
+    # cfg.model.output_dir is "." → resolved by Hydra chdir to outputs/explain/
+    out_dir = os.path.join(cfg.model.output_dir, region_tag)
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"[explain] Output dir: {os.path.abspath(out_dir)}")
 
     # ------------------------------------------------------------------
     # Mode 1: ensemble_dir — scan all numbered subdirs
@@ -377,7 +396,6 @@ def main(cfg: DictConfig) -> None:
         attr_df[f"attr_{n}"] = mean_attrs[:, i]
         attr_df[f"std_{n}"]  = std_attrs[:, i]
 
-    out_dir = cfg.model.output_dir
     attr_path = os.path.join(out_dir, f"attributions_{label}.csv")
     attr_df.to_csv(attr_path, index=False)
     print(f"[explain] Saved {attr_path}  ({len(attr_df)} rows)")

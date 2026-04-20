@@ -1,12 +1,28 @@
 # Explainability config — Integrated Gradients attributions + seaborn plots
-# Override region via: model=bnf_regional_seasonal/r01
+#
+# Three modes (highest priority first):
+#   explain.ensemble_dir  — region multirun folder, reads .hydra/config.yaml automatically
+#   explain.run_dir       — single run directory, reads .hydra/config.yaml automatically
+#   explain.params_path   — explicit pkl path (still needs model=bnf_regional_seasonal/r01)
+#
+# For ensemble_dir and run_dir, model= is NOT required on the command line.
 
 defaults:
   - model: bnf_regional_seasonal
   - _self_
 
+# Provide defaults for mandatory model fields so Hydra can parse the config
+# even when model=bnf_regional_seasonal/r01 is not passed on the command line.
+# These are overridden by the actual model config when model= is provided,
+# and ignored entirely in run_dir/ensemble_dir mode (config is read from .hydra/).
 model:
-  output_dir: .    # resolved to hydra.run.dir by chdir:true
+  output_dir: .
+  reg_subdir: _explain
+  input_type: run
+  temporal_avg_path: null
+  glambie_path: null
+  pretrained_params_path: null
+  finetuned_params_path: null
 
 explain:
   # ---------------------------------------------------------------------------
@@ -17,26 +33,24 @@ explain:
   #                  finetuned_params.pkl found, and reads architecture + data config
   #                  from the first subdir's .hydra/config.yaml.
   #                  Captures both VI uncertainty (n_mc_per_model draws per run)
-  #                  and structural uncertainty (variation across ensemble members).
+  #                  and structural uncertainty (variation across the ensemble).
   #
   #   run_dir        Point at a single run directory (e.g. multirun/r01_3977063/0/).
   #                  Reads .hydra/config.yaml for architecture + data paths.
-  #                  No need to supply model=bnf_regional_seasonal/r01.
+  #                  No model= needed on the command line.
   #
   #   params_path    Direct path to a single pkl file.
-  #                  Still requires model=bnf_regional_seasonal/r01 for architecture.
-  #
-  # When ensemble_dir or run_dir is set, model=... on the command line is not needed.
+  #                  Requires model=bnf_regional_seasonal/r01 for architecture.
   # ---------------------------------------------------------------------------
-  ensemble_dir: null   # e.g. /path/to/multirun/r01_3977063
-  run_dir: null        # e.g. /path/to/multirun/r01_3977063/0
-  params_path: null    # e.g. /path/to/finetuned_params.pkl  (+ model= required)
+  ensemble_dir: null   # e.g. /scratch/.../multirun/r01_3977063
+  run_dir: null        # e.g. /scratch/.../multirun/r01_3977063/0
+  params_path: null    # e.g. /scratch/.../finetuned_params.pkl  (+ model= required)
 
-  # --- Fallback stage when only params_path or model config is used ---
+  # --- Fallback stage label when using params_path or model config ---
   stage: finetune      # 'finetune' or 'pretrain'
 
   # --- Which data split to run on ---
-  explain_split: train     # 'train', 'full', 'logo', 'loyo', 'loygo'
+  explain_split: train
 
   # --- IG hyperparameters ---
   n_mc: 20                 # MC samples per model (single-model modes)
@@ -51,7 +65,7 @@ explain:
 
   # --- Plots ---
   beeswarm_n_max: 1000     # max points in beeswarm (further subsampled for speed)
-  importance_top_k: null   # show all features in importance bar; set e.g. 10 to limit
+  importance_top_k: null   # show all features; set e.g. 10 to limit
   dependence_top_k: 6      # top-k features for which dependence plots are saved
 
   # --- Waterfall: pick one example glacier-year (leave null to skip) ---
@@ -60,6 +74,8 @@ explain:
 
 hydra:
   run:
-    dir: outputs/explain/${model.reg_subdir}_${model.input_type}
+    # Fixed base dir — output subdir is determined at runtime from the run/ensemble path.
+    # This avoids interpolating ${model.reg_subdir} which would fail when model= is omitted.
+    dir: outputs/explain
   job:
     chdir: true
