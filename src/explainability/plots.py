@@ -321,6 +321,7 @@ def plot_dependence_grid(
     Convenience wrapper: save a dependence plot for each of the top_k most
     important features (ranked by mean |attribution|).
     """
+    os.makedirs(output_dir, exist_ok=True)
     importance = np.abs(mean_attrs).mean(axis=0)
     top_features = np.argsort(importance)[::-1][:top_k]
 

@@ -492,27 +492,44 @@ def main(cfg: DictConfig) -> None:
     print(f"[explain] Saved {attr_path}  ({len(attr_df)} rows)")
 
     # ------------------------------------------------------------------
-    # Plots
+    # Plots — helper so we can call once for full set and once for masked
     # ------------------------------------------------------------------
-    plot_importance_bar(
-        mean_attrs, feature_names,
-        output_path=os.path.join(out_dir, f"importance_bar_{label}.png"),
-        std_attrs=std_attrs,
-        top_k=ex.get("importance_top_k") or None,
-    )
+    def _generate_plots(attrs, std, fvals, fnames, suffix):
+        plot_importance_bar(
+            attrs, fnames,
+            output_path=os.path.join(out_dir, f"importance_bar_{label}{suffix}.png"),
+            std_attrs=std,
+            top_k=ex.get("importance_top_k") or None,
+        )
+        plot_beeswarm(
+            attrs, fvals, fnames,
+            output_path=os.path.join(out_dir, f"beeswarm_{label}{suffix}.png"),
+            n_max=int(ex.beeswarm_n_max),
+            seed=int(ex.seed),
+        )
+        plot_dependence_grid(
+            attrs, fvals, fnames,
+            output_dir=os.path.join(out_dir, f"dependence{suffix}"),
+            top_k=int(ex.dependence_top_k),
+        )
 
-    plot_beeswarm(
-        mean_attrs, feature_values, feature_names,
-        output_path=os.path.join(out_dir, f"beeswarm_{label}.png"),
-        n_max=int(ex.beeswarm_n_max),
-        seed=int(ex.seed),
-    )
+    # Full plots (all features)
+    _generate_plots(mean_attrs, std_attrs, feature_values, feature_names, suffix="")
 
-    plot_dependence_grid(
-        mean_attrs, feature_values, feature_names,
-        output_dir=out_dir,
-        top_k=int(ex.dependence_top_k),
-    )
+    # Masked plots — exclude noisy/dominant features (year, coordinates, etc.)
+    exclude = list(ex.get("exclude_features") or [])
+    if exclude:
+        keep_idx = [i for i, n in enumerate(feature_names) if n not in exclude]
+        if keep_idx:
+            dropped = [n for n in feature_names if n in exclude]
+            print(f"[explain] Generating masked plots  (excluding: {dropped})")
+            _generate_plots(
+                mean_attrs[:, keep_idx],
+                std_attrs[:, keep_idx],
+                feature_values[:, keep_idx],
+                [feature_names[i] for i in keep_idx],
+                suffix="_masked",
+            )
 
     # Waterfall for a specific glacier-year
     wf_rgi  = ex.get("waterfall_rgi_id")
@@ -531,6 +548,15 @@ def main(cfg: DictConfig) -> None:
                 std_attr_1d=std_attrs[row],
                 title=f"Local attribution — {wf_rgi}  {wf_year}  [{label}]",
             )
+            if exclude and keep_idx:
+                plot_waterfall(
+                    mean_attrs[row][keep_idx], [feature_names[i] for i in keep_idx],
+                    output_path=os.path.join(
+                        out_dir, f"waterfall_{safe_id}_{wf_year}_{label}_masked.png"
+                    ),
+                    std_attr_1d=std_attrs[row][keep_idx],
+                    title=f"Local attribution (masked) — {wf_rgi}  {wf_year}  [{label}]",
+                )
         else:
             print(f"WARNING: {wf_rgi} year={wf_year} not found in sampled data — "
                   "try increasing explain.max_points or choosing a different example.")

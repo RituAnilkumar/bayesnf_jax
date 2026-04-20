@@ -68,6 +68,15 @@ explain:
   importance_top_k: null   # show all features; set e.g. 10 to limit
   dependence_top_k: 6      # top-k features for which dependence plots are saved
 
+  # Features to exclude from a second set of plots (suffix _masked).
+  # Useful when dominant features (year, coordinates) compress the scale
+  # and obscure variation in the remaining climate/geometry features.
+  # The full set of plots (all features) is always generated as well.
+  exclude_features:
+    - year
+    - CenLat
+    - CenLon
+
   # --- Waterfall: pick one example glacier-year (leave null to skip) ---
   waterfall_rgi_id: null   # e.g. "RGI60-01.00001"
   waterfall_year: null     # e.g. 2010
