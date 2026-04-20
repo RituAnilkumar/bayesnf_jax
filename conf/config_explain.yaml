@@ -9,8 +9,16 @@ model:
   output_dir: .    # resolved to hydra.run.dir by chdir:true
 
 explain:
-  # --- Which params to explain ---
-  stage: finetune          # 'finetune' or 'pretrain'
+  # --- Direct path to the params pkl (takes precedence over the model config paths).
+  #     Set this when your run used Hydra multirun or custom output dirs on the HPC,
+  #     so the actual pkl is not at the path hardcoded in the model config.
+  #     The scaler.pkl and target_scaler.pkl are expected in the same directory.
+  #     Example:
+  #       explain.params_path=/path/to/multirun/2024-01-15/3/finetuned_params.pkl
+  params_path: null
+
+  # --- Fallback: which stage params to use when params_path is null ---
+  stage: finetune          # 'finetune' or 'pretrain' (ignored when params_path is set)
 
   # --- Which data split to run on ---
   explain_split: train     # 'train', 'full', 'logo', 'loyo', 'loygo'

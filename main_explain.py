@@ -99,13 +99,30 @@ def main(cfg: DictConfig) -> None:
     cfg = OmegaConf.create(cfg_mut)
 
     ex = cfg.explain
-    stage = ex.stage   # 'finetune' or 'pretrain'
+    stage = ex.stage   # 'finetune' or 'pretrain' (used for output filenames)
 
     # --- Select params path ---
-    if stage == "pretrain":
-        params_path = cfg.model.pretrained_params_path
+    # explain.params_path (direct) takes precedence over the model config paths.
+    # Use it whenever your HPC run used --multirun or custom output dirs, so the
+    # actual pkl lives somewhere other than what r{nn}.yaml has hardcoded.
+    explicit_path = ex.get("params_path")
+    if explicit_path:
+        params_path = os.path.join(orig, explicit_path) if not os.path.isabs(explicit_path) else explicit_path
+        # Infer stage label from filename for output naming, but don't override
+        # the user-supplied stage string (they know which pkl they pointed at).
     else:
-        params_path = cfg.model.finetuned_params_path
+        if stage == "pretrain":
+            params_path = cfg.model.pretrained_params_path
+        else:
+            params_path = cfg.model.finetuned_params_path
+
+    if not os.path.exists(params_path):
+        raise FileNotFoundError(
+            f"Params not found: {params_path}\n"
+            "If your run used Hydra --multirun or a custom output dir, set:\n"
+            "  explain.params_path=/absolute/path/to/finetuned_params.pkl"
+        )
+
     params_dir = os.path.dirname(params_path)
 
     print(f"[explain] Stage: {stage}  |  region: {cfg.model.reg_subdir}")
