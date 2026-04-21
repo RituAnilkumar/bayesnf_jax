@@ -395,7 +395,7 @@ def plot_top_models_mwe(
     _savefig(fig, output_dir / "top_models_regional_mwe.png")
 
 
-def plot_best_model_cumulative_gt(
+def plot_top_models_cumulative_gt(
     regional_gt: pd.DataFrame,
     glambie_wide_df,
     oggm_df: pd.DataFrame,
@@ -403,9 +403,9 @@ def plot_best_model_cumulative_gt(
     output_dir: Path,
 ) -> None:
     """
-    Cumulative Gt with epistemic and total uncertainty bands.
+    Cumulative Gt with epistemic, structural, and total uncertainty bands.
 
-    Cumulative sigma is propagated in quadrature assuming year-to-year independence:
+    Cumulative sigma propagated in quadrature (year-to-year independence):
         cum_sigma_t = sqrt( Σ_{s≤t} sigma_s² )
     """
     total_area_mean = float(total_area_km2.mean())
@@ -418,16 +418,18 @@ def plot_best_model_cumulative_gt(
     years  = regional_gt["year"].values[mask]
     cum_mu = np.cumsum(regional_gt["median_gt"].values[mask])
 
-    cum_epi = np.sqrt(np.cumsum(regional_gt["epistemic_std"].values[mask] ** 2))
-    cum_tot = np.sqrt(np.cumsum(regional_gt["total_std"].values[mask] ** 2))
+    cum_epi    = np.sqrt(np.cumsum(regional_gt["epistemic_std"].values[mask]  ** 2))
+    cum_struct = np.sqrt(np.cumsum(regional_gt["structural_std"].values[mask] ** 2))
+    cum_tot    = np.sqrt(np.cumsum(regional_gt["total_std"].values[mask]      ** 2))
 
     fig, ax = plt.subplots(figsize=(12, 5))
-
-    ax.fill_between(years, cum_mu - 2 * cum_tot, cum_mu + 2 * cum_tot,
-                    alpha=0.15, color="steelblue", label="±2σ total")
-    ax.fill_between(years, cum_mu - 2 * cum_epi, cum_mu + 2 * cum_epi,
-                    alpha=0.25, color="darkorange", label="±2σ epistemic")
-    ax.plot(years, cum_mu, color="steelblue", lw=1.8, label="Best-model cumulative mean")
+    ax.fill_between(years, cum_mu - 2 * cum_tot,    cum_mu + 2 * cum_tot,
+                    alpha=0.15, color="steelblue",    label="±2σ total")
+    ax.fill_between(years, cum_mu - 2 * cum_struct, cum_mu + 2 * cum_struct,
+                    alpha=0.20, color="mediumorchid", label="±2σ structural")
+    ax.fill_between(years, cum_mu - 2 * cum_epi,    cum_mu + 2 * cum_epi,
+                    alpha=0.25, color="darkorange",   label="±2σ epistemic")
+    ax.plot(years, cum_mu, color="steelblue", lw=1.8, label="Ensemble cumulative mean")
 
     if not oggm_df.empty:
         og = oggm_df[oggm_df["year"] >= start_year].copy()
@@ -447,10 +449,10 @@ def plot_best_model_cumulative_gt(
 
     ax.axhline(0, color="black", lw=0.6, ls="--")
     ax.set_xlabel("Year"); ax.set_ylabel("Cumulative mass balance (Gt)")
-    ax.set_title(f"Cumulative regional mass balance from {start_year} — best model\n"
-                 "Orange: epistemic  Blue: total (epistemic + aleatoric)")
+    ax.set_title(f"Cumulative regional mass balance from {start_year} — top-N ensemble\n"
+                 "Orange: epistemic  Purple: structural  Blue: total")
     ax.legend(fontsize=8); fig.tight_layout()
-    _savefig(fig, output_dir / "best_model_cumulative_gt.png")
+    _savefig(fig, output_dir / "top_models_cumulative_gt.png")
 
 
 # ---------------------------------------------------------------------------
@@ -464,33 +466,34 @@ def run_ep_alea(cfg: dict) -> None:
 
     test_years = list(cfg.get("glambie_test_years", [2020, 2021, 2022, 2023, 2024]))
     min_runs   = int(cfg.get("min_runs_per_region", 1))
+    top_n      = int(cfg.get("top_n", 5))
 
-    print(f"\n=== Best-model epistemic + aleatoric: {multirun_root.name} ===")
-    print(f"  Selecting best run by GLaMBIE test RMSE over years {test_years}")
-
-    # ------------------------------------------------------------------
-    # 1. Select best run
-    # ------------------------------------------------------------------
-    best_row = pick_best_run(multirun_root, test_years, min_runs)
-    run_dir  = Path(best_row["run_dir"])
-
-    pd.DataFrame([best_row]).to_csv(output_dir / "best_model_info.csv", index=False)
-    print(f"  Saved best_model_info.csv")
+    print(f"\n=== Top-{top_n} ensemble (epistemic + aleatoric + structural): {multirun_root.name} ===")
+    print(f"  Selecting top {top_n} runs by GLaMBIE test RMSE over years {test_years}")
 
     # ------------------------------------------------------------------
-    # 2. Per-glacier uncertainty
+    # 1. Select top-N runs
+    # ------------------------------------------------------------------
+    top_runs = pick_top_runs(multirun_root, test_years, min_runs, top_n=top_n)
+    run_dirs = [Path(r["run_dir"]) for _, r in top_runs.iterrows()]
+
+    top_runs.to_csv(output_dir / "top_models_info.csv", index=False)
+    print(f"  Saved top_models_info.csv")
+
+    # ------------------------------------------------------------------
+    # 2. Per-glacier ensemble uncertainty
     # ------------------------------------------------------------------
     print("\n--- Per-glacier uncertainty ---")
-    glacier_df = load_glacier_uncertainties(run_dir)
-    glacier_df.to_csv(output_dir / "best_model_glacier.csv", index=False)
-    print(f"  Saved best_model_glacier.csv  ({len(glacier_df)} rows)")
+    glacier_df = assemble_glacier_ensemble(top_runs)
+    glacier_df.to_csv(output_dir / "top_models_glacier.csv", index=False)
+    print(f"  Saved top_models_glacier.csv  ({len(glacier_df)} rows)")
 
     # ------------------------------------------------------------------
     # 3. Read model config paths (for aleatoric propagation + aux data)
     # ------------------------------------------------------------------
-    run_model_cfg = _read_run_model_cfg([run_dir])
-    inp_dir   = run_model_cfg.get("inp_dir", "")
-    reg_subdir = run_model_cfg.get("reg_subdir", "")
+    run_model_cfg = _read_run_model_cfg(run_dirs)
+    inp_dir      = run_model_cfg.get("inp_dir", "")
+    reg_subdir   = run_model_cfg.get("reg_subdir", "")
     glambie_path = run_model_cfg.get("glambie_path", "")
 
     # ------------------------------------------------------------------
@@ -498,10 +501,10 @@ def run_ep_alea(cfg: dict) -> None:
     # ------------------------------------------------------------------
     print("\n--- Regional uncertainty ---")
     regional_mwe, total_area_km2 = compute_regional_uncertainties(
-        glacier_df, run_dir, inp_dir, reg_subdir
+        glacier_df, top_runs, inp_dir, reg_subdir
     )
-    regional_mwe.to_csv(output_dir / "best_model_regional_mwe.csv", index=False)
-    print(f"  Saved best_model_regional_mwe.csv  ({len(regional_mwe)} years)")
+    regional_mwe.to_csv(output_dir / "top_models_regional_mwe.csv", index=False)
+    print(f"  Saved top_models_regional_mwe.csv  ({len(regional_mwe)} years)")
 
     # ------------------------------------------------------------------
     # 5. Regional Gt (MWE × total_area × 1e-3)
@@ -509,18 +512,19 @@ def run_ep_alea(cfg: dict) -> None:
     scale = total_area_km2 * 1e-3
 
     regional_gt = pd.DataFrame({
-        "year":          regional_mwe["year"].values,
-        "median_gt":     regional_mwe["median_mwe"].values     * scale,
-        "epistemic_std": regional_mwe["epistemic_std"].values  * scale,
-        "aleatoric_std": np.where(
+        "year":           regional_mwe["year"].values,
+        "median_gt":      regional_mwe["median_mwe"].values      * scale,
+        "epistemic_std":  regional_mwe["epistemic_std"].values   * scale,
+        "aleatoric_std":  np.where(
             regional_mwe["aleatoric_std"].isna(),
             np.nan,
             regional_mwe["aleatoric_std"].fillna(0).values * scale,
         ),
-        "total_std":     regional_mwe["total_std"].values      * scale,
+        "structural_std": regional_mwe["structural_std"].values  * scale,
+        "total_std":      regional_mwe["total_std"].values       * scale,
     })
-    regional_gt.to_csv(output_dir / "best_model_regional_gt.csv", index=False)
-    print(f"  Saved best_model_regional_gt.csv")
+    regional_gt.to_csv(output_dir / "top_models_regional_gt.csv", index=False)
+    print(f"  Saved top_models_regional_gt.csv")
 
     # ------------------------------------------------------------------
     # 6. Auxiliary data for plots
@@ -541,9 +545,9 @@ def run_ep_alea(cfg: dict) -> None:
     # 7. Plots
     # ------------------------------------------------------------------
     print("\n--- Generating plots ---")
-    plot_best_model_gt(regional_gt, glambie_wide_df, oggm_df, total_area_km2, output_dir)
-    plot_best_model_mwe(regional_mwe, glambie_wide_df, oggm_df, total_area_km2, output_dir)
-    plot_best_model_cumulative_gt(regional_gt, glambie_wide_df, oggm_df, total_area_km2, output_dir)
+    plot_top_models_gt(regional_gt, glambie_wide_df, oggm_df, total_area_km2, output_dir)
+    plot_top_models_mwe(regional_mwe, glambie_wide_df, oggm_df, total_area_km2, output_dir)
+    plot_top_models_cumulative_gt(regional_gt, glambie_wide_df, oggm_df, total_area_km2, output_dir)
 
     print(f"\nDone. Outputs written to {output_dir}/")
 
