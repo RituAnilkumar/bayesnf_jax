@@ -203,6 +203,8 @@ def plot_dependence(
     color_feature: str | int | None = "year",
     alpha: float = 0.4,
     s: float = 8,
+    color_values: np.ndarray | None = None,
+    color_label: str = "year",
 ) -> None:
     """
     Dependence scatter: attribution for one feature vs that feature's value.
@@ -225,42 +227,54 @@ def plot_dependence(
                         Default "year" — colours by year using viridis so temporal
                         drift is immediately visible.  Set to None to fall back to
                         auto-selecting the most correlated other feature.
+                        Ignored when color_values is provided.
         alpha / s:      Scatter transparency and marker size.
+        color_values:   (N,) array to use directly for colouring, bypassing any
+                        feature lookup.  Use this to force year colouring on masked
+                        plots where "year" has been removed from feature_names.
+        color_label:    Colorbar label when color_values is provided (default "year").
     """
     n_features = len(feature_names)
     fi = feature_names.index(feature) if isinstance(feature, str) else int(feature)
 
-    # Resolve colour feature index — fall back to auto-select if the requested
-    # feature is not present (e.g. "year" requested but masked out).
-    def _auto_ci():
-        corrs = [
-            abs(np.corrcoef(feature_values[:, j], mean_attrs[:, fi])[0, 1])
-            for j in range(n_features) if j != fi
-        ]
-        return [j for j in range(n_features) if j != fi][int(np.argmax(corrs))]
-
-    if color_feature is None:
-        ci = _auto_ci()
-    elif isinstance(color_feature, str):
-        ci = feature_names.index(color_feature) if color_feature in feature_names else _auto_ci()
-    else:
-        ci = int(color_feature)
-
-    color_name = feature_names[ci]
-    color_by_year = (color_name == "year")
-
     x = feature_values[:, fi]
     y = mean_attrs[:, fi]
-    c = feature_values[:, ci]
+
+    if color_values is not None:
+        # Caller supplied colour array directly (e.g. year from unmasked data)
+        c          = color_values
+        color_name = color_label
+        color_by_year = True
+    else:
+        # Resolve colour feature index — fall back to auto-select if the requested
+        # feature is not present (e.g. "year" requested but masked out).
+        def _auto_ci():
+            corrs = [
+                abs(np.corrcoef(feature_values[:, j], mean_attrs[:, fi])[0, 1])
+                for j in range(n_features) if j != fi
+            ]
+            return [j for j in range(n_features) if j != fi][int(np.argmax(corrs))]
+
+        if color_feature is None:
+            ci = _auto_ci()
+        elif isinstance(color_feature, str):
+            ci = feature_names.index(color_feature) if color_feature in feature_names \
+                 else _auto_ci()
+        else:
+            ci = int(color_feature)
+
+        color_name    = feature_names[ci]
+        color_by_year = (color_name == "year")
+        c             = feature_values[:, ci]
 
     if color_by_year:
-        cmap_use  = "viridis"
+        cmap_use   = "viridis"
         scatter_kw = dict(c=c, cmap=cmap_use, alpha=alpha, s=s, linewidths=0)
-        cbar_label = "Year"
-        cbar_ticks = None   # use matplotlib auto ticks for real year values
+        cbar_label = color_name
+        cbar_ticks = None   # matplotlib auto ticks show real year values
     else:
         c_norm = (c - c.min()) / (c.max() - c.min() + 1e-12)
-        cmap_use  = _BEESWARM_CMAP
+        cmap_use   = _BEESWARM_CMAP
         scatter_kw = dict(c=c_norm, cmap=cmap_use, vmin=0, vmax=1,
                           alpha=alpha, s=s, linewidths=0)
         cbar_label = color_name
@@ -379,10 +393,18 @@ def plot_dependence_grid(
     feature_names: list[str],
     output_dir: str,
     top_k: int = 6,
+    color_feature: str | int | None = "year",
+    color_values: np.ndarray | None = None,
+    color_label: str = "year",
 ) -> None:
     """
     Convenience wrapper: save a dependence plot for each of the top_k most
     important features (ranked by mean |attribution|).
+
+    color_feature:  passed to each plot_dependence call (default "year").
+                    Pass None to auto-select the most correlated other feature.
+    color_values:   if provided, overrides color_feature entirely (used to
+                    force year colouring on masked plots).
     """
     os.makedirs(output_dir, exist_ok=True)
     importance = np.abs(mean_attrs).mean(axis=0)
@@ -390,7 +412,9 @@ def plot_dependence_grid(
 
     for fi in top_features:
         fname = os.path.join(output_dir, f"dependence_{feature_names[fi]}.png")
-        plot_dependence(mean_attrs, feature_values, feature_names, fi, fname)
+        plot_dependence(mean_attrs, feature_values, feature_names, fi, fname,
+                        color_feature=color_feature,
+                        color_values=color_values, color_label=color_label)
 
 
 # ---------------------------------------------------------------------------

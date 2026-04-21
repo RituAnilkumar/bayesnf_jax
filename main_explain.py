@@ -616,8 +616,13 @@ def main(cfg: DictConfig) -> None:
     # ------------------------------------------------------------------
     # Plots — helper so we can call once for full set and once for masked
     # ------------------------------------------------------------------
+    # Year values from the unmasked feature_values (index 0 = year always).
+    # Passed to masked dependence plots so they stay coloured by year even
+    # when "year" has been removed from the feature list.
+    year_color_values = feature_values[:, 0] if "year" in feature_names else None
+
     def _generate_plots(attrs, std, fvals, fnames, suffix,
-                        std_epi=None, std_struct=None):
+                        std_epi=None, std_struct=None, dep_color_values=None):
         plot_importance_bar(
             attrs, fnames,
             output_path=os.path.join(out_dir, f"importance_bar_{label}{suffix}.png"),
@@ -632,13 +637,22 @@ def main(cfg: DictConfig) -> None:
             n_max=int(ex.beeswarm_n_max),
             seed=int(ex.seed),
         )
+        # Dependence coloured by year — shows temporal drift in relationships
         plot_dependence_grid(
             attrs, fvals, fnames,
-            output_dir=os.path.join(out_dir, f"dependence{suffix}"),
+            output_dir=os.path.join(out_dir, f"dependence_year{suffix}"),
             top_k=int(ex.dependence_top_k),
+            color_values=dep_color_values,   # forces year even on masked plots
+        )
+        # Dependence coloured by most-correlated other feature — shows interactions
+        plot_dependence_grid(
+            attrs, fvals, fnames,
+            output_dir=os.path.join(out_dir, f"dependence_interaction{suffix}"),
+            top_k=int(ex.dependence_top_k),
+            color_feature=None,              # auto-select most correlated feature
         )
 
-    # Full plots (all features)
+    # Full plots (all features) — year is in fvals so no override needed
     _generate_plots(mean_attrs, std_attrs, feature_values, feature_names, suffix="",
                     std_epi=std_epistemic, std_struct=std_structural)
 
@@ -657,6 +671,7 @@ def main(cfg: DictConfig) -> None:
                 suffix="_masked",
                 std_epi=std_epistemic[:, keep_idx] if std_epistemic is not None else None,
                 std_struct=std_structural[:, keep_idx] if std_structural is not None else None,
+                dep_color_values=year_color_values,
             )
 
     # Waterfall for a specific glacier-year
