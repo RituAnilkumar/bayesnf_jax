@@ -104,7 +104,8 @@ def _compute_metrics(merged: pd.DataFrame, sigma_mult: float) -> dict:
     s_tot   = merged["total_std"].values
     diff    = pred - obs
     n       = len(diff)
-    # Overlap: ensemble band [pred ± σ_mult·s_tot] intersects WGMS band [obs ± σ_mult·s_wgms]
+    # Overlap: ensemble band [pred ± σ_mult·s_tot] intersects WGMS band [obs ± σ_mult·s_wgms].
+    # With sigma_mult=1 (default) both bands are 1σ — a like-for-like comparison.
     # Two intervals [a,b] and [c,d] overlap iff a <= d and c <= b.
     s_wgms  = merged["mwe_sigma"].values
     within  = np.sum(
@@ -402,7 +403,7 @@ def run_validation(cfg: dict) -> None:
     region_map   = cfg["region_map"]        # {WGMS_abbrev: rgi_subdir, e.g. ISL: r06}
     region_names = cfg.get("region_names", {})
     ens_filename = cfg.get("ensemble_filename", "top_models_regional_mwe.csv")
-    sigma_mult   = float(cfg.get("sigma_mult", 2))
+    sigma_mult   = float(cfg.get("sigma_mult", 1))
     min_overlap  = int(cfg.get("min_overlap_years", 5))
 
     print(f"\n=== Regional MWE validation ===")

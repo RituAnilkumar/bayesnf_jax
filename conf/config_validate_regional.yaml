@@ -73,8 +73,10 @@ region_names:
 # Change to 'ensemble_regional_mwe.csv' if using ensemble_uncertainty.py output.
 ensemble_filename: top_models_regional_mwe.csv
 
-# Sigma multiplier for uncertainty bands (e.g. 2 = 95% interval)
-sigma_mult: 2
+# Sigma multiplier for uncertainty bands.
+# 1 = 1σ (~68%): WGMS reports 1σ so this gives a like-for-like comparison.
+# 2 = 2σ (~95%): use if you want wider bands.
+sigma_mult: 1
 
 # Minimum number of overlapping years required to include a region
 min_overlap_years: 5
