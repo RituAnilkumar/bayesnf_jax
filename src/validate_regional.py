@@ -171,13 +171,13 @@ def _plot_timeseries(
     # Ensemble mean line
     ax.plot(years, mu, color="steelblue", lw=1.8, label="Ensemble median")
 
-    # WGMS / Dussaillant reference with ±1σ error bars
+    # WGMS / Dussaillant reference scaled to same sigma level as ensemble bands
     ax.errorbar(
         merged["year"].values,
         merged["mwe"].values,
-        yerr=merged["mwe_sigma"].values,
+        yerr=sigma_mult * merged["mwe_sigma"].values,
         fmt="o", color="black", ms=3.5, lw=1.0, capsize=2.5, zorder=5,
-        label="WGMS/Dussaillant ±1σ",
+        label=f"WGMS/Dussaillant ±{sigma_mult}σ",
     )
 
     metrics = _compute_metrics(merged, sigma_mult)
@@ -234,7 +234,7 @@ def _plot_multipanel(
                             alpha=0.25, color="mediumorchid")
         ax.plot(years, mu, color="steelblue", lw=1.4)
         ax.errorbar(merged["year"].values, merged["mwe"].values,
-                    yerr=merged["mwe_sigma"].values,
+                    yerr=sigma_mult * merged["mwe_sigma"].values,
                     fmt="o", color="black", ms=2.5, lw=0.8, capsize=1.5, zorder=5)
 
         metrics = _compute_metrics(merged, sigma_mult)
@@ -253,7 +253,7 @@ def _plot_multipanel(
     fig.suptitle(
         f"Ensemble vs. WGMS/Dussaillant — regional MWE/yr\n"
         f"Blue band: ±{sigma_mult}σ total  |  Purple: ±{sigma_mult}σ structural  |  "
-        "Black dots: WGMS ±1σ",
+        f"Black dots: WGMS ±{sigma_mult}σ",
         fontsize=9,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])
