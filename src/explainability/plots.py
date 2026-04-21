@@ -457,8 +457,23 @@ def plot_year_slice(
 
 
 # ---------------------------------------------------------------------------
-# 7. Temporal importance evolution — how importance changes across years
+# 7. Temporal importance — stacked area plots across years
 # ---------------------------------------------------------------------------
+
+def _temporal_arrays(mean_attrs, years, top_idx):
+    """Return (unique_years, yr_mean, yr_std) for the given feature indices."""
+    unique_years = np.sort(np.unique(years))
+    yr_mean = np.full((len(unique_years), len(top_idx)), np.nan)
+    yr_std  = np.full((len(unique_years), len(top_idx)), np.nan)
+    for yi, yr in enumerate(unique_years):
+        mask = years == yr
+        if mask.sum() == 0:
+            continue
+        sub = mean_attrs[mask][:, top_idx]          # signed, not abs
+        yr_mean[yi] = sub.mean(axis=0)
+        yr_std[yi]  = sub.std(axis=0)
+    return unique_years, yr_mean, yr_std
+
 
 def plot_temporal_importance(
     mean_attrs: np.ndarray,
@@ -468,53 +483,59 @@ def plot_temporal_importance(
     top_k: int = 6,
 ) -> None:
     """
-    Line plot showing how the mean |attribution| of the top-k features
-    evolves across years.  Each line is one feature; shading = ±1σ across
-    glaciers in that year.
+    Two-panel stacked area chart of feature attribution over time.
+
+    Top panel — stacked |attribution|: total bar height shows the overall
+    "attribution weight" per year; each colour band shows one feature's share.
+
+    Bottom panel — signed attribution: positive contributions stack above
+    zero, negative below, showing which features push mass balance up vs down
+    in each year.  Style used in climate attribution papers (e.g. Marzeion et al.).
 
     Args:
-        mean_attrs:    (N, n_features) attributions for all points.
+        mean_attrs:    (N, n_features) attributions (signed, not absolute).
         years:         (N,) year for each data point.
         feature_names: n_features strings.
         output_path:   File path to save the figure.
-        top_k:         Number of top features to show (ranked by global mean |attr|).
+        top_k:         Number of top features (ranked by global mean |attr|).
     """
     global_importance = np.abs(mean_attrs).mean(axis=0)
-    top_idx = np.argsort(global_importance)[::-1][:top_k]
+    top_idx   = np.argsort(global_importance)[::-1][:top_k]
+    top_names = [feature_names[i] for i in top_idx]
 
-    unique_years = np.sort(np.unique(years))
-
-    # Per year, per feature: mean and std of |attribution| across glaciers
-    yr_mean = np.full((len(unique_years), len(top_idx)), np.nan)
-    yr_std  = np.full((len(unique_years), len(top_idx)), np.nan)
-    for yi, yr in enumerate(unique_years):
-        mask = years == yr
-        if mask.sum() == 0:
-            continue
-        sub = np.abs(mean_attrs[mask])[:, top_idx]
-        yr_mean[yi] = sub.mean(axis=0)
-        yr_std[yi]  = sub.std(axis=0)
+    unique_years, yr_mean, yr_std = _temporal_arrays(mean_attrs, years, top_idx)
+    valid = ~np.isnan(yr_mean[:, 0])
+    yrs   = unique_years[valid]
 
     cmap   = cm.get_cmap("tab10")
-    fig, ax = plt.subplots(figsize=(12, 5))
+    colors = [cmap(j % 10) for j in range(len(top_idx))]
 
-    for j, fi in enumerate(top_idx):
-        color = cmap(j % 10)
-        mu  = yr_mean[:, j]
-        sd  = yr_std[:, j]
-        valid = ~np.isnan(mu)
-        ax.plot(unique_years[valid], mu[valid], color=color, lw=1.6,
-                label=feature_names[fi])
-        ax.fill_between(unique_years[valid],
-                        mu[valid] - sd[valid],
-                        mu[valid] + sd[valid],
-                        color=color, alpha=0.12)
+    fig, axes = plt.subplots(2, 1, figsize=(13, 8), sharex=True)
 
+    # ---- Top panel: stacked |attribution| ----
+    ax = axes[0]
+    stacks = np.abs(yr_mean[valid])          # (n_years, top_k)
+    ax.stackplot(yrs, stacks.T, labels=top_names, colors=colors, alpha=0.82)
+    ax.set_ylabel("|Attribution| (MWE/yr per unit input change)")
+    ax.set_title(f"Stacked feature importance magnitude  (top {top_k} features)")
+    ax.legend(fontsize=8, ncol=2, loc="upper left",
+              framealpha=0.9, edgecolor="grey")
+    ax.grid(axis="y", alpha=0.25)
+
+    # ---- Bottom panel: signed attribution ----
+    ax = axes[1]
+    pos = np.where(yr_mean[valid] > 0, yr_mean[valid], 0.0)   # (n_years, top_k)
+    neg = np.where(yr_mean[valid] < 0, yr_mean[valid], 0.0)
+
+    ax.stackplot(yrs, pos.T, colors=colors, alpha=0.82)
+    ax.stackplot(yrs, neg.T, colors=colors, alpha=0.82)
+    ax.axhline(0, color="black", lw=0.8, ls="--")
     ax.set_xlabel("Year")
-    ax.set_ylabel("Mean |Attribution| (MWE/yr per unit input change)")
-    ax.set_title(f"Temporal feature importance evolution  (top {top_k} features)")
-    ax.legend(fontsize=8, ncol=2, loc="upper left")
-    ax.grid(alpha=0.3)
+    ax.set_ylabel("Signed attribution (MWE/yr per unit input change)")
+    ax.set_title("Signed feature attribution — positive (above) pushes mass balance up, "
+                 "negative (below) pulls it down")
+    ax.grid(axis="y", alpha=0.25)
+
     fig.tight_layout()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.savefig(output_path, dpi=150)
