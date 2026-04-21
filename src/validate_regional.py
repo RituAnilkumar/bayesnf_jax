@@ -4,17 +4,16 @@ src/validate_regional.py
 Validates ensemble regional MWE predictions against WGMS / Dussaillant et al.
 regional reference series.
 
-For each matched region the script produces:
-  - Individual time-series plot:  ensemble median ± N×σ total/structural/epistemic
-                                  vs. WGMS mwe ± mwe_sigma error bars
-  - Multi-panel summary figure:   all matched regions on one page
-  - Scatter plot:                 per-year ensemble mean vs. WGMS (all regions)
-  - validation_metrics.csv:       per-region RMSE, MAE, bias, correlation, n_years
+For each matched region the script produces (files named by RGI number, e.g. r06):
+  - timeseries_{rgi}.png     ensemble median ± N×σ bands vs. WGMS ±1σ error bars;
+                              title includes RMSE, bias, r, and % years within bounds
+  - scatter_{rgi}.png        per-region scatter: ensemble median vs. WGMS with
+                              ±N×σ ensemble error bars and WGMS uncertainty band
+  - residuals_all_regions.png residual bars per region with ±N×σ WGMS uncertainty band
+  - summary_multipanel.png   all regions in one figure
+  - validation_metrics.csv   RMSE, MAE, bias, correlation, coverage_pct, n_years
 
 Only MWE is used; Gt columns are ignored because glacier area varies in WGMS.
-
-Region mapping (RGI ↔ WGMS) is defined in the config file
-conf/config_validate_regional.yaml.
 
 Usage:
     python src/validate_regional.py
@@ -99,17 +98,21 @@ def _merge_on_overlap(
 # Metrics
 # ---------------------------------------------------------------------------
 
-def _compute_metrics(merged: pd.DataFrame) -> dict:
-    pred = merged["median_mwe"].values
-    obs  = merged["mwe"].values
-    diff = pred - obs
-    n    = len(diff)
+def _compute_metrics(merged: pd.DataFrame, sigma_mult: float) -> dict:
+    pred    = merged["median_mwe"].values
+    obs     = merged["mwe"].values
+    s_tot   = merged["total_std"].values
+    diff    = pred - obs
+    n       = len(diff)
+    within  = np.sum((obs >= pred - sigma_mult * s_tot) &
+                     (obs <= pred + sigma_mult * s_tot))
     return {
-        "n_years":   n,
-        "bias":      float(np.mean(diff)),
-        "rmse":      float(np.sqrt(np.mean(diff ** 2))),
-        "mae":       float(np.mean(np.abs(diff))),
-        "corr":      float(np.corrcoef(pred, obs)[0, 1]) if n > 2 else np.nan,
+        "n_years":      n,
+        "bias":         float(np.mean(diff)),
+        "rmse":         float(np.sqrt(np.mean(diff ** 2))),
+        "mae":          float(np.mean(np.abs(diff))),
+        "corr":         float(np.corrcoef(pred, obs)[0, 1]) if n > 2 else np.nan,
+        "coverage_pct": float(100.0 * within / n),
     }
 
 
@@ -172,12 +175,13 @@ def _plot_timeseries(
         label="WGMS/Dussaillant ±1σ",
     )
 
-    metrics = _compute_metrics(merged)
+    metrics = _compute_metrics(merged, sigma_mult)
     ax.set_title(
         f"{region_name}  |  n={metrics['n_years']} yrs  "
         f"RMSE={metrics['rmse']:.3f}  bias={metrics['bias']:+.3f}  "
-        f"r={metrics['corr']:.2f}",
-        fontsize=10,
+        f"r={metrics['corr']:.2f}  "
+        f"coverage={metrics['coverage_pct']:.0f}% within ±{sigma_mult}σ",
+        fontsize=9,
     )
     ax.axhline(0, color="black", lw=0.6, ls="--")
     ax.set_xlabel("Year")
@@ -228,16 +232,16 @@ def _plot_multipanel(
                     yerr=merged["mwe_sigma"].values,
                     fmt="o", color="black", ms=2.5, lw=0.8, capsize=1.5, zorder=5)
 
-        metrics = _compute_metrics(merged)
+        metrics = _compute_metrics(merged, sigma_mult)
         ax.set_title(
-            f"{name}\nRMSE={metrics['rmse']:.3f}  r={metrics['corr']:.2f}",
+            f"{name}\nRMSE={metrics['rmse']:.3f}  r={metrics['corr']:.2f}  "
+            f"cov={metrics['coverage_pct']:.0f}%",
             fontsize=7.5,
         )
         ax.axhline(0, color="black", lw=0.5, ls="--")
         ax.set_ylabel("MWE/yr", fontsize=7)
         ax.tick_params(labelsize=6)
 
-    # Hide unused subplots
     for idx in range(len(keys), len(axes_flat)):
         axes_flat[idx].set_visible(False)
 
@@ -253,79 +257,70 @@ def _plot_multipanel(
 
 
 # ---------------------------------------------------------------------------
-# Scatter plot
+# Per-region scatter plot
 # ---------------------------------------------------------------------------
 
-def _plot_scatter(
-    region_data: dict[str, pd.DataFrame],
-    region_names: dict[str, str],
+def _plot_scatter_region(
+    merged: pd.DataFrame,
+    region_name: str,
     sigma_mult: float,
     output_path: Path,
 ) -> None:
     """
-    Scatter plot of ensemble median vs. WGMS MWE.
+    Scatter plot for a single region: ensemble median vs. WGMS MWE.
 
-    - Shaded band around the 1:1 line shows ±sigma_mult × median(mwe_sigma)
-      across all points — represents the zone where a prediction is within the
-      typical WGMS observational uncertainty.
-    - Vertical error bars on each point show ±sigma_mult × ensemble total_std.
-    - Points are coloured by region.
+    - Grey shaded band around the 1:1 line = ±sigma_mult × mwe_sigma (per-year
+      WGMS observational uncertainty), showing where each observation "should" lie.
+    - Vertical error bars = ±sigma_mult × ensemble total_std.
+    - Points coloured by year to show temporal progression.
     """
-    cmap   = plt.get_cmap("tab20")
-    keys   = sorted(region_data.keys())
-    colors = {k: cmap(i / max(len(keys) - 1, 1)) for i, k in enumerate(keys)}
+    obs     = merged["mwe"].values
+    pred    = merged["median_mwe"].values
+    s_tot   = merged["total_std"].values
+    s_wgms  = merged["mwe_sigma"].values
+    years   = merged["year"].values
 
-    # Collect all values to set axis limits
-    all_obs, all_pred, all_wgms_sigma = [], [], []
-    for merged in region_data.values():
-        all_obs.extend(merged["mwe"].values.tolist())
-        all_pred.extend(merged["median_mwe"].values.tolist())
-        all_wgms_sigma.extend(merged["mwe_sigma"].values.tolist())
-
-    lo  = min(np.nanmin(all_obs), np.nanmin(all_pred))
-    hi  = max(np.nanmax(all_obs), np.nanmax(all_pred))
+    lo  = min(np.nanmin(obs), np.nanmin(pred - sigma_mult * s_tot))
+    hi  = max(np.nanmax(obs), np.nanmax(pred + sigma_mult * s_tot))
     pad = (hi - lo) * 0.06
     lo -= pad; hi += pad
-
-    # WGMS uncertainty band around 1:1: use median sigma across all matched points
-    typical_wgms_sigma = float(np.nanmedian(all_wgms_sigma))
     diag = np.linspace(lo, hi, 300)
 
-    fig, ax = plt.subplots(figsize=(7, 7))
+    fig, ax = plt.subplots(figsize=(5.5, 5.5))
 
+    # Per-point WGMS uncertainty band: shade between diag ± each point's sigma.
+    # Use fill_between with per-observation lower/upper sorted by obs value.
+    sort_idx    = np.argsort(obs)
+    obs_sorted  = obs[sort_idx]
+    wgms_sorted = s_wgms[sort_idx]
     ax.fill_between(
-        diag,
-        diag - sigma_mult * typical_wgms_sigma,
-        diag + sigma_mult * typical_wgms_sigma,
+        obs_sorted,
+        obs_sorted - sigma_mult * wgms_sorted,
+        obs_sorted + sigma_mult * wgms_sorted,
         color="lightgray", alpha=0.55, zorder=1,
-        label=f"±{sigma_mult}σ WGMS obs. uncert. (median σ={typical_wgms_sigma:.3f})",
+        label=f"±{sigma_mult}σ WGMS obs. uncertainty",
     )
     ax.plot(diag, diag, "k--", lw=1.0, zorder=2, label="1:1 line")
 
-    for abbrev in keys:
-        merged   = region_data[abbrev]
-        obs      = merged["mwe"].values
-        pred     = merged["median_mwe"].values
-        ens_err  = sigma_mult * merged["total_std"].values
-        ax.errorbar(
-            obs, pred,
-            yerr=ens_err,
-            fmt="o", ms=4, lw=0.7, capsize=2.5, alpha=0.75,
-            color=colors[abbrev], ecolor=colors[abbrev],
-            label=region_names.get(abbrev, abbrev),
-            zorder=3,
-        )
+    sc = ax.scatter(obs, pred, c=years, cmap="viridis", s=20, zorder=4,
+                    alpha=0.85)
+    ax.errorbar(obs, pred, yerr=sigma_mult * s_tot,
+                fmt="none", ecolor="gray", elinewidth=0.7, capsize=2.0,
+                alpha=0.6, zorder=3)
+    plt.colorbar(sc, ax=ax, label="Year", shrink=0.8)
 
+    metrics = _compute_metrics(merged, sigma_mult)
+    ax.set_title(
+        f"{region_name}\n"
+        f"RMSE={metrics['rmse']:.3f}  bias={metrics['bias']:+.3f}  "
+        f"r={metrics['corr']:.2f}  cov={metrics['coverage_pct']:.0f}%",
+        fontsize=9,
+    )
     ax.set_xlim(lo, hi)
     ax.set_ylim(lo, hi)
     ax.set_xlabel("WGMS/Dussaillant MWE/yr (m w.e.)")
     ax.set_ylabel("Ensemble median MWE/yr (m w.e.)")
-    ax.set_title(
-        f"Annual MWE: ensemble vs. WGMS/Dussaillant (all matched regions)\n"
-        f"Error bars: ±{sigma_mult}σ ensemble total  |  "
-        f"Grey band: ±{sigma_mult}σ WGMS obs. uncertainty"
-    )
-    ax.legend(fontsize=6, ncol=2, loc="upper left")
+    ax.legend(fontsize=7, loc="upper left")
     ax.set_aspect("equal", adjustable="box")
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
@@ -333,12 +328,13 @@ def _plot_scatter(
 
 
 # ---------------------------------------------------------------------------
-# Residual (bias) time series — one panel per region
+# Residual (bias) time series — one panel per region, with WGMS uncertainty band
 # ---------------------------------------------------------------------------
 
 def _plot_residuals(
     region_data: dict[str, pd.DataFrame],
     region_names: dict[str, str],
+    sigma_mult: float,
     output_path: Path,
 ) -> None:
     keys  = sorted(region_data.keys())
@@ -355,12 +351,20 @@ def _plot_residuals(
         merged = region_data[abbrev]
         years  = merged["year"].values
         resid  = merged["median_mwe"].values - merged["mwe"].values
+        s_wgms = merged["mwe_sigma"].values
+
+        # WGMS observational uncertainty band around zero
+        ax.fill_between(years,
+                        -sigma_mult * s_wgms,
+                         sigma_mult * s_wgms,
+                        color="lightgray", alpha=0.55, zorder=1,
+                        label=f"±{sigma_mult}σ WGMS obs. uncert.")
 
         ax.bar(years, resid, color=np.where(resid >= 0, "steelblue", "firebrick"),
-               alpha=0.75, width=0.8)
-        ax.axhline(0, color="black", lw=0.8)
+               alpha=0.75, width=0.8, zorder=2)
+        ax.axhline(0, color="black", lw=0.8, zorder=3)
         bias = float(np.mean(resid))
-        ax.axhline(bias, color="orange", lw=1.2, ls="--",
+        ax.axhline(bias, color="orange", lw=1.2, ls="--", zorder=4,
                    label=f"mean bias={bias:+.3f}")
         ax.set_title(region_names.get(abbrev, abbrev), fontsize=8)
         ax.set_ylabel("residual (m w.e.)", fontsize=7)
@@ -370,8 +374,12 @@ def _plot_residuals(
     for idx in range(len(keys), len(axes_flat)):
         axes_flat[idx].set_visible(False)
 
-    fig.suptitle("Residuals: ensemble median − WGMS/Dussaillant (MWE/yr)", fontsize=9)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.suptitle(
+        f"Residuals: ensemble median − WGMS/Dussaillant (MWE/yr)\n"
+        f"Grey band: ±{sigma_mult}σ WGMS observational uncertainty",
+        fontsize=9,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
 
@@ -386,7 +394,7 @@ def run_validation(cfg: dict) -> None:
     output_dir    = Path(cfg["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    region_map   = cfg["region_map"]        # {WGMS_abbrev: subdir_name}
+    region_map   = cfg["region_map"]        # {WGMS_abbrev: rgi_subdir, e.g. ISL: r06}
     region_names = cfg.get("region_names", {})
     ens_filename = cfg.get("ensemble_filename", "top_models_regional_mwe.csv")
     sigma_mult   = float(cfg.get("sigma_mult", 2))
@@ -398,42 +406,52 @@ def run_validation(cfg: dict) -> None:
     print(f"  Output dir    : {output_dir}")
     print(f"  Sigma mult    : {sigma_mult}  |  Min overlap years: {min_overlap}\n")
 
-    region_data: dict[str, pd.DataFrame] = {}
+    region_data: dict[str, pd.DataFrame] = {}   # keyed by WGMS abbrev
+    rgi_id: dict[str, str] = {}                 # abbrev → rgi subdir (e.g. r06)
     metrics_rows: list[dict] = []
 
     for abbrev, subdir in sorted(region_map.items()):
         region_dir = ensemble_base / subdir
         ens = _load_ensemble_mwe(region_dir, ens_filename)
         if ens is None:
-            print(f"  [{abbrev}] SKIP — ensemble file missing")
+            print(f"  [{abbrev}/{subdir}] SKIP — ensemble file missing")
             continue
 
         val = _load_validation_mwe(val_dir, abbrev)
         if val is None:
-            print(f"  [{abbrev}] SKIP — validation file missing")
+            print(f"  [{abbrev}/{subdir}] SKIP — validation file missing")
             continue
 
         merged = _merge_on_overlap(ens, val, min_overlap)
         if merged is None:
-            print(f"  [{abbrev}] SKIP — fewer than {min_overlap} overlapping years")
+            print(f"  [{abbrev}/{subdir}] SKIP — fewer than {min_overlap} overlapping years")
             continue
 
-        name = region_names.get(abbrev, abbrev)
-        yr_range = f"{int(merged['year'].min())}–{int(merged['year'].max())}"
-        metrics  = _compute_metrics(merged)
-        print(f"  [{abbrev}] {name:30s}  {yr_range}  "
+        name    = region_names.get(abbrev, abbrev)
+        yr_rng  = f"{int(merged['year'].min())}–{int(merged['year'].max())}"
+        metrics = _compute_metrics(merged, sigma_mult)
+        print(f"  [{abbrev}/{subdir}] {name:30s}  {yr_rng}  "
               f"n={metrics['n_years']:3d}  "
               f"RMSE={metrics['rmse']:.3f}  bias={metrics['bias']:+.3f}  "
-              f"r={metrics['corr']:.2f}")
+              f"r={metrics['corr']:.2f}  cov={metrics['coverage_pct']:.0f}%")
 
         region_data[abbrev] = merged
-        metrics_rows.append({"region": abbrev, "name": name, **metrics,
-                              "year_min": int(merged["year"].min()),
-                              "year_max": int(merged["year"].max())})
+        rgi_id[abbrev]      = subdir
+        metrics_rows.append({
+            "region": abbrev, "rgi": subdir, "name": name,
+            **metrics,
+            "year_min": int(merged["year"].min()),
+            "year_max": int(merged["year"].max()),
+        })
 
+        # Files named by RGI number (e.g. timeseries_r06.png, scatter_r06.png)
         _plot_timeseries(
             merged, name, sigma_mult,
-            output_dir / f"timeseries_{abbrev}.png",
+            output_dir / f"timeseries_{subdir}.png",
+        )
+        _plot_scatter_region(
+            merged, name, sigma_mult,
+            output_dir / f"scatter_{subdir}.png",
         )
 
     if not region_data:
@@ -445,16 +463,14 @@ def run_validation(cfg: dict) -> None:
     _plot_multipanel(region_data, region_names, sigma_mult,
                      output_dir / "summary_multipanel.png")
 
-    print("  Generating scatter plot...")
-    _plot_scatter(region_data, region_names, sigma_mult, output_dir / "scatter_all_regions.png")
-
     print("  Generating residual time series...")
-    _plot_residuals(region_data, region_names, output_dir / "residuals_all_regions.png")
+    _plot_residuals(region_data, region_names, sigma_mult,
+                    output_dir / "residuals_all_regions.png")
 
     # Metrics CSV
     metrics_df = pd.DataFrame(metrics_rows).sort_values("rmse").reset_index(drop=True)
-    metrics_path = output_dir / "validation_metrics.csv"
-    metrics_df.to_csv(metrics_path, index=False, float_format="%.4f")
+    metrics_df.to_csv(output_dir / "validation_metrics.csv", index=False,
+                      float_format="%.4f")
     print(f"\n  Saved validation_metrics.csv ({len(metrics_df)} regions)")
 
     print(f"\nDone. Outputs written to {output_dir}/")
