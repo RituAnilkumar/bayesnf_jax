@@ -78,6 +78,8 @@ def _load_satellite(path: Path) -> pd.DataFrame:
     # Strip BOM and whitespace from column names
     df.columns = df.columns.str.strip().str.lstrip("\ufeff")
     df["date"] = pd.to_datetime(df["date"], dayfirst=True)
+    # Keep only September observations (end of ablation season)
+    df = df[df["date"].dt.month == 9].reset_index(drop=True)
     df["frac_year"] = df["date"].dt.year + (df["date"].dt.dayofyear - 1) / 365.25
     return df.sort_values("frac_year").reset_index(drop=True)
 
@@ -182,16 +184,28 @@ def align_satellite(sat: pd.DataFrame, cum_df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def satellite_annual(sat: pd.DataFrame) -> pd.DataFrame:
-    """Group satellite cumulative series into annual averages."""
+    """
+    Derive annual Gt/yr rates from September cumulative snapshots.
+
+    After September-only filtering there is one observation per year, so each
+    annual rate is simply cumulative[t] - cumulative[t-1].
+
+    Error propagation: since mass_errors are already cumulative errors (2σ),
+    the error on the difference of two consecutive values is:
+        annual_err = sqrt(err_t² + err_{t-1}²)
+    """
     sat = sat.copy()
     sat["year"] = sat["date"].dt.year
     grp = sat.groupby("year").agg(
         mass_changes=("mass_changes", "mean"),
         mass_errors=("mass_errors", "mean"),
     ).reset_index()
-    # Annual rate: difference of consecutive annual cumulative averages
+
     grp["annual_gt"]  = grp["mass_changes"].diff()
-    grp["annual_err"] = grp["mass_errors"]   # conservative: keep original sigma
+    # Propagate cumulative errors in quadrature across the two bounding points
+    err   = grp["mass_errors"].values
+    grp["annual_err"] = np.concatenate([[np.nan],
+                                        np.sqrt(err[1:] ** 2 + err[:-1] ** 2)])
     return grp.dropna(subset=["annual_gt"]).reset_index(drop=True)
 
 
