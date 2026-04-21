@@ -66,7 +66,7 @@ explain:
   # --- Plots ---
   beeswarm_n_max: 1000     # max points in beeswarm (further subsampled for speed)
   importance_top_k: null   # show all features; set e.g. 10 to limit
-  dependence_top_k: 6      # top-k features for which dependence plots are saved
+  dependence_top_k: 5      # top-k features for which dependence plots are saved
 
   # --- Ensemble model weighting (only used in ensemble_dir mode) ---
   # 'equal' gives every model the same weight (default, always works).
@@ -100,6 +100,6 @@ hydra:
   run:
     # Fixed base dir — output subdir is determined at runtime from the run/ensemble path.
     # This avoids interpolating ${model.reg_subdir} which would fail when model= is omitted.
-    dir: outputs/explain_top5
+    dir: outputs/explain_top5_lim_glamb
   job:
     chdir: true
