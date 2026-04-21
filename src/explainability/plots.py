@@ -230,16 +230,19 @@ def plot_dependence(
     n_features = len(feature_names)
     fi = feature_names.index(feature) if isinstance(feature, str) else int(feature)
 
-    # Resolve colour feature index
-    if color_feature is None:
-        # Auto-select: feature with highest abs-corr with this attribution
+    # Resolve colour feature index — fall back to auto-select if the requested
+    # feature is not present (e.g. "year" requested but masked out).
+    def _auto_ci():
         corrs = [
             abs(np.corrcoef(feature_values[:, j], mean_attrs[:, fi])[0, 1])
             for j in range(n_features) if j != fi
         ]
-        ci = [j for j in range(n_features) if j != fi][int(np.argmax(corrs))]
+        return [j for j in range(n_features) if j != fi][int(np.argmax(corrs))]
+
+    if color_feature is None:
+        ci = _auto_ci()
     elif isinstance(color_feature, str):
-        ci = feature_names.index(color_feature) if color_feature in feature_names else 0
+        ci = feature_names.index(color_feature) if color_feature in feature_names else _auto_ci()
     else:
         ci = int(color_feature)
 
@@ -535,8 +538,9 @@ def plot_temporal_importance(
         mu = yr_mean[valid, j]
         sd = yr_std[valid, j]
 
-        ax.fill_between(yrs, mu - sd, mu + sd, color=color, alpha=0.20)
-        ax.plot(yrs, mu, color=color, lw=1.6)
+        shade = ax.fill_between(yrs, mu - sd, mu + sd, color=color, alpha=0.25,
+                                label="±1σ across glaciers")
+        ax.plot(yrs, mu, color=color, lw=1.6, label="mean attribution")
         ax.axhline(0, color="black", lw=0.7, ls="--")
         ax.set_ylabel(name, fontsize=9)
         ax.yaxis.set_major_formatter(
@@ -544,11 +548,16 @@ def plot_temporal_importance(
         )
         ax.grid(axis="y", alpha=0.25)
         ax.tick_params(labelsize=8)
+        # Only add legend to first panel to avoid repetition
+        if j == 0:
+            ax.legend(fontsize=7, loc="upper left")
 
     axes[-1].set_xlabel("Year")
     fig.suptitle(
-        f"Feature attribution over time  (top {top_k}, mean ± 1σ across glaciers)",
-        fontsize=11,
+        f"Feature attribution over time  (top {top_k})\n"
+        "line = mean signed attribution across glaciers per year   "
+        "shading = ±1σ across glaciers",
+        fontsize=10,
     )
     fig.tight_layout()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
