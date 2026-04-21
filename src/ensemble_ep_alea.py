@@ -128,132 +128,158 @@ def pick_top_runs(
 
 
 # ---------------------------------------------------------------------------
-# Per-glacier uncertainty extraction
+# Per-glacier ensemble uncertainty (top-N models)
 # ---------------------------------------------------------------------------
 
-def load_glacier_uncertainties(run_dir: Path) -> pd.DataFrame:
-    """
-    Load preds_full.csv and return per-glacier uncertainty decomposition.
-
-    Columns always present:
-        rgi_id, year, mean_mwe, epistemic_std
-
-    Columns present when run with heteroscedastic=true:
-        aleatoric_std, total_std
-
-    When heteroscedastic columns are absent, aleatoric_std = NaN and
-    total_std = epistemic_std.
-    """
-    path = run_dir / "preds_full.csv"
-    if not path.exists():
+def _load_and_validate_preds(run_dir: Path) -> pd.DataFrame:
+    """Load preds_full.csv and validate that aleatoric_std is present."""
+    df = _load_glacier_preds(run_dir)
+    if df is None:
         raise FileNotFoundError(f"preds_full.csv not found in {run_dir}")
-
-    df = pd.read_csv(path)
-
-    # epistemic_std is written explicitly when heteroscedastic; otherwise 'std' is epistemic
-    if "epistemic_std" in df.columns:
-        epistemic_std = df["epistemic_std"].values
-    else:
-        epistemic_std = df["std"].values
-
     if "aleatoric_std" not in df.columns:
         raise ValueError(
-            f"preds_full.csv in {run_dir} does not contain 'aleatoric_std' column. "
-            "This run was not trained with model.heteroscedastic=true. "
-            "Re-run the sweep with heteroscedastic=true, or use ensemble_uncertainty.py "
-            "for homoscedastic runs."
+            f"preds_full.csv in {run_dir} does not contain 'aleatoric_std'. "
+            "Re-run with model.heteroscedastic=true or use ensemble_uncertainty.py."
         )
+    return df
 
-    aleatoric_std = df["aleatoric_std"].values
-    total_std     = df["total_std"].values if "total_std" in df.columns else (
-        np.sqrt(epistemic_std ** 2 + aleatoric_std ** 2)
-    )
-    print("  Heteroscedastic predictions detected — aleatoric uncertainty available.")
+
+def assemble_glacier_ensemble(top_runs: pd.DataFrame) -> pd.DataFrame:
+    """
+    Assemble per-glacier uncertainty from the top-N models.
+
+    Uses equal weights across models. Structural uncertainty comes from
+    the spread of model means around the ensemble mean.
+
+    Returns DataFrame with columns:
+        rgi_id, year, mean_mwe, epistemic_std, aleatoric_std,
+        structural_std, total_std
+    """
+    run_dirs = [Path(r["run_dir"]) for _, r in top_runs.iterrows()]
+    dfs = [_load_and_validate_preds(d) for d in run_dirs]
+
+    # All runs must cover the same (rgi_id, year) grid
+    ref = dfs[0][["rgi_id", "year"]].reset_index(drop=True)
+    for i, df in enumerate(dfs[1:], start=1):
+        if not (df[["rgi_id", "year"]].reset_index(drop=True) == ref).all().all():
+            raise ValueError(
+                f"Grid mismatch between run 0 and run {i} on (rgi_id, year). "
+                "All top-N runs must be predictions over the same grid."
+            )
+
+    epistemic_col = "epistemic_std" if all("epistemic_std" in df.columns for df in dfs) else "std"
+
+    means_mat     = np.stack([df["mean"].values          for df in dfs])          # (K, N)
+    stds_mat      = np.stack([df[epistemic_col].values   for df in dfs])          # (K, N)
+    aleatoric_mat = np.stack([df["aleatoric_std"].values for df in dfs])          # (K, N)
+
+    K = len(dfs)
+    weights = np.ones(K) / K   # equal weights
+
+    comp = _ensemble_components(means_mat, stds_mat, weights, aleatoric_mat)
 
     return pd.DataFrame({
-        "rgi_id":        df["rgi_id"].values,
-        "year":          df["year"].values,
-        "mean_mwe":      df["mean"].values,
-        "epistemic_std": epistemic_std,
-        "aleatoric_std": aleatoric_std,
-        "total_std":     total_std,
+        "rgi_id":        dfs[0]["rgi_id"].values,
+        "year":          dfs[0]["year"].values,
+        "mean_mwe":      comp["median_mwe"],
+        "epistemic_std": comp["std_epistemic"],
+        "aleatoric_std": comp["std_aleatoric"],
+        "structural_std": comp["std_structural"],
+        "total_std":     comp["std_total"],
     })
 
 
 # ---------------------------------------------------------------------------
-# Regional uncertainty aggregation
+# Regional uncertainty aggregation (top-N ensemble)
 # ---------------------------------------------------------------------------
+
+def _get_total_area(run_dir: Path, mwe_df: pd.DataFrame) -> np.ndarray:
+    """Extract total_area_km2 from regional_annual_mwe.csv, or derive from Gt file."""
+    if "total_area_km2" in mwe_df.columns:
+        return mwe_df["total_area_km2"].values
+    gt_path = run_dir / "regional_annual_gt.csv"
+    if gt_path.exists():
+        gt_df    = pd.read_csv(gt_path).sort_values("year").reset_index(drop=True)
+        mwe_mean = mwe_df["mean"].values
+        area = np.where(
+            np.abs(mwe_mean) > 1e-10,
+            gt_df["mean"].values / (mwe_mean * 1e-3),
+            0.0,
+        )
+        print("  Note: total_area_km2 derived from regional_annual_gt.csv.")
+        return area
+    warnings.warn("total_area_km2 unavailable — Gt conversion will be zero.")
+    return np.zeros(len(mwe_df))
+
 
 def compute_regional_uncertainties(
     glacier_df: pd.DataFrame,
-    run_dir: Path,
+    top_runs: pd.DataFrame,
     inp_dir: str,
     reg_subdir: str,
 ) -> tuple[pd.DataFrame, np.ndarray]:
     """
-    Aggregate per-glacier uncertainties to annual regional series.
+    Aggregate per-glacier uncertainties to annual regional series for top-N ensemble.
 
-    Epistemic:  read directly from regional_annual_mwe.csv (already computed
-                from MC mu sample spread in predict.py, which is correct).
-    Aleatoric:  propagated from per-glacier aleatoric via area-weighting:
-                sigma_regional_t = sqrt( Σ_i (area_i/total_area_t)² * sigma_i² )
-    Total:      sqrt(epistemic² + aleatoric²)
+    Epistemic:   weighted MC-parameter spread from each model's regional_annual_mwe.csv
+    Aleatoric:   area-weighted propagation of ensemble aleatoric_std from glacier_df
+    Structural:  spread of per-model regional means around the ensemble mean
+    Total:       sqrt(epistemic² + aleatoric² + structural²)
 
     Returns:
-        regional_df     — DataFrame with columns: year, median_mwe, epistemic_std,
-                          aleatoric_std, total_std
-        total_area_km2  — numpy array of regional area per year (for Gt conversion)
+        regional_df    — DataFrame: year, median_mwe, epistemic_std, aleatoric_std,
+                         structural_std, total_std
+        total_area_km2 — numpy array (for Gt conversion)
     """
-    mwe_path = run_dir / "regional_annual_mwe.csv"
-    if not mwe_path.exists():
-        raise FileNotFoundError(f"regional_annual_mwe.csv not found in {run_dir}")
+    run_dirs = [Path(r["run_dir"]) for _, r in top_runs.iterrows()]
 
-    mwe_df = pd.read_csv(mwe_path).sort_values("year").reset_index(drop=True)
-    years  = mwe_df["year"].values
+    reg_dfs     = []
+    valid_dirs  = []
+    for rd in run_dirs:
+        path = rd / "regional_annual_mwe.csv"
+        if not path.exists():
+            warnings.warn(f"regional_annual_mwe.csv not found in {rd} — skipped for regional.")
+            continue
+        reg_dfs.append(pd.read_csv(path).sort_values("year").reset_index(drop=True))
+        valid_dirs.append(rd)
 
-    if "total_area_km2" in mwe_df.columns:
-        total_area_km2 = mwe_df["total_area_km2"].values
-    else:
-        # Derive from regional_annual_gt.csv (older run format without total_area column)
-        gt_path = run_dir / "regional_annual_gt.csv"
-        if gt_path.exists():
-            gt_df      = pd.read_csv(gt_path).sort_values("year").reset_index(drop=True)
-            mwe_mean   = mwe_df["mean"].values
-            total_area_km2 = np.where(
-                np.abs(mwe_mean) > 1e-10,
-                gt_df["mean"].values / (mwe_mean * 1e-3),
-                0.0,
-            )
-            print("  Note: total_area_km2 derived from regional_annual_gt.csv.")
-        else:
-            total_area_km2 = np.zeros(len(years))
-            warnings.warn("total_area_km2 unavailable — Gt conversion will be zero.")
+    if not reg_dfs:
+        raise FileNotFoundError("No regional_annual_mwe.csv found in any of the top runs.")
 
-    # Regional epistemic: std column in regional_annual_mwe.csv is from MC spread
-    epistemic_std = mwe_df["std"].values
+    years          = reg_dfs[0]["year"].values
+    total_area_km2 = _get_total_area(valid_dirs[0], reg_dfs[0])
 
-    # Regional aleatoric: propagate from per-glacier via area-weighted aggregation.
+    K       = len(reg_dfs)
+    weights = np.ones(K) / K
+    means_mat = np.stack([df["mean"].values for df in reg_dfs])   # (K, T)
+    stds_mat  = np.stack([df["std"].values  for df in reg_dfs])   # (K, T)
+
+    # Regional aleatoric from ensemble per-glacier aleatoric via area-weighting.
     # _aggregate_aleatoric_to_regional expects column 'std_aleatoric', so rename.
     glacier_for_agg = glacier_df.rename(columns={"aleatoric_std": "std_aleatoric"})
     reg_alea_df = _aggregate_aleatoric_to_regional(glacier_for_agg, inp_dir, reg_subdir)
     if reg_alea_df is not None:
-        year_to_alea = dict(zip(reg_alea_df["year"], reg_alea_df["std_aleatoric"]))
-        aleatoric_std = np.array([year_to_alea.get(y, np.nan) for y in years])
-        valid = (~np.isnan(aleatoric_std)).sum()
-        print(f"  Regional aleatoric propagated from per-glacier ({valid}/{len(years)} years).")
+        year_to_alea  = dict(zip(reg_alea_df["year"], reg_alea_df["std_aleatoric"]))
+        aleatoric_arr = np.array([year_to_alea.get(y, np.nan) for y in years])
+        valid_ct = (~np.isnan(aleatoric_arr)).sum()
+        print(f"  Regional aleatoric propagated from per-glacier ({valid_ct}/{len(years)} years).")
     else:
-        aleatoric_std = np.full(len(years), np.nan)
+        aleatoric_arr = np.full(len(years), np.nan)
 
-    # Total: combine in quadrature, ignoring NaN aleatoric gracefully
-    alea_sq = np.where(np.isnan(aleatoric_std), 0.0, aleatoric_std ** 2)
-    total_std = np.sqrt(epistemic_std ** 2 + alea_sq)
+    # Structural + epistemic from ensemble components helper
+    comp = _ensemble_components(means_mat, stds_mat, weights, aleatoric_mat=None)
+
+    # Add aleatoric in quadrature
+    alea_sq   = np.where(np.isnan(aleatoric_arr), 0.0, aleatoric_arr ** 2)
+    total_std = np.sqrt(comp["std_structural"] ** 2 + comp["std_epistemic"] ** 2 + alea_sq)
 
     regional_df = pd.DataFrame({
-        "year":          years,
-        "median_mwe":    mwe_df["mean"].values,
-        "epistemic_std": epistemic_std,
-        "aleatoric_std": aleatoric_std,
-        "total_std":     total_std,
+        "year":           years,
+        "median_mwe":     comp["median_mwe"],
+        "epistemic_std":  comp["std_epistemic"],
+        "aleatoric_std":  aleatoric_arr,
+        "structural_std": comp["std_structural"],
+        "total_std":      total_std,
     })
     return regional_df, total_area_km2
 
@@ -262,20 +288,23 @@ def compute_regional_uncertainties(
 # Plots
 # ---------------------------------------------------------------------------
 
-def _shade(ax, years, mu, s_epi, s_alea, s_tot):
+def _shade(ax, years, mu, s_epi, s_struct, s_tot):
     """
-    Draw uncertainty bands:
-      - ±2σ total    (steelblue, outer — includes aleatoric if available)
-      - ±2σ epistemic (darkorange, inner — parameter uncertainty only)
+    Draw three uncertainty bands (outermost to innermost):
+      - ±2σ total      (steelblue,   outer  — epistemic + aleatoric + structural)
+      - ±2σ structural (mediumorchid, middle — model-choice spread only)
+      - ±2σ epistemic  (darkorange,  inner  — within-model parameter uncertainty)
     """
     ax.fill_between(years, mu - 2 * s_tot, mu + 2 * s_tot,
-                    alpha=0.20, color="steelblue", label="±2σ total")
+                    alpha=0.15, color="steelblue",    label="±2σ total")
+    ax.fill_between(years, mu - 2 * s_struct, mu + 2 * s_struct,
+                    alpha=0.20, color="mediumorchid", label="±2σ structural")
     ax.fill_between(years, mu - 2 * s_epi, mu + 2 * s_epi,
-                    alpha=0.30, color="darkorange", label="±2σ epistemic")
-    ax.plot(years, mu, color="steelblue", lw=1.8, label="best-model mean")
+                    alpha=0.30, color="darkorange",   label="±2σ epistemic")
+    ax.plot(years, mu, color="steelblue", lw=1.8, label="ensemble mean")
 
 
-def plot_best_model_gt(
+def plot_top_models_gt(
     regional_gt: pd.DataFrame,
     glambie_wide_df,
     oggm_df: pd.DataFrame,
@@ -292,7 +321,7 @@ def plot_best_model_gt(
     fig, ax = plt.subplots(figsize=(12, 5))
     _shade(ax, years, mu,
            regional_gt["epistemic_std"].values,
-           regional_gt["aleatoric_std"].fillna(0).values,
+           regional_gt["structural_std"].values,
            regional_gt["total_std"].values)
 
     if not gb_combined.empty:
@@ -315,12 +344,13 @@ def plot_best_model_gt(
 
     ax.axhline(0, color="black", lw=0.6, ls="--")
     ax.set_xlabel("Year"); ax.set_ylabel("Gt/yr")
-    ax.set_title("Regional mass balance — best model (Gt/yr)\nOrange: epistemic  Blue: total (epistemic + aleatoric)")
+    ax.set_title("Regional mass balance — top-N ensemble (Gt/yr)\n"
+                 "Orange: epistemic  Purple: structural  Blue: total")
     ax.legend(fontsize=8); fig.tight_layout()
-    _savefig(fig, output_dir / "best_model_regional_gt.png")
+    _savefig(fig, output_dir / "top_models_regional_gt.png")
 
 
-def plot_best_model_mwe(
+def plot_top_models_mwe(
     regional_mwe: pd.DataFrame,
     glambie_wide_df,
     oggm_df: pd.DataFrame,
@@ -337,7 +367,7 @@ def plot_best_model_mwe(
     fig, ax = plt.subplots(figsize=(12, 5))
     _shade(ax, years, mu,
            regional_mwe["epistemic_std"].values,
-           regional_mwe["aleatoric_std"].fillna(0).values,
+           regional_mwe["structural_std"].values,
            regional_mwe["total_std"].values)
 
     if not gb_combined_gt.empty and total_area_mean > 0:
@@ -359,9 +389,10 @@ def plot_best_model_mwe(
 
     ax.axhline(0, color="black", lw=0.6, ls="--")
     ax.set_xlabel("Year"); ax.set_ylabel("MWE/yr")
-    ax.set_title("Regional mass balance — best model (MWE/yr)\nOrange: epistemic  Blue: total (epistemic + aleatoric)")
+    ax.set_title("Regional mass balance — top-N ensemble (MWE/yr)\n"
+                 "Orange: epistemic  Purple: structural  Blue: total")
     ax.legend(fontsize=8); fig.tight_layout()
-    _savefig(fig, output_dir / "best_model_regional_mwe.png")
+    _savefig(fig, output_dir / "top_models_regional_mwe.png")
 
 
 def plot_best_model_cumulative_gt(
