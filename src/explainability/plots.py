@@ -61,6 +61,10 @@ def plot_importance_bar(
     imp_sorted   = importance[order]
     names_sorted = [feature_names[i] for i in order]
 
+    # Glacier heterogeneity std: how variable the attribution magnitude is across
+    # glacier-years (always computed; independent of model uncertainty).
+    glacier_std = np.abs(mean_attrs).std(axis=0)[order]
+
     show_total      = std_attrs is not None
     show_components = std_epistemic_attrs is not None and std_structural_attrs is not None
 
@@ -69,23 +73,37 @@ def plot_importance_bar(
 
     ax.barh(y_pos, imp_sorted, color=_POS_COLOR, alpha=0.85, height=0.65)
 
-    def _xerr_clipped(std_2d):
-        err = np.abs(std_2d).mean(axis=0)[order]
+    def _xerr_clipped(err):
+        """Clip lower whisker so it never extends past zero."""
         return np.array([np.minimum(err, imp_sorted), err])
 
+    # Four whiskers at fixed offsets (drawn only when data is available).
+    # Positions (from top to bottom of each bar):
+    #   +0.24  black  — glacier heterogeneity (always)
+    #   +0.08  grey   — total model uncertainty
+    #   -0.08  orange — epistemic (VI weight uncertainty)
+    #   -0.24  purple — structural (between-model)
+    ax.errorbar(imp_sorted, y_pos + 0.24,
+                xerr=_xerr_clipped(glacier_std),
+                fmt="none", ecolor="black", capsize=2, lw=1.0,
+                label="±1σ across glaciers")
+
     if show_total:
-        ax.errorbar(imp_sorted, y_pos,
-                    xerr=_xerr_clipped(std_attrs),
-                    fmt="none", ecolor="grey", capsize=3, lw=1.2,
-                    label="±1σ total")
+        total_err = np.abs(std_attrs).mean(axis=0)[order]
+        ax.errorbar(imp_sorted, y_pos + 0.08,
+                    xerr=_xerr_clipped(total_err),
+                    fmt="none", ecolor="grey", capsize=2, lw=1.0,
+                    label="±1σ total (model)")
 
     if show_components:
-        ax.errorbar(imp_sorted, y_pos + 0.18,
-                    xerr=_xerr_clipped(std_epistemic_attrs),
+        epi_err    = np.abs(std_epistemic_attrs).mean(axis=0)[order]
+        struct_err = np.abs(std_structural_attrs).mean(axis=0)[order]
+        ax.errorbar(imp_sorted, y_pos - 0.08,
+                    xerr=_xerr_clipped(epi_err),
                     fmt="none", ecolor="darkorange", capsize=2, lw=1.0,
                     label="±1σ epistemic (VI)")
-        ax.errorbar(imp_sorted, y_pos - 0.18,
-                    xerr=_xerr_clipped(std_structural_attrs),
+        ax.errorbar(imp_sorted, y_pos - 0.24,
+                    xerr=_xerr_clipped(struct_err),
                     fmt="none", ecolor="mediumorchid", capsize=2, lw=1.0,
                     label="±1σ structural (ensemble)")
 
@@ -95,8 +113,7 @@ def plot_importance_bar(
     ax.set_xlabel("Mean |Attribution| (MWE/yr per unit input change)")
     ax.set_title("Global feature importance")
     ax.axvline(0, color="black", lw=0.7)
-    if show_total or show_components:
-        ax.legend(fontsize=7, loc="lower right")
+    ax.legend(fontsize=7, loc="lower right")
     fig.tight_layout()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.savefig(output_path, dpi=150)
