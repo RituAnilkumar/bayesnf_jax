@@ -1,0 +1,80 @@
+# Config for src/validate_regional.py
+#
+# Compares ensemble top_models_regional_mwe.csv outputs against WGMS/Dussaillant
+# regional validation data (MWE only — area varies in WGMS so Gt is skipped).
+#
+# Usage:
+#   python src/validate_regional.py
+#   python src/validate_regional.py --config conf/config_validate_regional.yaml
+#
+# ensemble_base_dir: parent directory containing per-region subdirectories.
+#   Expected layout: {ensemble_base_dir}/{region_subdir}/top_models_regional_mwe.csv
+#   where region_subdir is set per entry in region_map below.
+#
+# region_map: mapping from WGMS abbreviation to the region subdirectory name
+#   (relative to ensemble_base_dir) that holds top_models_regional_mwe.csv.
+#   Region 17 (Southern Andes, split into SA1/SA2) is excluded by default.
+#
+# validation_dir: directory containing {WGMS_ABBREV}.csv validation files.
+#
+# output_dir: where plots and metrics CSV are written.
+
+ensemble_base_dir: /path/to/ensemble/outputs
+
+validation_dir: validation_data/regional_wgms_duss
+
+output_dir: outputs/validation_regional
+
+# Map WGMS abbreviation → subdirectory under ensemble_base_dir
+# Set the subdirectory name to match your HPC output structure.
+region_map:
+  ALA: r01
+  WNA: r02
+  ACN: r03
+  ACS: r04
+  GRL: r05
+  ISL: r06
+  SJM: r07
+  SCA: r08
+  RUA: r09
+  ASN: r10
+  CEU: r11
+  CAU: r12
+  ASC: r13
+  ASW: r14
+  ASE: r15
+  TRP: r16
+  # r17 (SA1/SA2) excluded — region split does not align with RGI boundary
+  NZL: r18
+  ANT: r19
+
+# Full region names for plot titles
+region_names:
+  ALA: "Alaska (r01)"
+  WNA: "W. Canada & US (r02)"
+  ACN: "Arctic Canada N (r03)"
+  ACS: "Arctic Canada S (r04)"
+  GRL: "Greenland periph. (r05)"
+  ISL: "Iceland (r06)"
+  SJM: "Svalbard & Jan Mayen (r07)"
+  SCA: "Scandinavia (r08)"
+  RUA: "Russian Arctic (r09)"
+  ASN: "North Asia (r10)"
+  CEU: "Central Europe (r11)"
+  CAU: "Caucasus (r12)"
+  ASC: "Central Asia (r13)"
+  ASW: "S. Asia West (r14)"
+  ASE: "S. Asia East (r15)"
+  TRP: "Low Latitudes (r16)"
+  NZL: "New Zealand (r18)"
+  ANT: "Antarctic & Subantarctic (r19)"
+
+# Ensemble filename to load from each region subdirectory.
+# Change to 'ensemble_regional_mwe.csv' if using ensemble_uncertainty.py output.
+ensemble_filename: top_models_regional_mwe.csv
+
+# Sigma multiplier for uncertainty bands (e.g. 2 = 95% interval)
+sigma_mult: 2
+
+# Minimum number of overlapping years required to include a region
+min_overlap_years: 5
