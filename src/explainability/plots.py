@@ -200,13 +200,20 @@ def plot_dependence(
     feature_names: list[str],
     feature: str | int,
     output_path: str,
-    color_feature: str | int | None = None,
+    color_feature: str | int | None = "year",
     alpha: float = 0.4,
     s: float = 8,
 ) -> None:
     """
     Dependence scatter: attribution for one feature vs that feature's value.
-    Optionally colour points by a second feature.
+
+    x-axis: the raw feature value (e.g. summer temperature in °C).
+    y-axis: the IG attribution for that feature — how much it shifted the
+            predicted mass balance away from the baseline.
+    colour: by default, year (viridis sequential colormap) so you can see
+            whether the relationship between a feature and its effect on mass
+            balance has changed over time.  Pass color_feature=None to
+            auto-select the most correlated other feature instead (RdBu_r).
 
     Args:
         mean_attrs:     (N, n_features) mean attributions.
@@ -214,39 +221,53 @@ def plot_dependence(
         feature_names:  n_features strings.
         feature:        Feature to plot — name string or column index.
         output_path:    File path to save the figure.
-        color_feature:  Feature to use for colour encoding (name or index).
-                        Defaults to the feature with highest mean |attr|
-                        correlation with the target feature's attribution.
+        color_feature:  Feature to use for colour encoding (name, index, or None).
+                        Default "year" — colours by year using viridis so temporal
+                        drift is immediately visible.  Set to None to fall back to
+                        auto-selecting the most correlated other feature.
         alpha / s:      Scatter transparency and marker size.
     """
     n_features = len(feature_names)
-
     fi = feature_names.index(feature) if isinstance(feature, str) else int(feature)
 
-    # Auto-select colour feature if not given: feature with highest abs-corr
-    # between its values and the target attribution
+    # Resolve colour feature index
     if color_feature is None:
+        # Auto-select: feature with highest abs-corr with this attribution
         corrs = [
             abs(np.corrcoef(feature_values[:, j], mean_attrs[:, fi])[0, 1])
             for j in range(n_features) if j != fi
         ]
         ci = [j for j in range(n_features) if j != fi][int(np.argmax(corrs))]
+    elif isinstance(color_feature, str):
+        ci = feature_names.index(color_feature) if color_feature in feature_names else 0
     else:
-        ci = feature_names.index(color_feature) if isinstance(color_feature, str) else int(color_feature)
+        ci = int(color_feature)
+
+    color_name = feature_names[ci]
+    color_by_year = (color_name == "year")
 
     x = feature_values[:, fi]
     y = mean_attrs[:, fi]
     c = feature_values[:, ci]
 
-    # Normalise colour feature
-    c_norm = (c - c.min()) / (c.max() - c.min() + 1e-12)
+    if color_by_year:
+        cmap_use  = "viridis"
+        scatter_kw = dict(c=c, cmap=cmap_use, alpha=alpha, s=s, linewidths=0)
+        cbar_label = "Year"
+        cbar_ticks = None   # use matplotlib auto ticks for real year values
+    else:
+        c_norm = (c - c.min()) / (c.max() - c.min() + 1e-12)
+        cmap_use  = _BEESWARM_CMAP
+        scatter_kw = dict(c=c_norm, cmap=cmap_use, vmin=0, vmax=1,
+                          alpha=alpha, s=s, linewidths=0)
+        cbar_label = color_name
+        cbar_ticks = ([0.0, 0.5, 1.0], ["low", "mid", "high"])
 
     fig, ax = plt.subplots(figsize=(6, 5))
-    scatter = ax.scatter(x, y, c=c_norm, cmap=_BEESWARM_CMAP,
-                         alpha=alpha, s=s, linewidths=0, vmin=0, vmax=1)
+    scatter = ax.scatter(x, y, **scatter_kw)
     ax.axhline(0, color="black", lw=0.7, ls="--")
 
-    # Light LOWESS trend line via seaborn
+    # Light LOWESS trend line
     try:
         import statsmodels  # noqa: F401
         sns.regplot(x=x, y=y, ax=ax, scatter=False,
@@ -256,12 +277,13 @@ def plot_dependence(
 
     ax.set_xlabel(f"{feature_names[fi]} (feature value)")
     ax.set_ylabel(f"Attribution for {feature_names[fi]}")
-    ax.set_title(f"Dependence: {feature_names[fi]}")
+    ax.set_title(f"Dependence: {feature_names[fi]}  (colour = {color_name})")
 
     cbar = fig.colorbar(scatter, ax=ax, pad=0.02, fraction=0.04)
-    cbar.set_label(feature_names[ci], fontsize=9)
-    cbar.set_ticks([0.0, 0.5, 1.0])
-    cbar.set_ticklabels(["low", "mid", "high"])
+    cbar.set_label(cbar_label, fontsize=9)
+    if cbar_ticks is not None:
+        cbar.set_ticks(cbar_ticks[0])
+        cbar.set_ticklabels(cbar_ticks[1])
 
     fig.tight_layout()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -460,21 +482,6 @@ def plot_year_slice(
 # 7. Temporal importance — stacked area plots across years
 # ---------------------------------------------------------------------------
 
-def _temporal_arrays(mean_attrs, years, top_idx):
-    """Return (unique_years, yr_mean, yr_std) for the given feature indices."""
-    unique_years = np.sort(np.unique(years))
-    yr_mean = np.full((len(unique_years), len(top_idx)), np.nan)
-    yr_std  = np.full((len(unique_years), len(top_idx)), np.nan)
-    for yi, yr in enumerate(unique_years):
-        mask = years == yr
-        if mask.sum() == 0:
-            continue
-        sub = mean_attrs[mask][:, top_idx]          # signed, not abs
-        yr_mean[yi] = sub.mean(axis=0)
-        yr_std[yi]  = sub.std(axis=0)
-    return unique_years, yr_mean, yr_std
-
-
 def plot_temporal_importance(
     mean_attrs: np.ndarray,
     years: np.ndarray,
@@ -483,17 +490,16 @@ def plot_temporal_importance(
     top_k: int = 6,
 ) -> None:
     """
-    Two-panel stacked area chart of feature attribution over time.
+    Vertically stacked subplots — one panel per top-k feature, each with its
+    own y-scale.  Shows signed mean attribution ± 1σ across glaciers per year.
 
-    Top panel — stacked |attribution|: total bar height shows the overall
-    "attribution weight" per year; each colour band shows one feature's share.
-
-    Bottom panel — signed attribution: positive contributions stack above
-    zero, negative below, showing which features push mass balance up vs down
-    in each year.  Style used in climate attribution papers (e.g. Marzeion et al.).
+    Each panel:
+      - Shaded band = ±1σ of attribution across glaciers in that year
+      - Line = mean signed attribution
+      - Dashed zero line
 
     Args:
-        mean_attrs:    (N, n_features) attributions (signed, not absolute).
+        mean_attrs:    (N, n_features) attributions (signed).
         years:         (N,) year for each data point.
         feature_names: n_features strings.
         output_path:   File path to save the figure.
@@ -503,39 +509,47 @@ def plot_temporal_importance(
     top_idx   = np.argsort(global_importance)[::-1][:top_k]
     top_names = [feature_names[i] for i in top_idx]
 
-    unique_years, yr_mean, yr_std = _temporal_arrays(mean_attrs, years, top_idx)
+    unique_years = np.sort(np.unique(years))
+    yr_mean = np.full((len(unique_years), len(top_idx)), np.nan)
+    yr_std  = np.full((len(unique_years), len(top_idx)), np.nan)
+    for yi, yr in enumerate(unique_years):
+        mask = years == yr
+        if mask.sum() == 0:
+            continue
+        sub = mean_attrs[mask][:, top_idx]
+        yr_mean[yi] = sub.mean(axis=0)
+        yr_std[yi]  = sub.std(axis=0)
+
     valid = ~np.isnan(yr_mean[:, 0])
     yrs   = unique_years[valid]
 
     cmap   = cm.get_cmap("tab10")
-    colors = [cmap(j % 10) for j in range(len(top_idx))]
+    n      = len(top_idx)
+    fig, axes = plt.subplots(n, 1, figsize=(13, 2.2 * n + 0.8),
+                             sharex=True)
+    if n == 1:
+        axes = [axes]
 
-    fig, axes = plt.subplots(2, 1, figsize=(13, 8), sharex=True)
+    for j, (ax, fi, name) in enumerate(zip(axes, top_idx, top_names)):
+        color = cmap(j % 10)
+        mu = yr_mean[valid, j]
+        sd = yr_std[valid, j]
 
-    # ---- Top panel: stacked |attribution| ----
-    ax = axes[0]
-    stacks = np.abs(yr_mean[valid])          # (n_years, top_k)
-    ax.stackplot(yrs, stacks.T, labels=top_names, colors=colors, alpha=0.82)
-    ax.set_ylabel("|Attribution| (MWE/yr per unit input change)")
-    ax.set_title(f"Stacked feature importance magnitude  (top {top_k} features)")
-    ax.legend(fontsize=8, ncol=2, loc="upper left",
-              framealpha=0.9, edgecolor="grey")
-    ax.grid(axis="y", alpha=0.25)
+        ax.fill_between(yrs, mu - sd, mu + sd, color=color, alpha=0.20)
+        ax.plot(yrs, mu, color=color, lw=1.6)
+        ax.axhline(0, color="black", lw=0.7, ls="--")
+        ax.set_ylabel(name, fontsize=9)
+        ax.yaxis.set_major_formatter(
+            plt.matplotlib.ticker.FormatStrFormatter("%.3f")
+        )
+        ax.grid(axis="y", alpha=0.25)
+        ax.tick_params(labelsize=8)
 
-    # ---- Bottom panel: signed attribution ----
-    ax = axes[1]
-    pos = np.where(yr_mean[valid] > 0, yr_mean[valid], 0.0)   # (n_years, top_k)
-    neg = np.where(yr_mean[valid] < 0, yr_mean[valid], 0.0)
-
-    ax.stackplot(yrs, pos.T, colors=colors, alpha=0.82)
-    ax.stackplot(yrs, neg.T, colors=colors, alpha=0.82)
-    ax.axhline(0, color="black", lw=0.8, ls="--")
-    ax.set_xlabel("Year")
-    ax.set_ylabel("Signed attribution (MWE/yr per unit input change)")
-    ax.set_title("Signed feature attribution — positive (above) pushes mass balance up, "
-                 "negative (below) pulls it down")
-    ax.grid(axis="y", alpha=0.25)
-
+    axes[-1].set_xlabel("Year")
+    fig.suptitle(
+        f"Feature attribution over time  (top {top_k}, mean ± 1σ across glaciers)",
+        fontsize=11,
+    )
     fig.tight_layout()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.savefig(output_path, dpi=150)
