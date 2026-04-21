@@ -455,22 +455,23 @@ def main(cfg: DictConfig) -> None:
 
         model = _build_bnf_model(mc, majority_arch)
 
-        mean_attrs, std_attrs, sample_idx = compute_ensemble_attributions(
-            model=model,
-            all_params=all_params,
-            time_index=time_index,
-            covariates=covariates_sc,
-            rng=rng,
-            n_mc_per_model=int(ex.n_mc_per_model),
-            n_steps=int(ex.n_steps),
-            heteroscedastic=heteroscedastic,
-            baseline=ex.baseline,
-            target_scaler=target_scaler,
-            max_points=int(ex.max_points),
-            chunk_size=int(ex.chunk_size),
-            seed=int(ex.seed),
-            weights=ensemble_weights,
-        )
+        mean_attrs, std_attrs, std_epistemic, std_structural, sample_idx = \
+            compute_ensemble_attributions(
+                model=model,
+                all_params=all_params,
+                time_index=time_index,
+                covariates=covariates_sc,
+                rng=rng,
+                n_mc_per_model=int(ex.n_mc_per_model),
+                n_steps=int(ex.n_steps),
+                heteroscedastic=heteroscedastic,
+                baseline=ex.baseline,
+                target_scaler=target_scaler,
+                max_points=int(ex.max_points),
+                chunk_size=int(ex.chunk_size),
+                seed=int(ex.seed),
+                weights=ensemble_weights,
+            )
         label = f"{stage}_ensemble{len(all_params)}"
 
     # ------------------------------------------------------------------
@@ -511,6 +512,8 @@ def main(cfg: DictConfig) -> None:
             chunk_size=int(ex.chunk_size),
             seed=int(ex.seed),
         )
+        std_epistemic  = None
+        std_structural = None
         label = stage
 
     # ------------------------------------------------------------------
@@ -581,6 +584,8 @@ def main(cfg: DictConfig) -> None:
             chunk_size=int(ex.chunk_size),
             seed=int(ex.seed),
         )
+        std_epistemic  = None
+        std_structural = None
         label = stage
 
     # ------------------------------------------------------------------
@@ -609,12 +614,15 @@ def main(cfg: DictConfig) -> None:
     # ------------------------------------------------------------------
     # Plots — helper so we can call once for full set and once for masked
     # ------------------------------------------------------------------
-    def _generate_plots(attrs, std, fvals, fnames, suffix):
+    def _generate_plots(attrs, std, fvals, fnames, suffix,
+                        std_epi=None, std_struct=None):
         plot_importance_bar(
             attrs, fnames,
             output_path=os.path.join(out_dir, f"importance_bar_{label}{suffix}.png"),
             std_attrs=std,
             top_k=ex.get("importance_top_k") or None,
+            std_epistemic_attrs=std_epi,
+            std_structural_attrs=std_struct,
         )
         plot_beeswarm(
             attrs, fvals, fnames,
@@ -629,7 +637,8 @@ def main(cfg: DictConfig) -> None:
         )
 
     # Full plots (all features)
-    _generate_plots(mean_attrs, std_attrs, feature_values, feature_names, suffix="")
+    _generate_plots(mean_attrs, std_attrs, feature_values, feature_names, suffix="",
+                    std_epi=std_epistemic, std_struct=std_structural)
 
     # Masked plots — exclude noisy/dominant features (year, coordinates, etc.)
     exclude = list(ex.get("exclude_features") or [])
@@ -644,6 +653,8 @@ def main(cfg: DictConfig) -> None:
                 feature_values[:, keep_idx],
                 [feature_names[i] for i in keep_idx],
                 suffix="_masked",
+                std_epi=std_epistemic[:, keep_idx] if std_epistemic is not None else None,
+                std_struct=std_structural[:, keep_idx] if std_structural is not None else None,
             )
 
     # Waterfall for a specific glacier-year

@@ -37,51 +37,66 @@ def plot_importance_bar(
     output_path: str,
     std_attrs: np.ndarray | None = None,
     top_k: int | None = None,
+    std_epistemic_attrs: np.ndarray | None = None,
+    std_structural_attrs: np.ndarray | None = None,
 ) -> None:
     """
     Horizontal bar chart of mean |attribution| per feature, sorted descending.
 
     Args:
-        mean_attrs:    (N, n_features) mean attributions.
-        feature_names: n_features feature name strings.
-        output_path:   File path to save the figure.
-        std_attrs:     (N, n_features) std of attributions; if provided, error
-                       bars show ± std of |attr| across data points.
-        top_k:         Only show top_k features (default: all).
+        mean_attrs:           (N, n_features) mean attributions.
+        feature_names:        n_features feature name strings.
+        output_path:          File path to save the figure.
+        std_attrs:            (N, n_features) total std; shown as grey error bars.
+        top_k:                Only show top_k features (default: all).
+        std_epistemic_attrs:  (N, n_features) epistemic (VI) std; orange whiskers.
+        std_structural_attrs: (N, n_features) structural (between-model) std; purple whiskers.
     """
     importance = np.abs(mean_attrs).mean(axis=0)            # (n_features,)
-    err        = np.abs(mean_attrs).std(axis=0)             # (n_features,)
 
     order = np.argsort(importance)[::-1]
     if top_k is not None:
         order = order[:top_k]
 
-    imp_sorted  = importance[order]
-    err_sorted  = err[order] if std_attrs is not None else None
+    imp_sorted   = importance[order]
     names_sorted = [feature_names[i] for i in order]
+
+    show_total      = std_attrs is not None
+    show_components = std_epistemic_attrs is not None and std_structural_attrs is not None
 
     fig, ax = plt.subplots(figsize=(8, max(3, len(order) * 0.35 + 1)))
     y_pos = np.arange(len(order))
 
-    # xerr must be a 2-row array [left_err, right_err] to avoid bars going negative
-    if err_sorted is not None:
-        xerr_clipped = np.array([np.minimum(err_sorted, imp_sorted), err_sorted])
-    else:
-        xerr_clipped = None
+    ax.barh(y_pos, imp_sorted, color=_POS_COLOR, alpha=0.85, height=0.65)
 
-    bars = ax.barh(
-        y_pos, imp_sorted,
-        xerr=xerr_clipped,
-        color=_POS_COLOR, alpha=0.85,
-        ecolor="grey", capsize=3,
-        height=0.65,
-    )
+    def _xerr_clipped(std_2d):
+        err = np.abs(std_2d).mean(axis=0)[order]
+        return np.array([np.minimum(err, imp_sorted), err])
+
+    if show_total:
+        ax.errorbar(imp_sorted, y_pos,
+                    xerr=_xerr_clipped(std_attrs),
+                    fmt="none", ecolor="grey", capsize=3, lw=1.2,
+                    label="±1σ total")
+
+    if show_components:
+        ax.errorbar(imp_sorted, y_pos + 0.18,
+                    xerr=_xerr_clipped(std_epistemic_attrs),
+                    fmt="none", ecolor="darkorange", capsize=2, lw=1.0,
+                    label="±1σ epistemic (VI)")
+        ax.errorbar(imp_sorted, y_pos - 0.18,
+                    xerr=_xerr_clipped(std_structural_attrs),
+                    fmt="none", ecolor="mediumorchid", capsize=2, lw=1.0,
+                    label="±1σ structural (ensemble)")
+
     ax.set_yticks(y_pos)
     ax.set_yticklabels(names_sorted)
     ax.invert_yaxis()
     ax.set_xlabel("Mean |Attribution| (MWE/yr per unit input change)")
     ax.set_title("Global feature importance")
     ax.axvline(0, color="black", lw=0.7)
+    if show_total or show_components:
+        ax.legend(fontsize=7, loc="lower right")
     fig.tight_layout()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.savefig(output_path, dpi=150)

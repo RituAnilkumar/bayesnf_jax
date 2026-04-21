@@ -266,7 +266,10 @@ def compute_ensemble_attributions(
 
     if target_scaler is not None:
         _, t_std = target_scaler
-        mean_attrs = mean_attrs * float(t_std)
-        std_attrs  = std_attrs  * float(t_std)
+        scale = float(t_std)
+        mean_attrs     = mean_attrs     * scale
+        std_attrs      = std_attrs      * scale
+        std_epistemic  = std_epistemic  * scale
+        std_structural = std_structural * scale
 
-    return mean_attrs, std_attrs, sample_idx
+    return mean_attrs, std_attrs, std_epistemic, std_structural, sample_idx
