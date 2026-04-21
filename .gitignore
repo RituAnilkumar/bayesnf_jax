@@ -42,6 +42,10 @@ data_for_model/oggm/*/for_preds.csv
 data_for_model/oggm/*/full.csv
 data_for_model/hugonnet/*.csv
 data_for_model/glambie/*.csv
+validation_data/
+validation_data/*
+validation_data/*/*
+validation_data/*/*/*
 
 # SLURM logs
 out_files/
