@@ -216,8 +216,8 @@ def _compute_metrics(
     s_sat  = merged["annual_err"].values
     diff   = pred - obs
     within = int(np.sum(
-        (pred - sigma_mult * s_ens <= obs + sigma_mult * s_sat) &
-        (obs  - sigma_mult * s_sat <= pred + sigma_mult * s_ens)
+        (pred - sigma_mult * s_ens <= obs + s_sat) &
+        (obs  - s_sat             <= pred + sigma_mult * s_ens)
     ))
     n = len(diff)
     return {
@@ -262,10 +262,10 @@ def plot_cumulative(
         ax.errorbar(
             sat["frac_year"].values,
             sat["mass_changes_aligned"].values,
-            yerr=sigma_mult * sat["mass_errors"].values,
+            yerr=sat["mass_errors"].values,
             fmt=sty["marker"], color=sty["color"], ms=3.5, lw=0.8,
             capsize=2.0, alpha=0.75, zorder=sty["zorder"],
-            label=f"{name} ±{sigma_mult}σ",
+            label=f"{name} ±2σ (reported)",
         )
 
     ax.axhline(0, color="black", lw=0.6, ls="--")
@@ -315,10 +315,10 @@ def plot_annual(
         ax.errorbar(
             valid["year"].values,
             valid["annual_gt"].values,
-            yerr=sigma_mult * valid["annual_err"].values,
+            yerr=valid["annual_err"].values,
             fmt=sty["marker"], color=sty["color"], ms=4, lw=0.8,
             capsize=2.5, alpha=0.8, zorder=sty["zorder"],
-            label=f"{name} ±{sigma_mult}σ (annual avg)",
+            label=f"{name} ±2σ reported (annual avg)",
         )
 
     ax.axhline(0, color="black", lw=0.6, ls="--")
