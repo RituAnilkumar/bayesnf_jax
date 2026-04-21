@@ -17,7 +17,7 @@ defaults:
 # and ignored entirely in run_dir/ensemble_dir mode (config is read from .hydra/).
 model:
   output_dir: .
-  reg_subdir: _explain
+  reg_subdir: _explain_best
   input_type: run
   temporal_avg_path: null
   glambie_path: null
@@ -97,6 +97,6 @@ hydra:
   run:
     # Fixed base dir — output subdir is determined at runtime from the run/ensemble path.
     # This avoids interpolating ${model.reg_subdir} which would fail when model= is omitted.
-    dir: outputs/explain
+    dir: outputs/explain_best
   job:
     chdir: true
