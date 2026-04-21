@@ -51,7 +51,17 @@ def _load_ensemble_mwe(region_dir: Path, filename: str) -> pd.DataFrame | None:
         warnings.warn(f"Ensemble file not found: {path}")
         return None
     df = pd.read_csv(path)
-    required = {"year", "median_mwe", "std_total"}
+    # Normalise column names: ensemble_ep_alea.py outputs total_std / epistemic_std /
+    # structural_std; older ensemble_uncertainty.py used std_total / std_epistemic /
+    # std_structural. Rename to the *_std convention so the rest of the script is uniform.
+    rename = {
+        "std_total":      "total_std",
+        "std_epistemic":  "epistemic_std",
+        "std_structural": "structural_std",
+        "std_aleatoric":  "aleatoric_std",
+    }
+    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    required = {"year", "median_mwe", "total_std"}
     missing = required - set(df.columns)
     if missing:
         warnings.warn(f"Ensemble file {path} missing columns: {missing}")
@@ -115,7 +125,7 @@ def _plot_timeseries(
 ) -> None:
     years = merged["year"].values
     mu    = merged["median_mwe"].values
-    s_tot = merged["std_total"].values
+    s_tot = merged["total_std"].values
 
     fig, ax = plt.subplots(figsize=(11, 4))
 
@@ -129,8 +139,8 @@ def _plot_timeseries(
     )
 
     # Structural uncertainty band (if present)
-    if "std_structural" in merged.columns:
-        s_struct = merged["std_structural"].values
+    if "structural_std" in merged.columns:
+        s_struct = merged["structural_std"].values
         ax.fill_between(
             years,
             mu - sigma_mult * s_struct,
@@ -140,8 +150,8 @@ def _plot_timeseries(
         )
 
     # Epistemic uncertainty band (if present)
-    if "std_epistemic" in merged.columns:
-        s_epi = merged["std_epistemic"].values
+    if "epistemic_std" in merged.columns:
+        s_epi = merged["epistemic_std"].values
         ax.fill_between(
             years,
             mu - sigma_mult * s_epi,
@@ -203,15 +213,15 @@ def _plot_multipanel(
         name   = region_names.get(abbrev, abbrev)
         years  = merged["year"].values
         mu     = merged["median_mwe"].values
-        s_tot  = merged["std_total"].values
+        s_tot  = merged["total_std"].values
 
         ax.fill_between(years,
                         mu - sigma_mult * s_tot, mu + sigma_mult * s_tot,
                         alpha=0.20, color="steelblue")
-        if "std_structural" in merged.columns:
+        if "structural_std" in merged.columns:
             ax.fill_between(years,
-                            mu - sigma_mult * merged["std_structural"].values,
-                            mu + sigma_mult * merged["std_structural"].values,
+                            mu - sigma_mult * merged["structural_std"].values,
+                            mu + sigma_mult * merged["structural_std"].values,
                             alpha=0.25, color="mediumorchid")
         ax.plot(years, mu, color="steelblue", lw=1.4)
         ax.errorbar(merged["year"].values, merged["mwe"].values,
@@ -249,32 +259,72 @@ def _plot_multipanel(
 def _plot_scatter(
     region_data: dict[str, pd.DataFrame],
     region_names: dict[str, str],
+    sigma_mult: float,
     output_path: Path,
 ) -> None:
+    """
+    Scatter plot of ensemble median vs. WGMS MWE.
+
+    - Shaded band around the 1:1 line shows ±sigma_mult × median(mwe_sigma)
+      across all points — represents the zone where a prediction is within the
+      typical WGMS observational uncertainty.
+    - Vertical error bars on each point show ±sigma_mult × ensemble total_std.
+    - Points are coloured by region.
+    """
     cmap   = plt.get_cmap("tab20")
     keys   = sorted(region_data.keys())
     colors = {k: cmap(i / max(len(keys) - 1, 1)) for i, k in enumerate(keys)}
 
-    fig, ax = plt.subplots(figsize=(7, 6))
+    # Collect all values to set axis limits
+    all_obs, all_pred, all_wgms_sigma = [], [], []
+    for merged in region_data.values():
+        all_obs.extend(merged["mwe"].values.tolist())
+        all_pred.extend(merged["median_mwe"].values.tolist())
+        all_wgms_sigma.extend(merged["mwe_sigma"].values.tolist())
 
-    all_vals = []
+    lo  = min(np.nanmin(all_obs), np.nanmin(all_pred))
+    hi  = max(np.nanmax(all_obs), np.nanmax(all_pred))
+    pad = (hi - lo) * 0.06
+    lo -= pad; hi += pad
+
+    # WGMS uncertainty band around 1:1: use median sigma across all matched points
+    typical_wgms_sigma = float(np.nanmedian(all_wgms_sigma))
+    diag = np.linspace(lo, hi, 300)
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+
+    ax.fill_between(
+        diag,
+        diag - sigma_mult * typical_wgms_sigma,
+        diag + sigma_mult * typical_wgms_sigma,
+        color="lightgray", alpha=0.55, zorder=1,
+        label=f"±{sigma_mult}σ WGMS obs. uncert. (median σ={typical_wgms_sigma:.3f})",
+    )
+    ax.plot(diag, diag, "k--", lw=1.0, zorder=2, label="1:1 line")
+
     for abbrev in keys:
-        merged = region_data[abbrev]
-        pred   = merged["median_mwe"].values
-        obs    = merged["mwe"].values
-        all_vals.extend(pred.tolist() + obs.tolist())
-        ax.scatter(obs, pred, s=12, alpha=0.6, color=colors[abbrev],
-                   label=region_names.get(abbrev, abbrev), zorder=3)
+        merged   = region_data[abbrev]
+        obs      = merged["mwe"].values
+        pred     = merged["median_mwe"].values
+        ens_err  = sigma_mult * merged["total_std"].values
+        ax.errorbar(
+            obs, pred,
+            yerr=ens_err,
+            fmt="o", ms=4, lw=0.7, capsize=2.5, alpha=0.75,
+            color=colors[abbrev], ecolor=colors[abbrev],
+            label=region_names.get(abbrev, abbrev),
+            zorder=3,
+        )
 
-    lo, hi = np.nanmin(all_vals), np.nanmax(all_vals)
-    pad = (hi - lo) * 0.05
-    ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad],
-            "k--", lw=1.0, label="1:1 line")
-    ax.set_xlim(lo - pad, hi + pad)
-    ax.set_ylim(lo - pad, hi + pad)
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
     ax.set_xlabel("WGMS/Dussaillant MWE/yr (m w.e.)")
     ax.set_ylabel("Ensemble median MWE/yr (m w.e.)")
-    ax.set_title("Annual MWE: ensemble vs. WGMS/Dussaillant\n(all matched regions)")
+    ax.set_title(
+        f"Annual MWE: ensemble vs. WGMS/Dussaillant (all matched regions)\n"
+        f"Error bars: ±{sigma_mult}σ ensemble total  |  "
+        f"Grey band: ±{sigma_mult}σ WGMS obs. uncertainty"
+    )
     ax.legend(fontsize=6, ncol=2, loc="upper left")
     ax.set_aspect("equal", adjustable="box")
     fig.tight_layout()
@@ -396,7 +446,7 @@ def run_validation(cfg: dict) -> None:
                      output_dir / "summary_multipanel.png")
 
     print("  Generating scatter plot...")
-    _plot_scatter(region_data, region_names, output_dir / "scatter_all_regions.png")
+    _plot_scatter(region_data, region_names, sigma_mult, output_dir / "scatter_all_regions.png")
 
     print("  Generating residual time series...")
     _plot_residuals(region_data, region_names, output_dir / "residuals_all_regions.png")
