@@ -104,8 +104,13 @@ def _compute_metrics(merged: pd.DataFrame, sigma_mult: float) -> dict:
     s_tot   = merged["total_std"].values
     diff    = pred - obs
     n       = len(diff)
-    within  = np.sum((obs >= pred - sigma_mult * s_tot) &
-                     (obs <= pred + sigma_mult * s_tot))
+    # Overlap: ensemble band [pred ± σ_mult·s_tot] intersects WGMS band [obs ± σ_mult·s_wgms]
+    # Two intervals [a,b] and [c,d] overlap iff a <= d and c <= b.
+    s_wgms  = merged["mwe_sigma"].values
+    within  = np.sum(
+        (pred - sigma_mult * s_tot  <= obs + sigma_mult * s_wgms) &
+        (obs  - sigma_mult * s_wgms <= pred + sigma_mult * s_tot)
+    )
     return {
         "n_years":      n,
         "bias":         float(np.mean(diff)),
