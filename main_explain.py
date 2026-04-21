@@ -61,6 +61,8 @@ from src.explainability import (
     plot_beeswarm,
     plot_dependence_grid,
     plot_waterfall,
+    plot_year_slice,
+    plot_temporal_importance,
 )
 
 
@@ -686,6 +688,50 @@ def main(cfg: DictConfig) -> None:
         else:
             print(f"WARNING: {wf_rgi} year={wf_year} not found in sampled data — "
                   "try increasing explain.max_points or choosing a different example.")
+
+    # ------------------------------------------------------------------
+    # Temporal importance evolution (always generated)
+    # ------------------------------------------------------------------
+    plot_temporal_importance(
+        mean_attrs, years[sample_idx], feature_names,
+        output_path=os.path.join(out_dir, f"temporal_importance_{label}.png"),
+        top_k=int(ex.dependence_top_k),
+    )
+    if exclude and keep_idx:
+        plot_temporal_importance(
+            mean_attrs[:, keep_idx],
+            years[sample_idx],
+            [feature_names[i] for i in keep_idx],
+            output_path=os.path.join(out_dir, f"temporal_importance_{label}_masked.png"),
+            top_k=int(ex.dependence_top_k),
+        )
+
+    # ------------------------------------------------------------------
+    # Year-slice importance bars
+    # ------------------------------------------------------------------
+    slice_years = list(ex.get("year_slice_years") or [])
+    for yr in slice_years:
+        yr = int(yr)
+        suffix = f"_{yr}"
+        plot_year_slice(
+            mean_attrs, years[sample_idx], feature_names,
+            target_year=yr,
+            output_path=os.path.join(out_dir, f"importance_year{suffix}_{label}.png"),
+            std_epistemic_attrs=std_epistemic,
+            std_structural_attrs=std_structural,
+            top_k=ex.get("importance_top_k") or None,
+        )
+        if exclude and keep_idx:
+            plot_year_slice(
+                mean_attrs[:, keep_idx],
+                years[sample_idx],
+                [feature_names[i] for i in keep_idx],
+                target_year=yr,
+                output_path=os.path.join(out_dir, f"importance_year{suffix}_{label}_masked.png"),
+                std_epistemic_attrs=std_epistemic[:, keep_idx] if std_epistemic is not None else None,
+                std_structural_attrs=std_structural[:, keep_idx] if std_structural is not None else None,
+                top_k=ex.get("importance_top_k") or None,
+            )
 
     print("[explain] Done.")
 

@@ -5,6 +5,8 @@ from src.explainability.plots import (
     plot_dependence,
     plot_dependence_grid,
     plot_waterfall,
+    plot_year_slice,
+    plot_temporal_importance,
 )
 
 __all__ = [
@@ -15,4 +17,6 @@ __all__ = [
     "plot_dependence",
     "plot_dependence_grid",
     "plot_waterfall",
+    "plot_year_slice",
+    "plot_temporal_importance",
 ]

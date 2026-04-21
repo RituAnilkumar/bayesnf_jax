@@ -89,6 +89,9 @@ explain:
     - CenLat
     - CenLon
 
+  # --- Year-specific importance bars (temporal evolution always generated) ---
+  year_slice_years: null   # e.g. [2000, 2010, 2020] — one bar chart per year
+
   # --- Waterfall: pick one example glacier-year (leave null to skip) ---
   waterfall_rgi_id: null   # e.g. "RGI60-01.00001"
   waterfall_year: null     # e.g. 2010

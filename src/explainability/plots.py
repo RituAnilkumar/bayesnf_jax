@@ -366,3 +366,157 @@ def plot_dependence_grid(
     for fi in top_features:
         fname = os.path.join(output_dir, f"dependence_{feature_names[fi]}.png")
         plot_dependence(mean_attrs, feature_values, feature_names, fi, fname)
+
+
+# ---------------------------------------------------------------------------
+# 6. Year slice — importance bar for a single year
+# ---------------------------------------------------------------------------
+
+def plot_year_slice(
+    mean_attrs: np.ndarray,
+    years: np.ndarray,
+    feature_names: list[str],
+    target_year: int,
+    output_path: str,
+    std_epistemic_attrs: np.ndarray | None = None,
+    std_structural_attrs: np.ndarray | None = None,
+    top_k: int | None = None,
+) -> None:
+    """
+    Importance bar chart for a single year: mean |attribution| across all
+    glaciers in target_year, with cross-glacier std (black) and optional
+    model uncertainty whiskers (grey/orange/purple).
+
+    Args:
+        mean_attrs:           (N, n_features) attributions for all points.
+        years:                (N,) year for each data point.
+        feature_names:        n_features strings.
+        target_year:          The year to slice.
+        output_path:          File path to save the figure.
+        std_epistemic_attrs:  (N, n_features) epistemic std (ensemble mode).
+        std_structural_attrs: (N, n_features) structural std (ensemble mode).
+        top_k:                Only show top_k features (default: all).
+    """
+    mask = years == target_year
+    if mask.sum() == 0:
+        print(f"WARNING: No data points found for year {target_year} — skipping year slice.")
+        return
+
+    attrs_yr = mean_attrs[mask]      # (n_glaciers_yr, F)
+    epi_yr   = std_epistemic_attrs[mask]  if std_epistemic_attrs  is not None else None
+    struct_yr= std_structural_attrs[mask] if std_structural_attrs is not None else None
+
+    importance = np.abs(attrs_yr).mean(axis=0)
+    glacier_std = np.abs(attrs_yr).std(axis=0)
+
+    order = np.argsort(importance)[::-1]
+    if top_k is not None:
+        order = order[:top_k]
+
+    imp_sorted   = importance[order]
+    gs_sorted    = glacier_std[order]
+    names_sorted = [feature_names[i] for i in order]
+
+    show_components = epi_yr is not None and struct_yr is not None
+
+    fig, ax = plt.subplots(figsize=(8, max(3, len(order) * 0.35 + 1)))
+    y_pos = np.arange(len(order))
+
+    ax.barh(y_pos, imp_sorted, color=_POS_COLOR, alpha=0.85, height=0.65)
+
+    def _clip(err):
+        return np.array([np.minimum(err, imp_sorted), err])
+
+    ax.errorbar(imp_sorted, y_pos + (0.24 if show_components else 0),
+                xerr=_clip(gs_sorted),
+                fmt="none", ecolor="black", capsize=2, lw=1.0,
+                label="±1σ across glaciers")
+
+    if show_components:
+        ax.errorbar(imp_sorted, y_pos + 0.08,
+                    xerr=_clip(np.abs(epi_yr).mean(axis=0)[order]),
+                    fmt="none", ecolor="darkorange", capsize=2, lw=1.0,
+                    label="±1σ epistemic (VI)")
+        ax.errorbar(imp_sorted, y_pos - 0.08,
+                    xerr=_clip(np.abs(struct_yr).mean(axis=0)[order]),
+                    fmt="none", ecolor="mediumorchid", capsize=2, lw=1.0,
+                    label="±1σ structural (ensemble)")
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(names_sorted)
+    ax.invert_yaxis()
+    ax.set_xlabel("Mean |Attribution| (MWE/yr per unit input change)")
+    ax.set_title(f"Feature importance — year {target_year}  (n={mask.sum()} glaciers)")
+    ax.axvline(0, color="black", lw=0.7)
+    ax.legend(fontsize=7, loc="lower right")
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved {output_path}")
+
+
+# ---------------------------------------------------------------------------
+# 7. Temporal importance evolution — how importance changes across years
+# ---------------------------------------------------------------------------
+
+def plot_temporal_importance(
+    mean_attrs: np.ndarray,
+    years: np.ndarray,
+    feature_names: list[str],
+    output_path: str,
+    top_k: int = 6,
+) -> None:
+    """
+    Line plot showing how the mean |attribution| of the top-k features
+    evolves across years.  Each line is one feature; shading = ±1σ across
+    glaciers in that year.
+
+    Args:
+        mean_attrs:    (N, n_features) attributions for all points.
+        years:         (N,) year for each data point.
+        feature_names: n_features strings.
+        output_path:   File path to save the figure.
+        top_k:         Number of top features to show (ranked by global mean |attr|).
+    """
+    global_importance = np.abs(mean_attrs).mean(axis=0)
+    top_idx = np.argsort(global_importance)[::-1][:top_k]
+
+    unique_years = np.sort(np.unique(years))
+
+    # Per year, per feature: mean and std of |attribution| across glaciers
+    yr_mean = np.full((len(unique_years), len(top_idx)), np.nan)
+    yr_std  = np.full((len(unique_years), len(top_idx)), np.nan)
+    for yi, yr in enumerate(unique_years):
+        mask = years == yr
+        if mask.sum() == 0:
+            continue
+        sub = np.abs(mean_attrs[mask])[:, top_idx]
+        yr_mean[yi] = sub.mean(axis=0)
+        yr_std[yi]  = sub.std(axis=0)
+
+    cmap   = cm.get_cmap("tab10")
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    for j, fi in enumerate(top_idx):
+        color = cmap(j % 10)
+        mu  = yr_mean[:, j]
+        sd  = yr_std[:, j]
+        valid = ~np.isnan(mu)
+        ax.plot(unique_years[valid], mu[valid], color=color, lw=1.6,
+                label=feature_names[fi])
+        ax.fill_between(unique_years[valid],
+                        mu[valid] - sd[valid],
+                        mu[valid] + sd[valid],
+                        color=color, alpha=0.12)
+
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Mean |Attribution| (MWE/yr per unit input change)")
+    ax.set_title(f"Temporal feature importance evolution  (top {top_k} features)")
+    ax.legend(fontsize=8, ncol=2, loc="upper left")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved {output_path}")
