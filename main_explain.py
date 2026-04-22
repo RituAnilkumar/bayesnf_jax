@@ -263,7 +263,7 @@ def _find_run_subdirs(ensemble_dir: str, stage: str) -> list[str]:
 # Model + data setup from a resolved config
 # ---------------------------------------------------------------------------
 
-def _build_model_and_data(run_cfg: DictConfig, orig_cwd: str):
+def _build_model_and_data(run_cfg: DictConfig, orig_cwd: str, yr_max_override=None):
     """
     Given a (Hydra-saved) model config, build the BNF model and load data arrays.
 
@@ -287,9 +287,9 @@ def _build_model_and_data(run_cfg: DictConfig, orig_cwd: str):
 
     features_df = load_features(feat_file, feature_cols=ft_cols)
 
-    # Restrict to training year window to avoid far-future extrapolation artefacts
     yr_min = int(mc.get("pretrain_year_min", 2000))
-    yr_max = int(mc.get("pretrain_year_max", 2020))
+    yr_max = int(yr_max_override) if yr_max_override is not None \
+             else int(mc.get("pretrain_year_max", 2020))
     features_df = features_df[features_df["year"].between(yr_min, yr_max)].copy()
 
     time_index, covariates, rgi_ids, cols_used = build_model_inputs(features_df, ft_cols)
@@ -370,8 +370,9 @@ def main(cfg: DictConfig) -> None:
 
         # Architecture + data config from the first subdir
         run_cfg = _load_run_cfg(run_subdirs[0])
+        yr_max_ov = ex.get("explain_year_max") or None
         mc, time_index, covariates, rgi_ids, years, cols_used = \
-            _build_model_and_data(run_cfg, orig)
+            _build_model_and_data(run_cfg, orig, yr_max_override=yr_max_ov)
 
         # Scalers from the first subdir (all members trained with the same scaler)
         scaler         = _load_scaler(run_subdirs[0])
@@ -482,8 +483,9 @@ def main(cfg: DictConfig) -> None:
     elif run_dir:
         print(f"[explain] Mode: run_dir  ({run_dir})")
         run_cfg = _load_run_cfg(run_dir)
+        yr_max_ov = ex.get("explain_year_max") or None
         mc, time_index, covariates, rgi_ids, years, cols_used = \
-            _build_model_and_data(run_cfg, orig)
+            _build_model_and_data(run_cfg, orig, yr_max_override=yr_max_ov)
 
         scaler        = _load_scaler(run_dir)
         target_scaler = _load_target_scaler(run_dir)
@@ -555,7 +557,8 @@ def main(cfg: DictConfig) -> None:
             os.path.join(base, f"main_features_{region}.csv"), feature_cols=ft_cols
         )
         yr_min = int(mc.get("pretrain_year_min", 2000))
-        yr_max = int(mc.get("pretrain_year_max", 2020))
+        yr_max_ov = ex.get("explain_year_max") or None
+        yr_max = int(yr_max_ov) if yr_max_ov is not None else int(mc.get("pretrain_year_max", 2020))
         features_df = features_df[features_df["year"].between(yr_min, yr_max)].copy()
 
         time_index, covariates, rgi_ids, cols_used = build_model_inputs(features_df, ft_cols)
