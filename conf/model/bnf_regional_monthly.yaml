@@ -17,9 +17,16 @@ beta_anneal_epochs: 400       # 20% of model_nepochs
 seed: 0
 oggm_loss_fn: huber           # 'huber' or 'rmse'
 huber_delta: 0.5              # Huber transition point in scaled target units (only used if oggm_loss_fn=huber)
-glambie_weight: 1.0           # Relative weight of GLaMBIE loss vs Hugonnet temporal-avg loss.
-pretrain_year_min: 2000       # Only use OGGM rows with year >= this value
-pretrain_year_max: 2020       # Only use OGGM rows with year <= this value
+glambie_weight: 2.0           # Relative weight of GLaMBIE loss vs Hugonnet temporal-avg loss.
+                              # Both losses are per-observation normalised so 1.0 = equal weight.
+                              # Reduce below 1.0 if GLaMBIE over-fits; increase to prioritise regional fit.
+kl_weight: 0.5                # Relative weight of KL term (OGGM prior strength).
+                              # Values < 1.0 weaken the OGGM prior, letting Hugonnet/GLaMBIE
+                              # dominate more. Default 1.0 = standard Bayesian continual learning.
+use_time_encoding: true       # If false, Fourier time features are excluded (purely spatial model).
+                              # Set to false to ablate temporal structure.
+pretrain_year_min: 1940       # Only use OGGM rows with year >= this value
+pretrain_year_max: 2025       # Only use OGGM rows with year <= this value
 early_stopping_patience: 20  # stop after this many eval intervals with no val improvement (0 = disabled)
 early_stopping_interval: 100 # evaluate val set every N epochs
 

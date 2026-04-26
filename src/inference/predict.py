@@ -645,6 +645,7 @@ def run_predict(cfg: DictConfig) -> None:
         n_fourier=cfg.model.n_fourier,
         heteroscedastic=heteroscedastic,
         sigma_floor=float(cfg.model.get("sigma_floor", 0.05)),
+        use_time_encoding=bool(cfg.model.get("use_time_encoding", True)),
     )
     n_samples = cfg.model.model_nensemble
     print(f"Running {n_samples} MC samples over {len(pred_grid)} rows "

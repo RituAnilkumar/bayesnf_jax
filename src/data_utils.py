@@ -128,6 +128,13 @@ def load_features(
     """
     Load main features, drop GLIMSId, and compute time_index.
 
+    Preprocessing applied before returning:
+      - Area: replaced with log1p(Area). Area is log-normally distributed
+        (spans ~4 orders of magnitude); StandardScaler normalises scale but not
+        shape. log1p gives an approximately Gaussian distribution so the scaler
+        and the network both see a well-behaved feature. log1p is used (not log)
+        so that Area=0 is handled safely.
+
     Input columns: rgi_id, CenLat, CenLon, year, <climate cols>,
                    Aspect, Zmax, GLIMSId, Zmed, Slope, Zmin, Area
     Returns columns: rgi_id, year, time_index, <feature_cols present in file>
@@ -135,6 +142,8 @@ def load_features(
     df = pd.read_csv(path)
     df = df.drop(columns=["GLIMSId"], errors="ignore")
     df["time_index"] = df["year"] - T_MIN
+    if "Area" in df.columns:
+        df["Area"] = np.log1p(df["Area"])
     cols_present = [c for c in feature_cols if c in df.columns]
     return df[["rgi_id", "year", "time_index"] + cols_present]
 

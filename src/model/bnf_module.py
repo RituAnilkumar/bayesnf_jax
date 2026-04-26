@@ -181,23 +181,28 @@ class BayesianNeuralField(nn.Module):
     aleatoric noise standard deviation.
 
     Args:
-        hidden_sizes:    Sequence of hidden layer widths, e.g. (64, 64)
-        n_fourier:       Number of Fourier time features (output: 2*n_fourier)
-        fourier_seed:    RNG seed for fixed frequency matrix
-        heteroscedastic: If True, output head emits (mu, sigma) pairs
-        sigma_floor:     Minimum aleatoric sigma (prevents collapse; scaled units)
+        hidden_sizes:      Sequence of hidden layer widths, e.g. (64, 64)
+        n_fourier:         Number of Fourier time features (output: 2*n_fourier)
+        fourier_seed:      RNG seed for fixed frequency matrix
+        heteroscedastic:   If True, output head emits (mu, sigma) pairs
+        sigma_floor:       Minimum aleatoric sigma (prevents collapse; scaled units)
+        use_time_encoding: If False, the Fourier time features are excluded from the
+                           MLP input, giving a purely spatial/climate model. Useful
+                           as an ablation. Default True.
     """
     hidden_sizes: Sequence[int] = (64, 64)
     n_fourier: int = 8
     fourier_seed: int = 42
     heteroscedastic: bool = False
     sigma_floor: float = 0.05
+    use_time_encoding: bool = True
 
     def setup(self):
-        self.time_encoder = FourierTimeEncoder(
-            n_fourier=self.n_fourier,
-            seed=self.fourier_seed
-        )
+        if self.use_time_encoding:
+            self.time_encoder = FourierTimeEncoder(
+                n_fourier=self.n_fourier,
+                seed=self.fourier_seed,
+            )
         # nn.remat applies gradient checkpointing at the hidden-layer level:
         # activations are recomputed during backprop instead of stored, reducing
         # peak memory from O(n_layers × batch) to O(batch).  Applied here at the
@@ -225,8 +230,11 @@ class BayesianNeuralField(nn.Module):
             heteroscedastic=False: shape (batch,)
             heteroscedastic=True:  tuple (mu, sigma), each shape (batch,)
         """
-        time_features = self.time_encoder(time_index)  # (batch, 2*n_fourier)
-        x = jnp.concatenate([time_features, covariates], axis=-1)
+        if self.use_time_encoding:
+            time_features = self.time_encoder(time_index)  # (batch, 2*n_fourier)
+            x = jnp.concatenate([time_features, covariates], axis=-1)
+        else:
+            x = covariates
 
         for layer in self.hidden_layers:
             rng, rng_layer = jax.random.split(rng)

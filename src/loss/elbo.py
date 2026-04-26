@@ -5,7 +5,7 @@ These functions return a *loss to be minimised* (not the ELBO to be maximised).
 The relationship is:  loss = -ELBO / n_data  (up to constants).
 
 Stage 1 loss:  L_oggm  + (beta / n_data) * KL(q || N(0,1))
-Stage 2 loss:  L_temporal_avg + glambie_weight * L_glambie + (beta / n_data) * KL(q || q_pretrained)
+Stage 2 loss:  L_temporal_avg + glambie_weight * L_glambie + kl_weight * (beta / n_data) * KL(q || q_pretrained)
 
 Beta is annealed linearly from 0 → 1 over the first `beta_anneal_epochs`
 epochs (default 20% of total epochs). This prevents posterior collapse
@@ -83,17 +83,24 @@ def finetune_elbo(
     beta: float,
     n_data: int,
     glambie_weight: float = 1.0,
+    kl_weight: float = 1.0,
 ) -> jnp.ndarray:
     """
-    ELBO = L_temporal_avg + glambie_weight * L_glambie + (beta / n_data) * KL(q || q_pretrained)
+    ELBO = L_temporal_avg + glambie_weight * L_glambie + kl_weight * (beta / n_data) * KL(q || q_pretrained)
 
     KL is divided by n_data (n_glaciers + n_glambie_obs) for the same reason
     as in pretrain_elbo: KL is a sum over parameters, losses are means over obs.
 
     Both L_temporal_avg and L_glambie are already normalised per-observation
     (jnp.mean), so glambie_weight=1.0 gives equal per-observation weight to both
-    datasets. Reduce glambie_weight below 1.0 if GLaMBIE dominates and per-glacier
-    Hugonnet performance suffers; increase above 1.0 to prioritise regional fit.
+    datasets. Reduce glambie_weight below 1.0 if GLaMBIE dominates; increase
+    above 1.0 to prioritise regional fit.
+
+    kl_weight controls how strongly the finetuned posterior is regularised toward
+    the OGGM pretrained prior. Values < 1.0 give the observations more influence
+    and allow the posterior to drift further from the OGGM prior. Default 1.0
+    (standard Bayesian continual learning). Reduce to 0.1–0.5 if the OGGM prior
+    is known to be systematically biased for a region.
 
     Args:
         temporal_avg_loss_val: Scalar temporal-avg inverse-variance MSE
@@ -102,8 +109,9 @@ def finetune_elbo(
         beta:                  Current annealing coefficient in [0, 1]
         n_data:                Number of observations (n_glaciers + n_glambie_obs)
         glambie_weight:        Relative weight of GLaMBIE loss vs Hugonnet (default 1.0)
+        kl_weight:             Relative weight of KL term vs data likelihood (default 1.0)
 
     Returns:
         Scalar ELBO (to be minimised)
     """
-    return temporal_avg_loss_val + glambie_weight * glambie_loss_val + beta * (kl_val / n_data)
+    return temporal_avg_loss_val + glambie_weight * glambie_loss_val + kl_weight * beta * (kl_val / n_data)

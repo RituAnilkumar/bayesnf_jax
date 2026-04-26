@@ -329,6 +329,7 @@ def run_pretrain(cfg: DictConfig) -> None:
         n_fourier=cfg.model.n_fourier,
         heteroscedastic=bool(cfg.model.get("heteroscedastic", False)),
         sigma_floor=float(cfg.model.get("sigma_floor", 0.05)),
+        use_time_encoding=bool(cfg.model.get("use_time_encoding", True)),
     )
     rng, rng_init, rng_fwd = jax.random.split(rng, 3)
     params = model.init(

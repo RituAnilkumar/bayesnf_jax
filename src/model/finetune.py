@@ -336,6 +336,7 @@ def make_train_step(
     target_mean: float = 0.0,
     target_std: float = 1.0,
     glambie_weight: float = 1.0,
+    kl_weight: float = 1.0,
 ):
     """
     Factory: returns a JIT-compiled finetune train_step.
@@ -352,6 +353,10 @@ def make_train_step(
     glambie_weight: relative weight of GLaMBIE loss vs Hugonnet temporal-avg loss.
     Both losses are already per-observation normalised (jnp.mean), so 1.0 gives
     equal per-observation weight. Reduce below 1.0 if GLaMBIE dominates.
+
+    kl_weight: relative weight of the KL term vs data likelihood. Values < 1.0
+    weaken the OGGM prior's regularising influence, letting the posterior be shaped
+    more by the Hugonnet/GLaMBIE observations. Default 1.0 (standard BCL).
 
     Returned function signature:
         train_step(params, opt_state, rng, beta)
@@ -427,7 +432,7 @@ def make_train_step(
             mu_dict, log_sigma_dict = extract_vi_params(params["params"])
             kl = compute_total_kl(mu_dict, log_sigma_dict, prior_mu, prior_log_sigma)
 
-            return finetune_elbo(l_ta, l_glambie, kl, beta, n_data, glambie_weight)
+            return finetune_elbo(l_ta, l_glambie, kl, beta, n_data, glambie_weight, kl_weight)
 
         loss, grads = jax.value_and_grad(loss_fn)(params)
         updates, opt_state_new = optimizer.update(grads, opt_state, params)
@@ -640,6 +645,7 @@ def run_finetune(cfg: DictConfig) -> None:
         n_fourier=cfg.model.n_fourier,
         heteroscedastic=bool(cfg.model.get("heteroscedastic", False)),
         sigma_floor=float(cfg.model.get("sigma_floor", 0.05)),
+        use_time_encoding=bool(cfg.model.get("use_time_encoding", True)),
     )
     # Reconstruct full params dict from pretrained (mu, log_sigma)
     def _merge(d_mu, d_ls):
@@ -688,13 +694,15 @@ def run_finetune(cfg: DictConfig) -> None:
     t_mean, t_std = target_scaler if target_scaler is not None else (0.0, 1.0)
 
     glambie_weight = float(cfg.model.get("glambie_weight", 1.0))
+    kl_weight      = float(cfg.model.get("kl_weight", 1.0))
     print(f"  GLaMBIE weight: {glambie_weight:.4f} (relative to Hugonnet temporal-avg loss)")
+    print(f"  KL weight:      {kl_weight:.4f} (OGGM prior strength; <1.0 = weaker prior)")
 
     beta_schedule = make_beta_schedule(cfg.model.model_nepochs, cfg.model.beta_anneal_epochs)
     train_step    = make_train_step(
         model, optimizer, prior_mu, prior_log_sigma, static_arrays,
         n_data=n_finetune_obs, target_mean=t_mean, target_std=t_std,
-        glambie_weight=glambie_weight,
+        glambie_weight=glambie_weight, kl_weight=kl_weight,
     )
 
     # --- Early stopping setup (monitors training loss, not validation) ---
@@ -728,8 +736,9 @@ def run_finetune(cfg: DictConfig) -> None:
             nan_streak += 1
             if nan_streak == 1:
                 print(f"  ERROR: NaN/Inf loss at epoch {epoch+1} (beta={beta:.3f}). "
-                      f"Params are corrupted — check for zero uncertainties in "
-                      f"temporal_avg or GLaMBIE data (uncertainty_floor may be needed).")
+                      f"Params are corrupted — a hard uncertainty floor of 0.001 MWE/yr "
+                      f"is applied; inspect temporal_avg or GLaMBIE data for other "
+                      f"anomalies (e.g. extreme outlier predictions at init).")
             if nan_streak >= 10:
                 print(f"  Stopping: NaN/Inf loss persisted for 10 epochs. "
                       f"Saved params will be unusable.")
