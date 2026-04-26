@@ -51,12 +51,15 @@ explain:
 
   # --- Which data split to run on ---
   explain_split: train
+  
+  # --- Year range for attribution data (overrides pretrain_year_max from model config) ---
+  explain_year_max: 2025   # set to null to use pretrain_year_max (default 2020)
 
   # --- IG hyperparameters ---
   n_mc: 100                 # MC samples per model (single-model modes)
   n_mc_per_model: 50        # MC samples per model in ensemble mode (total = n_models × this)
   n_steps: 50              # Riemann integration steps along the IG path
-  baseline: zero           # 'zero' or 'mean'
+  baseline: mean           # 'zero' or 'mean'
 
   # --- Subsampling ---
   max_points: 2000         # cap on data points; subsamples randomly if exceeded
@@ -100,6 +103,6 @@ hydra:
   run:
     # Fixed base dir — output subdir is determined at runtime from the run/ensemble path.
     # This avoids interpolating ${model.reg_subdir} which would fail when model= is omitted.
-    dir: outputs/explain_top5_lim_glamb
+    dir: outputs/explain_top5_lim_glamb_meanbaseline
   job:
     chdir: true
