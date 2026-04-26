@@ -110,7 +110,7 @@ def plot_importance_bar(
     ax.set_yticks(y_pos)
     ax.set_yticklabels(names_sorted)
     ax.invert_yaxis()
-    ax.set_xlabel("Mean |Attribution| (MWE/yr per unit input change)")
+    ax.set_xlabel("Mean |Attribution| (MWE/yr)")
     ax.set_title("Global feature importance")
     ax.axvline(0, color="black", lw=0.7)
     ax.legend(fontsize=7, loc="lower right")
@@ -173,7 +173,7 @@ def plot_beeswarm(
     ax.set_yticks(np.arange(n_features))
     ax.set_yticklabels(feature_names)
     ax.axvline(0, color="black", lw=0.8, ls="--")
-    ax.set_xlabel("Attribution (MWE/yr per unit input change)")
+    ax.set_xlabel("Attribution (MWE/yr)")
     ax.set_title(f"Feature attribution beeswarm  (n={len(idx)} points)")
 
     sm = cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, 1))
@@ -293,7 +293,7 @@ def plot_dependence(
         pass
 
     ax.set_xlabel(f"{feature_names[fi]} (feature value)")
-    ax.set_ylabel(f"Attribution for {feature_names[fi]}")
+    ax.set_ylabel(f"Attribution for {feature_names[fi]} (MWE/yr)")
     ax.set_title(f"Dependence: {feature_names[fi]}  (colour = {color_name})")
 
     cbar = fig.colorbar(scatter, ax=ax, pad=0.02, fraction=0.04)
@@ -359,7 +359,7 @@ def plot_waterfall(
     ax.set_yticklabels(names_sorted)
     ax.invert_yaxis()
     ax.axvline(0, color="black", lw=0.8)
-    ax.set_xlabel("Attribution (MWE/yr per unit input change)")
+    ax.set_xlabel("Attribution (MWE/yr)")
     ax.set_title(title)
 
     if baseline_pred is not None:
@@ -494,7 +494,7 @@ def plot_year_slice(
     ax.set_yticks(y_pos)
     ax.set_yticklabels(names_sorted)
     ax.invert_yaxis()
-    ax.set_xlabel("Mean |Attribution| (MWE/yr per unit input change)")
+    ax.set_xlabel("Mean |Attribution| (MWE/yr)")
     ax.set_title(f"Feature importance — year {target_year}  (n={mask.sum()} glaciers)")
     ax.axvline(0, color="black", lw=0.7)
     ax.legend(fontsize=7, loc="lower right")
