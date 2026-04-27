@@ -155,64 +155,140 @@ def _metrics(sub: pd.DataFrame) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Plot 1: per-glacier time series (multi-panel)
+# Axes-level drawing helpers (shared by combined and individual figures)
+# ---------------------------------------------------------------------------
+
+def _draw_timeseries_ax(ax, sub: pd.DataFrame, name: str, rgi: str,
+                        title_fontsize: int = 8) -> None:
+    valid = sub.dropna(subset=["obs_mwe", "model_mean_mwe"])
+    if valid.empty:
+        ax.set_title(f"{name}\nno matched data", fontsize=title_fontsize)
+        return
+    yr    = valid["YEAR"].values
+    obs   = valid["obs_mwe"].values
+    pred  = valid["model_mean_mwe"].values
+    s_tot = valid["model_total_std"].values
+    s_str = valid["model_structural_std"].values \
+        if "model_structural_std" in valid.columns else None
+    s_epi = valid["model_epistemic_std"].values \
+        if "model_epistemic_std" in valid.columns else None
+
+    ax.fill_between(yr, pred - s_tot, pred + s_tot,
+                    alpha=0.20, color="steelblue", label="±1σ total")
+    if s_str is not None:
+        ax.fill_between(yr, pred - s_str, pred + s_str,
+                        alpha=0.25, color="mediumorchid", label="±1σ structural")
+    if s_epi is not None:
+        ax.fill_between(yr, pred - s_epi, pred + s_epi,
+                        alpha=0.35, color="darkorange", label="±1σ epistemic")
+    ax.plot(yr, pred, color="steelblue", lw=1.6, label="Model median")
+    ax.plot(yr, obs,  color="black",     lw=1.4, label="WGMS in-situ")
+
+    m = _metrics(valid)
+    ax.set_title(
+        f"{name}  ({rgi})\n"
+        f"n={m.get('n_years','?')}  "
+        f"RMSE={m.get('rmse', float('nan')):.3f}  "
+        f"bias={m.get('bias', float('nan')):+.3f}  "
+        f"r={m.get('corr', float('nan')):.2f}  "
+        f"cov2σ={m.get('coverage_pct', float('nan')):.0f}%",
+        fontsize=title_fontsize,
+    )
+    ax.axhline(0, color="black", lw=0.5, ls="--")
+    ax.set_ylabel("MWE/yr (m w.e.)", fontsize=7)
+    ax.legend(fontsize=6, ncol=2)
+    ax.tick_params(labelsize=6)
+
+
+def _draw_scatter_ax(ax, sub: pd.DataFrame, name: str) -> None:
+    valid = sub.dropna(subset=["obs_mwe", "model_mean_mwe", "model_total_std"])
+    if valid.empty:
+        ax.set_title(f"{name}\nno matched data", fontsize=8)
+        return
+    obs   = valid["obs_mwe"].values
+    pred  = valid["model_mean_mwe"].values
+    s_tot = valid["model_total_std"].values
+    years = valid["YEAR"].values
+
+    lo  = min(np.nanmin(obs), np.nanmin(pred - s_tot))
+    hi  = max(np.nanmax(obs), np.nanmax(pred + s_tot))
+    pad = (hi - lo) * 0.06
+    lo -= pad; hi += pad
+    diag = np.linspace(lo, hi, 200)
+
+    ax.plot(diag, diag, "k--", lw=1.0, zorder=1)
+    sc = ax.scatter(obs, pred, c=years, cmap="viridis", s=18,
+                    zorder=4, alpha=0.85)
+    ax.errorbar(obs, pred, yerr=s_tot,
+                fmt="none", ecolor="gray", elinewidth=0.7,
+                capsize=2.0, alpha=0.55, zorder=3)
+    plt.colorbar(sc, ax=ax, label="Year", shrink=0.75)
+
+    m = _metrics(valid)
+    ax.set_title(
+        f"{name}\n"
+        f"r={m.get('corr', float('nan')):.2f}  "
+        f"RMSE={m.get('rmse', float('nan')):.3f}  "
+        f"cov2σ={m.get('coverage_pct', float('nan')):.0f}%",
+        fontsize=8,
+    )
+    ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
+    ax.set_xlabel("WGMS in-situ (MWE/yr)", fontsize=7)
+    ax.set_ylabel("Model median (MWE/yr)", fontsize=7)
+    ax.set_aspect("equal", adjustable="box")
+    ax.tick_params(labelsize=6)
+
+
+def _draw_residuals_ax(ax, sub: pd.DataFrame, name: str, rgi: str) -> None:
+    valid = sub.dropna(subset=["obs_mwe", "model_mean_mwe"]).sort_values("YEAR")
+    if valid.empty:
+        ax.set_title(f"{name}\nno matched data", fontsize=8)
+        return
+    years = valid["YEAR"].values
+    resid = valid["model_mean_mwe"].values - valid["obs_mwe"].values
+    s_tot = valid["model_total_std"].values
+
+    ax.fill_between(years, -s_tot, s_tot,
+                    color="steelblue", alpha=0.18, zorder=1,
+                    label="±1σ model total")
+    ax.bar(years, resid,
+           color=np.where(resid >= 0, "steelblue", "firebrick"),
+           alpha=0.75, width=0.8, zorder=2)
+    ax.axhline(0, color="black", lw=0.8, zorder=3)
+    bias = float(np.mean(resid))
+    ax.axhline(bias, color="orange", lw=1.2, ls="--", zorder=4,
+               label=f"mean bias={bias:+.3f}")
+    ax.set_title(f"{name}  ({rgi})", fontsize=8)
+    ax.set_ylabel("residual (m w.e.)", fontsize=7)
+    ax.legend(fontsize=6)
+    ax.tick_params(labelsize=6)
+
+
+def _glacier_slug(name: str) -> str:
+    """'HINTEREIS F.' → 'hintereis_f'"""
+    return name.lower().replace(" ", "_").replace(".", "").strip("_")
+
+
+# ---------------------------------------------------------------------------
+# Combined multi-panel figures
 # ---------------------------------------------------------------------------
 
 def plot_timeseries(joined: pd.DataFrame, output_path: Path) -> None:
-    glaciers = joined["rgi_id"].unique()
+    glaciers = sorted(joined["rgi_id"].unique())
     ncols = 2
     nrows = int(np.ceil(len(glaciers) / ncols))
-
     fig, axes = plt.subplots(nrows, ncols,
-                             figsize=(ncols * 7, nrows * 3.5),
-                             sharex=False)
+                             figsize=(ncols * 7, nrows * 3.5), sharex=False)
     axes_flat = np.array(axes).ravel()
-
-    for idx, rgi in enumerate(sorted(glaciers)):
-        ax  = axes_flat[idx]
-        sub = joined[joined["rgi_id"] == rgi].sort_values("YEAR")
-        valid = sub.dropna(subset=["obs_mwe", "model_mean_mwe"])
-
+    for idx, rgi in enumerate(glaciers):
+        sub  = joined[joined["rgi_id"] == rgi].sort_values("YEAR")
         name = sub["NAME"].iloc[0]
-        yr   = valid["YEAR"].values
-        obs  = valid["obs_mwe"].values
-        pred = valid["model_mean_mwe"].values
-        s_tot  = valid["model_total_std"].values
-        s_str  = valid["model_structural_std"].values if "model_structural_std" in valid else None
-        s_epi  = valid["model_epistemic_std"].values  if "model_epistemic_std"  in valid else None
-
-        ax.fill_between(yr, pred - s_tot, pred + s_tot,
-                        alpha=0.20, color="steelblue", label="±1σ total")
-        if s_str is not None:
-            ax.fill_between(yr, pred - s_str, pred + s_str,
-                            alpha=0.25, color="mediumorchid", label="±1σ structural")
-        if s_epi is not None:
-            ax.fill_between(yr, pred - s_epi, pred + s_epi,
-                            alpha=0.35, color="darkorange", label="±1σ epistemic")
-        ax.plot(yr, pred, color="steelblue", lw=1.6, label="Model median")
-        ax.plot(yr, obs, color="black", lw=1.4, label="WGMS in-situ")
-
-        m = _metrics(valid)
-        ax.set_title(
-            f"{name}  ({rgi})\n"
-            f"n={m.get('n_years','?')}  "
-            f"RMSE={m.get('rmse', float('nan')):.3f}  "
-            f"bias={m.get('bias', float('nan')):+.3f}  "
-            f"r={m.get('corr', float('nan')):.2f}  "
-            f"cov2σ={m.get('coverage_pct', float('nan')):.0f}%",
-            fontsize=8,
-        )
-        ax.axhline(0, color="black", lw=0.5, ls="--")
-        ax.set_ylabel("MWE/yr (m w.e.)", fontsize=7)
-        ax.legend(fontsize=6, ncol=2)
-        ax.tick_params(labelsize=6)
-
+        _draw_timeseries_ax(axes_flat[idx], sub, name, rgi)
     for idx in range(len(glaciers), len(axes_flat)):
         axes_flat[idx].set_visible(False)
-
     fig.suptitle(
         "Per-glacier model vs. WGMS in-situ (MWE/yr)\n"
-        "Blue: ±1σ total  |  Purple: ±1σ structural  |  Orange: ±1σ epistemic  |  Black: WGMS",
+        "Blue: ±1σ total  |  Purple: ±1σ structural  |  Orange: ±1σ epistemic",
         fontsize=9,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -221,67 +297,19 @@ def plot_timeseries(joined: pd.DataFrame, output_path: Path) -> None:
     print(f"  Saved {output_path.name}")
 
 
-# ---------------------------------------------------------------------------
-# Plot 2: per-glacier scatter (multi-panel)
-# ---------------------------------------------------------------------------
-
 def plot_scatter(joined: pd.DataFrame, output_path: Path) -> None:
     glaciers = sorted(joined["rgi_id"].unique())
     ncols = 3
     nrows = int(np.ceil(len(glaciers) / ncols))
-
     fig, axes = plt.subplots(nrows, ncols,
                              figsize=(ncols * 4.5, nrows * 4.5))
     axes_flat = np.array(axes).ravel()
-
     for idx, rgi in enumerate(glaciers):
-        ax    = axes_flat[idx]
-        sub   = joined[joined["rgi_id"] == rgi].dropna(
-            subset=["obs_mwe", "model_mean_mwe", "model_total_std"])
-        name  = joined[joined["rgi_id"] == rgi]["NAME"].iloc[0]
-        if sub.empty:
-            axes_flat[idx].set_title(f"{name}\nno matched data", fontsize=8)
-            axes_flat[idx].set_visible(True)
-            continue
-        obs   = sub["obs_mwe"].values
-        pred  = sub["model_mean_mwe"].values
-        s_tot = sub["model_total_std"].values
-        years = sub["YEAR"].values
-
-        lo  = min(np.nanmin(obs), np.nanmin(pred - s_tot))
-        hi  = max(np.nanmax(obs), np.nanmax(pred + s_tot))
-        pad = (hi - lo) * 0.06
-        lo -= pad; hi += pad
-        diag = np.linspace(lo, hi, 200)
-
-        # 1:1 line
-        ax.plot(diag, diag, "k--", lw=1.0, zorder=1)
-
-        # Scatter coloured by year with 1σ model error bars
-        sc = ax.scatter(obs, pred, c=years, cmap="viridis", s=18,
-                        zorder=4, alpha=0.85)
-        ax.errorbar(obs, pred, yerr=s_tot,
-                    fmt="none", ecolor="gray", elinewidth=0.7,
-                    capsize=2.0, alpha=0.55, zorder=3)
-        plt.colorbar(sc, ax=ax, label="Year", shrink=0.75)
-
-        m = _metrics(sub)
-        ax.set_title(
-            f"{name}\n"
-            f"r={m.get('corr', float('nan')):.2f}  "
-            f"RMSE={m.get('rmse', float('nan')):.3f}  "
-            f"cov2σ={m.get('coverage_pct', float('nan')):.0f}%",
-            fontsize=8,
-        )
-        ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
-        ax.set_xlabel("WGMS in-situ (MWE/yr)", fontsize=7)
-        ax.set_ylabel("Model median (MWE/yr)", fontsize=7)
-        ax.set_aspect("equal", adjustable="box")
-        ax.tick_params(labelsize=6)
-
+        sub  = joined[joined["rgi_id"] == rgi]
+        name = sub["NAME"].iloc[0]
+        _draw_scatter_ax(axes_flat[idx], sub, name)
     for idx in range(len(glaciers), len(axes_flat)):
         axes_flat[idx].set_visible(False)
-
     fig.suptitle(
         "Per-glacier scatter: model median vs. WGMS in-situ\n"
         "Error bars: ±1σ model total  |  Colour: year",
@@ -293,51 +321,19 @@ def plot_scatter(joined: pd.DataFrame, output_path: Path) -> None:
     print(f"  Saved {output_path.name}")
 
 
-# ---------------------------------------------------------------------------
-# Plot 3: residuals per glacier
-# ---------------------------------------------------------------------------
-
 def plot_residuals(joined: pd.DataFrame, output_path: Path) -> None:
     glaciers = sorted(joined["rgi_id"].unique())
     ncols = 2
     nrows = int(np.ceil(len(glaciers) / ncols))
-
     fig, axes = plt.subplots(nrows, ncols,
                              figsize=(ncols * 7, nrows * 3.0))
     axes_flat = np.array(axes).ravel()
-
     for idx, rgi in enumerate(glaciers):
-        ax  = axes_flat[idx]
-        sub = joined[joined["rgi_id"] == rgi].dropna(
-            subset=["obs_mwe", "model_mean_mwe"]).sort_values("YEAR")
-        name  = joined[joined["rgi_id"] == rgi]["NAME"].iloc[0]
-        if sub.empty:
-            axes_flat[idx].set_title(f"{name}\nno matched data", fontsize=8)
-            continue
-        years = sub["YEAR"].values
-        resid = sub["model_mean_mwe"].values - sub["obs_mwe"].values
-        s_tot = sub["model_total_std"].values
-
-        # Model ±1σ band around zero
-        ax.fill_between(years, -s_tot, s_tot,
-                        color="steelblue", alpha=0.18, zorder=1,
-                        label="±1σ model total")
-
-        ax.bar(years, resid,
-               color=np.where(resid >= 0, "steelblue", "firebrick"),
-               alpha=0.75, width=0.8, zorder=2)
-        ax.axhline(0, color="black", lw=0.8, zorder=3)
-        bias = float(np.mean(resid))
-        ax.axhline(bias, color="orange", lw=1.2, ls="--", zorder=4,
-                   label=f"mean bias={bias:+.3f}")
-        ax.set_title(f"{name}  ({rgi})", fontsize=8)
-        ax.set_ylabel("residual (m w.e.)", fontsize=7)
-        ax.legend(fontsize=6)
-        ax.tick_params(labelsize=6)
-
+        sub  = joined[joined["rgi_id"] == rgi]
+        name = sub["NAME"].iloc[0]
+        _draw_residuals_ax(axes_flat[idx], sub, name, rgi)
     for idx in range(len(glaciers), len(axes_flat)):
         axes_flat[idx].set_visible(False)
-
     fig.suptitle(
         "Residuals: model median − WGMS in-situ (MWE/yr)\n"
         "Blue band: ±1σ model total uncertainty",
@@ -347,6 +343,45 @@ def plot_residuals(joined: pd.DataFrame, output_path: Path) -> None:
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
     print(f"  Saved {output_path.name}")
+
+
+# ---------------------------------------------------------------------------
+# Individual glacier figures
+# ---------------------------------------------------------------------------
+
+def plot_individual(joined: pd.DataFrame, output_dir: Path) -> None:
+    ind_dir = output_dir / "individual"
+    ind_dir.mkdir(exist_ok=True)
+
+    for rgi in sorted(joined["rgi_id"].unique()):
+        sub  = joined[joined["rgi_id"] == rgi].sort_values("YEAR")
+        name = sub["NAME"].iloc[0]
+        slug = _glacier_slug(name)
+
+        # Time series
+        fig, ax = plt.subplots(figsize=(10, 4))
+        _draw_timeseries_ax(ax, sub, name, rgi, title_fontsize=9)
+        ax.set_xlabel("Year")
+        fig.tight_layout()
+        fig.savefig(ind_dir / f"timeseries_{slug}.png", dpi=150)
+        plt.close(fig)
+
+        # Scatter
+        fig, ax = plt.subplots(figsize=(5, 5))
+        _draw_scatter_ax(ax, sub, name)
+        fig.tight_layout()
+        fig.savefig(ind_dir / f"scatter_{slug}.png", dpi=150)
+        plt.close(fig)
+
+        # Residuals
+        fig, ax = plt.subplots(figsize=(10, 3.5))
+        _draw_residuals_ax(ax, sub, name, rgi)
+        ax.set_xlabel("Year")
+        fig.tight_layout()
+        fig.savefig(ind_dir / f"residuals_{slug}.png", dpi=150)
+        plt.close(fig)
+
+    print(f"  Saved individual plots → {ind_dir.relative_to(output_dir.parent)}")
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +458,7 @@ def run(cfg: dict) -> None:
     plot_timeseries(joined, output_dir / "timeseries_per_glacier.png")
     plot_scatter(joined,    output_dir / "scatter_per_glacier.png")
     plot_residuals(joined,  output_dir / "residuals_per_glacier.png")
+    plot_individual(joined, output_dir)
 
     print(f"\nDone. Outputs written to {output_dir}/")
 
