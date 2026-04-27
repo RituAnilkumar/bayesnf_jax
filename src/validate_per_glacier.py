@@ -22,7 +22,7 @@ Metrics reported (all at 1σ, consistent with model output convention)
   rmse          sqrt(mean((model-obs)²))
   mae           mean(|model-obs|)
   corr (r)      Pearson correlation
-  coverage_pct  % years where obs falls within model ±1σ total band
+  coverage_pct  % years where obs falls within model ±2σ total band
 
 Usage
 -----
@@ -143,7 +143,7 @@ def _metrics(sub: pd.DataFrame) -> dict:
     s    = valid["model_total_std"].values
     diff = pred - obs
     n    = len(diff)
-    within = int(np.sum((obs >= pred - s) & (obs <= pred + s)))
+    within = int(np.sum((obs >= pred - 2 * s) & (obs <= pred + 2 * s)))
     return {
         "n_years":      n,
         "bias":         float(np.mean(diff)),
@@ -199,7 +199,7 @@ def plot_timeseries(joined: pd.DataFrame, output_path: Path) -> None:
             f"RMSE={m.get('rmse', float('nan')):.3f}  "
             f"bias={m.get('bias', float('nan')):+.3f}  "
             f"r={m.get('corr', float('nan')):.2f}  "
-            f"cov={m.get('coverage_pct', float('nan')):.0f}%",
+            f"cov2σ={m.get('coverage_pct', float('nan')):.0f}%",
             fontsize=8,
         )
         ax.axhline(0, color="black", lw=0.5, ls="--")
@@ -270,7 +270,7 @@ def plot_scatter(joined: pd.DataFrame, output_path: Path) -> None:
             f"{name}\n"
             f"r={m.get('corr', float('nan')):.2f}  "
             f"RMSE={m.get('rmse', float('nan')):.3f}  "
-            f"cov={m.get('coverage_pct', float('nan')):.0f}%",
+            f"cov2σ={m.get('coverage_pct', float('nan')):.0f}%",
             fontsize=8,
         )
         ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
@@ -409,7 +409,7 @@ def run(cfg: dict) -> None:
               f"RMSE={m.get('rmse', float('nan')):.3f}  "
               f"bias={m.get('bias', float('nan')):+.3f}  "
               f"r={m.get('corr', float('nan')):.2f}  "
-              f"cov={m.get('coverage_pct', float('nan')):.0f}%")
+              f"cov2σ={m.get('coverage_pct', float('nan')):.0f}%")
 
     metrics_df = pd.DataFrame(metrics_rows)
     metrics_df.to_csv(output_dir / "per_glacier_metrics.csv",
