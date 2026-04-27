@@ -190,8 +190,7 @@ def plot_timeseries(joined: pd.DataFrame, output_path: Path) -> None:
             ax.fill_between(yr, pred - s_epi, pred + s_epi,
                             alpha=0.35, color="darkorange", label="±1σ epistemic")
         ax.plot(yr, pred, color="steelblue", lw=1.6, label="Model median")
-        ax.plot(yr, obs, "o", color="black", ms=3.5, lw=1.0,
-                label="WGMS in-situ")
+        ax.plot(yr, obs, color="black", lw=1.4, label="WGMS in-situ")
 
         m = _metrics(valid)
         ax.set_title(
