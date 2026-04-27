@@ -45,7 +45,7 @@ pretrain_year_max: 2025       # Only use OGGM rows with year <= this value
 model_ftcols:
   - CenLat
   - CenLon
-  - Area
+  - log_Area
   - Zmed
   - Slope
   - Aspect

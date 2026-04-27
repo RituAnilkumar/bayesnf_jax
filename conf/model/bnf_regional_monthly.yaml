@@ -42,7 +42,7 @@ train_split: full
 model_ftcols:
   - CenLat
   - CenLon
-  - Area
+  - log_Area
   - Zmed
   - Slope
   - Aspect

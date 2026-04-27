@@ -94,7 +94,7 @@ FEATURE_COLS: list[str] = [
     "t2m_acc_mean", "t2m_acc_std",
     "tp_abl_sum",   "tp_acc_sum",
     "ssrd_abl_sum", "ssrd_acc_sum",
-    "Aspect", "Zmax", "Zmed", "Slope", "Zmin", "Area",
+    "Aspect", "Zmax", "Zmed", "Slope", "Zmin", "log_Area",
 ]
 
 
@@ -142,8 +142,10 @@ def load_features(
     df = pd.read_csv(path)
     df = df.drop(columns=["GLIMSId"], errors="ignore")
     df["time_index"] = df["year"] - T_MIN
+    # log_Area: log1p-transformed Area fed to the model.
+    # The original Area column is kept unchanged for area-weighted regional means.
     if "Area" in df.columns:
-        df["Area"] = np.log1p(df["Area"])
+        df["log_Area"] = np.log1p(df["Area"])
     cols_present = [c for c in feature_cols if c in df.columns]
     return df[["rgi_id", "year", "time_index"] + cols_present]
 
@@ -184,9 +186,17 @@ def load_dmdtda(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
     df["rgi_id"] = df["rgiid"]
     df["start_date"], df["end_date"] = zip(*df["period"].map(_parse_hugonnet_period))
-    df["avg_mb_mwe"]     = df["dmdtda"].astype(np.float32)
+    df["avg_mb_mwe"]      = df["dmdtda"].astype(np.float32)
     df["uncertainty_mwe"] = df["err_dmdtda"].astype(np.float32)
-    return df[["rgi_id", "start_date", "end_date", "avg_mb_mwe", "uncertainty_mwe"]]
+    out = df[["rgi_id", "start_date", "end_date", "avg_mb_mwe", "uncertainty_mwe"]]
+    bad = ~(out["avg_mb_mwe"].notna() & out["uncertainty_mwe"].notna() & (out["uncertainty_mwe"] > 0))
+    n_bad = bad.sum()
+    if n_bad > 0:
+        print(f"  WARNING: load_dmdtda dropped {n_bad} rows with NaN/invalid dmdtda or err_dmdtda from {path}")
+        if n_bad <= 10:
+            print(f"    Dropped rgi_ids: {out.loc[bad, 'rgi_id'].tolist()}")
+        out = out[~bad].reset_index(drop=True)
+    return out
 
 
 def extract_hugonnet_region(

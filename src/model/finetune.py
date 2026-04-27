@@ -245,16 +245,24 @@ def prepare_finetune_arrays(
         p_tgt   = period_df_sorted["avg_mb_mwe"].to_numpy(dtype=np.float32)
         p_errs  = period_df_sorted["uncertainty_mwe"].to_numpy(dtype=np.float32)
 
-        # Floor near-zero uncertainties to prevent division-by-zero in the loss.
-        # Some regions (e.g. tropical glaciers r17, Central/South Asia r13-r15) have
-        # Hugonnet uncertainty values of exactly 0 for some glaciers, which causes
-        # loss = inf → NaN gradients → corrupted params after the first optimizer step.
-        # 0.001 MWE/yr (1 mm w.e./yr) is below any real measurement uncertainty.
-        n_zero = (p_errs == 0).sum()
-        if n_zero > 0:
-            print(f"  WARNING: {n_zero}/{len(p_errs)} glaciers have uncertainty_mwe=0 "
-                  f"for period {pstart}-{pend}. Applying floor of 0.001 MWE/yr.")
-        p_errs = np.maximum(p_errs, 0.001)
+        # Sanitise targets: NaN avg_mb_mwe → set target=0 and uncertainty=999
+        # (large uncertainty = near-zero inverse-variance weight → excluded from loss).
+        n_nan_tgt = (~np.isfinite(p_tgt)).sum()
+        if n_nan_tgt > 0:
+            print(f"  WARNING: {n_nan_tgt}/{len(p_tgt)} glaciers have NaN avg_mb_mwe "
+                  f"for period {pstart}-{pend}. Excluding via large uncertainty.")
+            p_errs = np.where(np.isfinite(p_tgt), p_errs, 999.0)
+            p_tgt  = np.where(np.isfinite(p_tgt), p_tgt,  0.0)
+
+        # Floor uncertainties: np.maximum propagates NaN, so we use np.where to
+        # handle NaN/Inf values explicitly. 0.001 MWE/yr is below any real
+        # measurement uncertainty and prevents loss=inf from zero-uncertainty glaciers.
+        n_bad = (~np.isfinite(p_errs) | (p_errs <= 0)).sum()
+        if n_bad > 0:
+            print(f"  WARNING: {n_bad}/{len(p_errs)} glaciers have non-finite or "
+                  f"non-positive uncertainty_mwe for period {pstart}-{pend}. "
+                  f"Applying floor of 0.001 MWE/yr.")
+        p_errs = np.where(np.isfinite(p_errs) & (p_errs > 0), p_errs, 0.001)
 
         hugonnet_periods.append({
             "period_mask": jnp.array(pmask),
@@ -302,11 +310,11 @@ def prepare_finetune_arrays(
         obs_year_idx = glambie_train_df["year"].map(year_to_idx).to_numpy(dtype=np.int32)
 
         g_errs = glambie_train_df["error_mwe"].to_numpy(dtype=np.float32)
-        n_zero_g = (g_errs == 0).sum()
-        if n_zero_g > 0:
-            print(f"  WARNING: {n_zero_g} GLaMBIE training observations have error_mwe=0. "
-                  f"Applying floor of 0.001 MWE/yr.")
-        g_errs = np.maximum(g_errs, 0.001)
+        n_bad_g = (~np.isfinite(g_errs) | (g_errs <= 0)).sum()
+        if n_bad_g > 0:
+            print(f"  WARNING: {n_bad_g} GLaMBIE training observations have non-finite "
+                  f"or non-positive error_mwe. Applying floor of 0.001 MWE/yr.")
+        g_errs = np.where(np.isfinite(g_errs) & (g_errs > 0), g_errs, 0.001)
 
         out.update({
             "glambie_time_index":  jnp.array(g_time_idx),
