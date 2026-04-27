@@ -78,9 +78,18 @@ def _load_satellite(path: Path) -> pd.DataFrame:
     # Strip BOM and whitespace from column names
     df.columns = df.columns.str.strip().str.lstrip("\ufeff")
     df["date"] = pd.to_datetime(df["date"], dayfirst=True)
-    # Keep only September observations (end of ablation season)
-    df = df[df["date"].dt.month == 9].reset_index(drop=True)
     df["frac_year"] = df["date"].dt.year + (df["date"].dt.dayofyear - 1) / 365.25
+
+    # Pick the end-of-ablation-season minimum within each HMA hydrological year.
+    # HMA hydro year: Oct 1 (year Y) \u2192 Sep 30 (year Y+1), labelled by ending year Y+1.
+    # Minimum cumulative mass = maximum ice loss point = end of melt season.
+    df["hydro_year"] = df["date"].apply(
+        lambda d: d.year + 1 if d.month >= 10 else d.year
+    )
+    df = (
+        df.loc[df.groupby("hydro_year")["mass_changes"].idxmin()]
+        .reset_index(drop=True)
+    )
     return df.sort_values("frac_year").reset_index(drop=True)
 
 
@@ -185,18 +194,16 @@ def align_satellite(sat: pd.DataFrame, cum_df: pd.DataFrame) -> pd.DataFrame:
 
 def satellite_annual(sat: pd.DataFrame) -> pd.DataFrame:
     """
-    Derive annual Gt/yr rates from September cumulative snapshots.
+    Derive annual Gt/yr rates from end-of-ablation-season snapshots
+    (one per hydrological year, selected as the minimum within each Oct–Sep window).
 
-    After September-only filtering there is one observation per year, so each
-    annual rate is simply cumulative[t] - cumulative[t-1].
-
-    Error propagation: since mass_errors are already cumulative errors (2σ),
-    the error on the difference of two consecutive values is:
+    Annual rate = cumulative[t] - cumulative[t-1].
+    Error propagation: mass_errors are cumulative 2σ errors, so:
         annual_err = sqrt(err_t² + err_{t-1}²)
     """
     sat = sat.copy()
-    sat["year"] = sat["date"].dt.year
-    grp = sat.groupby("year").agg(
+    # Group by hydrological year (already one-per-hydro-year after _load_satellite)
+    grp = sat.rename(columns={"hydro_year": "year"}).groupby("year").agg(
         mass_changes=("mass_changes", "mean"),
         mass_errors=("mass_errors", "mean"),
     ).reset_index()
@@ -273,12 +280,14 @@ def plot_cumulative(
 
     for name, sat in satellites.items():
         sty = SATELLITE_STYLES.get(name, {"color": "gray", "marker": "o", "zorder": 4})
+        ax.plot(sat["frac_year"].values, sat["mass_changes_aligned"].values,
+                color=sty["color"], lw=1.4, alpha=0.85, zorder=sty["zorder"])
         ax.errorbar(
             sat["frac_year"].values,
             sat["mass_changes_aligned"].values,
             yerr=sat["mass_errors"].values,
-            fmt=sty["marker"], color=sty["color"], ms=3.5, lw=0.8,
-            capsize=2.0, alpha=0.75, zorder=sty["zorder"],
+            fmt=sty["marker"], color=sty["color"], ms=3.5, elinewidth=0.8,
+            capsize=2.0, alpha=0.75, zorder=sty["zorder"] + 1,
             label=f"{name} ±2σ (reported)",
         )
 
@@ -324,14 +333,16 @@ def plot_annual(
     ax.plot(years, mu, color="steelblue", lw=1.8, label="Ensemble median")
 
     for name, sat_annual in satellites.items():
-        sty = SATELLITE_STYLES.get(name, {"color": "gray", "marker": "o", "zorder": 4})
+        sty   = SATELLITE_STYLES.get(name, {"color": "gray", "marker": "o", "zorder": 4})
         valid = sat_annual.dropna(subset=["annual_gt"])
+        ax.plot(valid["year"].values, valid["annual_gt"].values,
+                color=sty["color"], lw=1.4, alpha=0.85, zorder=sty["zorder"])
         ax.errorbar(
             valid["year"].values,
             valid["annual_gt"].values,
             yerr=valid["annual_err"].values,
-            fmt=sty["marker"], color=sty["color"], ms=4, lw=0.8,
-            capsize=2.5, alpha=0.8, zorder=sty["zorder"],
+            fmt=sty["marker"], color=sty["color"], ms=4, elinewidth=0.8,
+            capsize=2.5, alpha=0.8, zorder=sty["zorder"] + 1,
             label=f"{name} ±2σ reported (annual avg)",
         )
 

@@ -172,12 +172,14 @@ def _plot_timeseries(
     # Ensemble mean line
     ax.plot(years, mu, color="steelblue", lw=1.8, label="Ensemble median")
 
-    # WGMS / Dussaillant reference scaled to same sigma level as ensemble bands
+    # WGMS / Dussaillant: line + error bar dots (same colour throughout)
+    ax.plot(merged["year"].values, merged["mwe"].values,
+            color="black", lw=1.4, zorder=5)
     ax.errorbar(
         merged["year"].values,
         merged["mwe"].values,
         yerr=sigma_mult * merged["mwe_sigma"].values,
-        fmt="o", color="black", ms=3.5, lw=1.0, capsize=2.5, zorder=5,
+        fmt="o", color="black", ms=3.5, elinewidth=1.0, capsize=2.5, zorder=6,
         label=f"WGMS/Dussaillant ±{sigma_mult}σ",
     )
 
@@ -234,9 +236,12 @@ def _plot_multipanel(
                             mu + sigma_mult * merged["structural_std"].values,
                             alpha=0.25, color="mediumorchid")
         ax.plot(years, mu, color="steelblue", lw=1.4)
+        ax.plot(merged["year"].values, merged["mwe"].values,
+                color="black", lw=1.2, zorder=5)
         ax.errorbar(merged["year"].values, merged["mwe"].values,
                     yerr=sigma_mult * merged["mwe_sigma"].values,
-                    fmt="o", color="black", ms=2.5, lw=0.8, capsize=1.5, zorder=5)
+                    fmt="o", color="black", ms=2.0, elinewidth=0.8,
+                    capsize=1.5, zorder=6)
 
         metrics = _compute_metrics(merged, sigma_mult)
         ax.set_title(
