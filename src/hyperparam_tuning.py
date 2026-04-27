@@ -196,6 +196,21 @@ def _load_loyo_rmse(run_dir: Path) -> float:
     return float(row.iloc[0]["rmse"])
 
 
+def _load_loyo_r2(run_dir: Path) -> float:
+    """Return LOYO R² from the pretrain_cv run (same file as _load_loyo_rmse)."""
+    path = run_dir / "._cv" / "metrics_oos.csv"
+    if not path.exists():
+        return float("nan")
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return float("nan")
+    row = df[df["split"] == "loyo"]
+    if row.empty or "r2" not in df.columns:
+        return float("nan")
+    return float(row.iloc[0]["r2"])
+
+
 def discover_runs(multirun_root: Path) -> list[Path]:
     """Return a sorted list of run directories inside multirun_root.
 
@@ -230,7 +245,7 @@ def build_results_df(
     """Load metrics for every discovered run and return a combined DataFrame.
 
     Columns: region, run_id, run_dir, nlayers, nhidden, heteroscedastic,
-             glambie_weight, beta_anneal_epochs, loyo_rmse, glambie_rmse
+             glambie_weight, beta_anneal_epochs, loyo_rmse, loyo_r2, glambie_rmse
     """
     run_dirs = discover_runs(multirun_root)
     # Region is derived from the multirun_root dir name (e.g. r06_3645680 → r06)
@@ -247,6 +262,7 @@ def build_results_df(
 
         glambie_rmse = _load_glambie_test_rmse(run_dir, test_years)
         loyo_rmse    = _load_loyo_rmse(run_dir)
+        loyo_r2      = _load_loyo_r2(run_dir)
 
         if np.isnan(glambie_rmse):
             missing_glambie += 1
@@ -260,6 +276,7 @@ def build_results_df(
             **{k: params[k] for k in PARAM_SHORT.values()},
             **{k: params.get(k) for k in EXTRA_OVERRIDES.values()},
             "loyo_rmse":    loyo_rmse,
+            "loyo_r2":      loyo_r2,
             "glambie_rmse": glambie_rmse,
         })
 
