@@ -71,7 +71,140 @@ For GPU support follow the [JAX installation guide](https://github.com/google/ja
 Region configs live in `conf/model/bnf_regional_seasonal/r{nn}.yaml`.
 Edit the paths in the relevant region file before running if your data layout differs.
 
-### Full pipeline for one region (pretrain → finetune → predict)
+---
+
+## Typical end-to-end workflow
+
+The usual sequence is: **multirun sweep → hyperparameter analysis → ensemble uncertainty → validation → explanations**.
+
+### Step 1 — Multirun hyperparameter sweep (all regions, all configs)
+
+Submit one SLURM job per region, sweeping over architecture and model flags.
+`-m` triggers Hydra multirun; each combo gets its own numbered subdirectory under the multirun root.
+
+```bash
+for r in $(seq -w 1 19); do
+  sbatch --export=ALL,REGION=r${r} --job-name=${r}_sweep run_sweep.sh
+done
+```
+
+Where `run_sweep.sh` contains something like:
+
+```bash
+python main_pipeline.py -m \
+  model=bnf_regional_seasonal/${REGION} \
+  model.model_nlayers=1,2 \
+  model.model_nhidden=32,64,128 \
+  model.heteroscedastic=true,false \
+  model.inp_dir=/scratch/.../data_for_model \
+  pipeline.stages=[pretrain_cv,pretrain_full,finetune,predict]
+```
+
+Outputs land in `multirun/r{nn}_{jobid}/{combo_idx}/` with one `preds_full.csv`,
+`metrics_glambie_test.csv`, and `._cv/metrics_oos.csv` per combo.
+
+---
+
+### Step 2 — Hyperparameter analysis
+
+Reads all completed runs in the multirun tree and produces ranked tables + plots
+(parallel coordinates, heatmaps, RMSE distributions).
+
+```bash
+# Single region
+python src/hyperparam_tuning.py \
+  --multirun_root /scratch/.../multirun/r06_*
+
+# All regions (batch)
+for i in $(seq -w 1 19); do
+  python src/hyperparam_tuning.py \
+    --multirun_root /scratch/.../multirun/r${i}_*/
+done
+```
+
+Outputs go to `outputs/analysis/r{nn}/` (or `--output_dir`). Key files:
+- `ranked_runs.csv` — all runs sorted by composite score (LOYO RMSE + GLaMBIE RMSE)
+- `parallel_coords.png`, `heatmap_*.png` — visual sweep summaries
+- `nhidden_vs_rmse.png` — architecture comparison split by heteroscedastic flag
+
+---
+
+### Step 3 — Ensemble uncertainty
+
+Choose the script that matches what was swept:
+
+**If the sweep included `model.heteroscedastic=true,false`** — use `ensemble_uncertainty_split.py`,
+which partitions runs into `aleatoric/` (heteroscedastic=true) and `epistemic_structural/`
+(heteroscedastic=false) and writes separate ensemble outputs for each group:
+
+```bash
+for i in $(seq -w 1 19); do
+  python src/ensemble_uncertainty_split.py \
+    --multirun_root /scratch/.../multirun/r${i}_*/ \
+    --output_dir outputs/ensemble/r${i}
+done
+```
+
+**If only heteroscedastic runs are wanted** — use `ensemble_ep_alea.py`, which selects
+the top-N heteroscedastic models by GLaMBIE test RMSE and decomposes uncertainty into
+epistemic, aleatoric, and structural components:
+
+```bash
+for i in $(seq -w 1 19); do
+  python src/ensemble_ep_alea.py \
+    --multirun_root /scratch/.../multirun/r${i}_*/ \
+    --output_dir outputs/best_model/r${i}
+done
+```
+
+Both scripts write `ensemble_regional_mwe.csv`, `ensemble_regional_gt.csv`,
+`ensemble_glacier.csv`, and uncertainty decomposition plots.
+
+---
+
+### Step 4 — Validation
+
+**Regional validation** against WGMS / Dussaillant reference series:
+
+```bash
+python src/validate_regional.py \
+  --ensemble_base_dir outputs/ensemble \
+  --output_dir outputs/validation_regional
+```
+
+Produces per-region time series plots, scatter plots, residual bars,
+and `validation_metrics.csv` (RMSE, bias, correlation, coverage).
+
+**Per-glacier validation** against WGMS direct measurements:
+
+```bash
+python src/validate_per_glacier.py \
+  --ensemble_base_dir outputs/best_model \
+  --output_dir outputs/validation_per_glacier
+```
+
+---
+
+### Step 5 — Explanations (Integrated Gradients)
+
+Compute and plot per-feature attributions for one or more regions.
+Pass the full multirun ensemble directory so attributions cover both VI uncertainty
+and structural (model-to-model) uncertainty:
+
+```bash
+python main_explain.py \
+  explain.ensemble_dir=/scratch/.../multirun/r06_12345
+
+# To generate a waterfall plot for a specific glacier-year:
+python main_explain.py \
+  explain.ensemble_dir=/scratch/.../multirun/r06_12345 \
+  explain.waterfall_rgi_id=RGI60-06.00001 \
+  explain.waterfall_year=2010
+```
+
+---
+
+### Full pipeline for one region (single config, no sweep)
 
 ```bash
 python main_pipeline.py model=bnf_regional_seasonal/r06
@@ -201,7 +334,7 @@ All configurable in `conf/model/bnf_regional_seasonal.yaml` or overridden per-re
 3. Run the pipeline as shown above.
 
 
-## HPC sweep example
+## Quick notes for Ritu
 
 ```bash
 # Hyperparameter sweep over architecture and annealing schedule:
