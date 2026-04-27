@@ -153,11 +153,15 @@ def plot_beeswarm(
     fvals = feature_values[idx]         # (M, n_features)
     n_features = len(feature_names)
 
+    # Sort features by descending mean |attribution| — matches importance bar ordering
+    importance = np.abs(attrs).mean(axis=0)
+    order = np.argsort(importance)[::-1]
+
     fig, ax = plt.subplots(figsize=(10, max(4, n_features * 0.45 + 1)))
     cmap = cm.get_cmap(_BEESWARM_CMAP)
 
     rng_jitter = np.random.default_rng(seed + 1)
-    for fi in range(n_features):
+    for plot_pos, fi in enumerate(order):
         a = attrs[:, fi]
         fv = fvals[:, fi]
 
@@ -165,13 +169,14 @@ def plot_beeswarm(
         fv_min, fv_max = fv.min(), fv.max()
         fv_norm = (fv - fv_min) / (fv_max - fv_min) if fv_max > fv_min else np.full_like(fv, 0.5)
 
-        y_jitter = fi + rng_jitter.uniform(-0.25, 0.25, size=len(a))
+        y_jitter = plot_pos + rng_jitter.uniform(-0.25, 0.25, size=len(a))
         colors = cmap(fv_norm)
 
         ax.scatter(a, y_jitter, c=colors, alpha=0.55, s=8, linewidths=0)
 
     ax.set_yticks(np.arange(n_features))
-    ax.set_yticklabels(feature_names)
+    ax.set_yticklabels([feature_names[i] for i in order])
+    ax.invert_yaxis()   # most important at top
     ax.axvline(0, color="black", lw=0.8, ls="--")
     ax.set_xlabel("Attribution (MWE/yr)")
     ax.set_title(f"Feature attribution beeswarm  (n={len(idx)} points)")
