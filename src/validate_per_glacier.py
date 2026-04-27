@@ -173,14 +173,14 @@ def _draw_timeseries_ax(ax, sub: pd.DataFrame, name: str, rgi: str,
     s_epi = valid["model_epistemic_std"].values \
         if "model_epistemic_std" in valid.columns else None
 
-    ax.fill_between(yr, pred - s_tot, pred + s_tot,
-                    alpha=0.20, color="steelblue", label="±1σ total")
+    ax.fill_between(yr, pred - 2 * s_tot, pred + 2 * s_tot,
+                    alpha=0.20, color="steelblue", label="±2σ total")
     if s_str is not None:
-        ax.fill_between(yr, pred - s_str, pred + s_str,
-                        alpha=0.25, color="mediumorchid", label="±1σ structural")
+        ax.fill_between(yr, pred - 2 * s_str, pred + 2 * s_str,
+                        alpha=0.25, color="mediumorchid", label="±2σ structural")
     if s_epi is not None:
-        ax.fill_between(yr, pred - s_epi, pred + s_epi,
-                        alpha=0.35, color="darkorange", label="±1σ epistemic")
+        ax.fill_between(yr, pred - 2 * s_epi, pred + 2 * s_epi,
+                        alpha=0.35, color="darkorange", label="±2σ epistemic")
     ax.plot(yr, pred, color="steelblue", lw=1.6, label="Model median")
     ax.plot(yr, obs,  color="black",     lw=1.4, label="WGMS in-situ")
 
@@ -210,8 +210,8 @@ def _draw_scatter_ax(ax, sub: pd.DataFrame, name: str) -> None:
     s_tot = valid["model_total_std"].values
     years = valid["YEAR"].values
 
-    lo  = min(np.nanmin(obs), np.nanmin(pred - s_tot))
-    hi  = max(np.nanmax(obs), np.nanmax(pred + s_tot))
+    lo  = min(np.nanmin(obs), np.nanmin(pred - 2 * s_tot))
+    hi  = max(np.nanmax(obs), np.nanmax(pred + 2 * s_tot))
     pad = (hi - lo) * 0.06
     lo -= pad; hi += pad
     diag = np.linspace(lo, hi, 200)
@@ -219,7 +219,7 @@ def _draw_scatter_ax(ax, sub: pd.DataFrame, name: str) -> None:
     ax.plot(diag, diag, "k--", lw=1.0, zorder=1)
     sc = ax.scatter(obs, pred, c=years, cmap="viridis", s=18,
                     zorder=4, alpha=0.85)
-    ax.errorbar(obs, pred, yerr=s_tot,
+    ax.errorbar(obs, pred, yerr=2 * s_tot,
                 fmt="none", ecolor="gray", elinewidth=0.7,
                 capsize=2.0, alpha=0.55, zorder=3)
     plt.colorbar(sc, ax=ax, label="Year", shrink=0.75)
@@ -248,9 +248,9 @@ def _draw_residuals_ax(ax, sub: pd.DataFrame, name: str, rgi: str) -> None:
     resid = valid["model_mean_mwe"].values - valid["obs_mwe"].values
     s_tot = valid["model_total_std"].values
 
-    ax.fill_between(years, -s_tot, s_tot,
+    ax.fill_between(years, -2 * s_tot, 2 * s_tot,
                     color="steelblue", alpha=0.18, zorder=1,
-                    label="±1σ model total")
+                    label="±2σ model total")
     ax.bar(years, resid,
            color=np.where(resid >= 0, "steelblue", "firebrick"),
            alpha=0.75, width=0.8, zorder=2)
@@ -288,7 +288,7 @@ def plot_timeseries(joined: pd.DataFrame, output_path: Path) -> None:
         axes_flat[idx].set_visible(False)
     fig.suptitle(
         "Per-glacier model vs. WGMS in-situ (MWE/yr)\n"
-        "Blue: ±1σ total  |  Purple: ±1σ structural  |  Orange: ±1σ epistemic",
+        "Blue: ±2σ total  |  Purple: ±2σ structural  |  Orange: ±2σ epistemic",
         fontsize=9,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -312,7 +312,7 @@ def plot_scatter(joined: pd.DataFrame, output_path: Path) -> None:
         axes_flat[idx].set_visible(False)
     fig.suptitle(
         "Per-glacier scatter: model median vs. WGMS in-situ\n"
-        "Error bars: ±1σ model total  |  Colour: year",
+        "Error bars: ±2σ model total  |  Colour: year",
         fontsize=9,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -336,7 +336,7 @@ def plot_residuals(joined: pd.DataFrame, output_path: Path) -> None:
         axes_flat[idx].set_visible(False)
     fig.suptitle(
         "Residuals: model median − WGMS in-situ (MWE/yr)\n"
-        "Blue band: ±1σ model total uncertainty",
+        "Blue band: ±2σ model total uncertainty",
         fontsize=9,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])
