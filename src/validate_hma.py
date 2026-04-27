@@ -80,14 +80,11 @@ def _load_satellite(path: Path) -> pd.DataFrame:
     df["date"] = pd.to_datetime(df["date"], dayfirst=True)
     df["frac_year"] = df["date"].dt.year + (df["date"].dt.dayofyear - 1) / 365.25
 
-    # Pick the end-of-ablation-season minimum within each HMA hydrological year.
-    # HMA hydro year: Oct 1 (year Y) \u2192 Sep 30 (year Y+1), labelled by ending year Y+1.
-    # Minimum cumulative mass = maximum ice loss point = end of melt season.
-    df["hydro_year"] = df["date"].apply(
-        lambda d: d.year + 1 if d.month >= 10 else d.year
-    )
+    # Pick the end-of-ablation minimum within each calendar year.
+    # Minimum cumulative mass = maximum ice loss point within the year.
+    df["calendar_year"] = df["date"].dt.year
     df = (
-        df.loc[df.groupby("hydro_year")["mass_changes"].idxmin()]
+        df.loc[df.groupby("calendar_year")["mass_changes"].idxmin()]
         .reset_index(drop=True)
     )
     return df.sort_values("frac_year").reset_index(drop=True)
@@ -195,15 +192,14 @@ def align_satellite(sat: pd.DataFrame, cum_df: pd.DataFrame) -> pd.DataFrame:
 def satellite_annual(sat: pd.DataFrame) -> pd.DataFrame:
     """
     Derive annual Gt/yr rates from end-of-ablation-season snapshots
-    (one per hydrological year, selected as the minimum within each Oct–Sep window).
+    (one per calendar year, selected as the minimum cumulative mass within each year).
 
     Annual rate = cumulative[t] - cumulative[t-1].
     Error propagation: mass_errors are cumulative 2σ errors, so:
         annual_err = sqrt(err_t² + err_{t-1}²)
     """
     sat = sat.copy()
-    # Group by hydrological year (already one-per-hydro-year after _load_satellite)
-    grp = sat.rename(columns={"hydro_year": "year"}).groupby("year").agg(
+    grp = sat.rename(columns={"calendar_year": "year"}).groupby("year").agg(
         mass_changes=("mass_changes", "mean"),
         mass_errors=("mass_errors", "mean"),
     ).reset_index()
