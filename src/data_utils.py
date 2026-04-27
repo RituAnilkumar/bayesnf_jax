@@ -147,7 +147,10 @@ def load_features(
     if "Area" in df.columns:
         df["log_Area"] = np.log1p(df["Area"])
     cols_present = [c for c in feature_cols if c in df.columns]
-    return df[["rgi_id", "year", "time_index"] + cols_present]
+    # Always carry Area through as a metadata column for area-weighted regional means,
+    # even though it is not in feature_cols (the model uses log_Area instead).
+    extra_meta = [c for c in ["Area"] if c in df.columns and c not in cols_present]
+    return df[["rgi_id", "year", "time_index"] + cols_present + extra_meta]
 
 
 # ---------------------------------------------------------------------------
