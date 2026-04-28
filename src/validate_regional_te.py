@@ -53,7 +53,7 @@ def run_validation(cfg: dict) -> None:
     te_group     = cfg["te_group"]           # "time_encoding" or "no_time_encoding"
     region_map   = cfg["region_map"]
     region_names = cfg.get("region_names", {})
-    ens_filename = cfg.get("ensemble_filename", "top_models_regional_mwe.csv")
+    ens_filename = cfg.get("ensemble_filename", "ensemble_regional_mwe.csv")
     sigma_mult   = float(cfg.get("sigma_mult", 1))
     min_overlap  = int(cfg.get("min_overlap_years", 5))
 
@@ -136,6 +136,9 @@ def _parse_args() -> argparse.Namespace:
                         help="Which TE subfolder to validate (overrides config).")
     parser.add_argument("--ensemble_base_dir", default=None)
     parser.add_argument("--output_dir", default=None)
+    parser.add_argument("--ensemble_filename", default=None,
+                        help="CSV filename to load from each region/te_group/ dir "
+                             "(default: ensemble_regional_mwe.csv).")
     return parser.parse_args()
 
 
@@ -155,6 +158,8 @@ def main() -> None:
         cfg["ensemble_base_dir"] = args.ensemble_base_dir
     if args.output_dir is not None:
         cfg["output_dir"] = args.output_dir
+    if args.ensemble_filename is not None:
+        cfg["ensemble_filename"] = args.ensemble_filename
 
     if "te_group" not in cfg:
         raise ValueError("te_group must be set in config or via --te_group "

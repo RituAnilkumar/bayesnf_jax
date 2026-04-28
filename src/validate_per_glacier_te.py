@@ -46,8 +46,9 @@ from src.validate_per_glacier import (
 import numpy as np
 
 
-def _load_glacier_csv_te(ensemble_base: Path, subdir: str, te_group: str) -> pd.DataFrame | None:
-    path = ensemble_base / subdir / te_group / "top_models_glacier.csv"
+def _load_glacier_csv_te(ensemble_base: Path, subdir: str, te_group: str,
+                         glacier_filename: str = "ensemble_glacier.csv") -> pd.DataFrame | None:
+    path = ensemble_base / subdir / te_group / glacier_filename
     if not path.exists():
         warnings.warn(f"top_models_glacier.csv not found: {path}")
         return None
@@ -61,14 +62,15 @@ def _load_glacier_csv_te(ensemble_base: Path, subdir: str, te_group: str) -> pd.
     return df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
 
 
-def build_joined(ref: pd.DataFrame, ensemble_base: Path, te_group: str) -> pd.DataFrame:
+def build_joined(ref: pd.DataFrame, ensemble_base: Path, te_group: str,
+                 glacier_filename: str = "ensemble_glacier.csv") -> pd.DataFrame:
     region_cache: dict[str, pd.DataFrame] = {}
 
     model_rows = []
     for _, row in ref.iterrows():
         subdir = _rgi_to_subdir(row["rgi_id"])
         if subdir not in region_cache:
-            gl = _load_glacier_csv_te(ensemble_base, subdir, te_group)
+            gl = _load_glacier_csv_te(ensemble_base, subdir, te_group, glacier_filename)
             region_cache[subdir] = gl
 
         gl = region_cache[subdir]
@@ -109,6 +111,8 @@ def run(cfg: dict) -> None:
     print(f"  Reference CSV : {ref_csv}")
     print(f"  Output dir    : {output_dir}\n")
 
+    glacier_filename = cfg.get("glacier_filename", "ensemble_glacier.csv")
+
     ref = pd.read_csv(ref_csv)
     ref["obs_mwe"] = ref["ANNUAL_BALANCE"] * MM_TO_MWE
 
@@ -116,7 +120,7 @@ def run(cfg: dict) -> None:
           f"{ref['rgi_id'].nunique()} glaciers | "
           f"{int(ref['YEAR'].min())}–{int(ref['YEAR'].max())}")
 
-    joined = build_joined(ref, ensemble_base, te_group)
+    joined = build_joined(ref, ensemble_base, te_group, glacier_filename)
     n_matched = joined["model_mean_mwe"].notna().sum()
     print(f"  Matched {n_matched}/{len(joined)} rows to model predictions")
 
@@ -167,6 +171,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--ensemble_base_dir", default=None)
     p.add_argument("--output_dir", default=None)
     p.add_argument("--ref_csv", default=None)
+    p.add_argument("--glacier_filename", default=None,
+                   help="Glacier CSV filename inside each region/te_group/ dir "
+                        "(default: ensemble_glacier.csv).")
     return p.parse_args()
 
 
@@ -182,6 +189,7 @@ def main() -> None:
     if args.ensemble_base_dir:          cfg["ensemble_base_dir"]     = args.ensemble_base_dir
     if args.output_dir:                 cfg["per_glacier_output_dir"] = args.output_dir
     if args.ref_csv:                    cfg["ref_csv"]               = args.ref_csv
+    if args.glacier_filename:           cfg["glacier_filename"]      = args.glacier_filename
 
     if "te_group" not in cfg:
         raise ValueError("te_group must be set in config or via --te_group "
