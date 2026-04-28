@@ -85,7 +85,7 @@ def build_joined(ref: pd.DataFrame, ensemble_base: Path, te_group: str,
 
         r = match.iloc[0]
         model_rows.append({
-            "model_mean_mwe":       r.get("mean_mwe",       np.nan),
+            "model_mean_mwe":       r.get("median_mwe", r.get("mean_mwe", np.nan)),
             "model_total_std":      r.get("total_std",      np.nan),
             "model_epistemic_std":  r.get("epistemic_std",  np.nan),
             "model_structural_std": r.get("structural_std", np.nan),
