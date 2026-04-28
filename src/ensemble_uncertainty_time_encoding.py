@@ -5,8 +5,9 @@ Variant of ensemble_uncertainty_split.py for sweeps that include
 model.use_time_encoding=true,false as a sweep axis, with model.heteroscedastic=true fixed.
 
 Reads use_time_encoding from each run's .hydra/config.yaml, partitions all completed
-runs into two groups, selects the top-N (default 5) by GLaMBIE test RMSE within each
-group, and writes separate ensemble outputs using equal weights across the top-N:
+runs into two groups, selects the top-N (default 5) within each group by a configurable
+selection metric (default: glambie_rmse; alternatives: loyo_rmse, loyo_r2), and writes
+separate ensemble outputs using equal weights across the top-N:
 
     {output_dir}/time_encoding/    — runs where model.use_time_encoding=true
     {output_dir}/no_time_encoding/ — runs where model.use_time_encoding=false
@@ -94,29 +95,38 @@ def _run_top_n_group(
     output_dir: Path,
     top_n: int,
     min_runs: int,
+    selection_metric: str = "glambie_rmse",
 ) -> None:
     """
     Run the full ensemble pipeline for one use_time_encoding group.
 
-    Selects top_n runs by glambie_rmse (ascending), uses equal weights.
+    Selects top_n runs by selection_metric, uses equal weights.
     All runs are expected to be heteroscedastic=true; raises if aleatoric_std
     is missing from any preds_full.csv.
 
     Args:
-        group_df:   Subset of the results DataFrame for this group.
-                    Must have columns: run_dir, glambie_rmse.
-        output_dir: Where to write this group's outputs.
-        top_n:      Number of top runs to include in ensemble.
-        min_runs:   Minimum runs with valid glambie_rmse required to proceed.
+        group_df:         Subset of the results DataFrame for this group.
+        output_dir:       Where to write this group's outputs.
+        top_n:            Number of top runs to include in ensemble.
+        min_runs:         Minimum runs with a valid selection_metric required to proceed.
+        selection_metric: Column to rank by. RMSE metrics are sorted ascending
+                          (lower = better); loyo_r2 is sorted descending (higher = better).
+                          One of: "glambie_rmse", "loyo_rmse", "loyo_r2".
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Select top-N by glambie_rmse
-    valid = group_df.dropna(subset=["glambie_rmse"]).sort_values("glambie_rmse").reset_index(drop=True)
+    # Sort direction: R² metrics are higher-is-better; RMSE metrics are lower-is-better
+    ascending = selection_metric != "loyo_r2"
+
+    valid = (
+        group_df.dropna(subset=[selection_metric])
+        .sort_values(selection_metric, ascending=ascending)
+        .reset_index(drop=True)
+    )
     n_valid = len(valid)
     if n_valid < min_runs:
         warnings.warn(
-            f"  Only {n_valid} runs with valid glambie_rmse (threshold={min_runs}) "
+            f"  Only {n_valid} runs with valid {selection_metric} (threshold={min_runs}) "
             f"— skipping this group."
         )
         return
@@ -124,10 +134,12 @@ def _run_top_n_group(
     top = valid.head(top_n).reset_index(drop=True)
     if len(top) < top_n:
         print(f"  WARNING: only {len(top)} valid runs available (requested top {top_n}).")
-    print(f"  Top {len(top)} runs by GLaMBIE RMSE:")
+    print(f"  Top {len(top)} runs by {selection_metric} ({'↑ higher better' if not ascending else '↓ lower better'}):")
     for _, row in top.iterrows():
-        print(f"    {row['run_id']}  glambie_rmse={row['glambie_rmse']:.4f}  "
-              f"loyo_rmse={row.get('loyo_rmse', float('nan')):.4f}")
+        print(f"    {row['run_id']}  {selection_metric}={row[selection_metric]:.4f}  "
+              f"glambie_rmse={row.get('glambie_rmse', float('nan')):.4f}  "
+              f"loyo_rmse={row.get('loyo_rmse', float('nan')):.4f}  "
+              f"loyo_r2={row.get('loyo_r2', float('nan')):.4f}")
 
     top.to_csv(output_dir / "top_runs_info.csv", index=False)
 
@@ -308,12 +320,18 @@ def run_ensemble_time_encoding(cfg: dict) -> None:
     multirun_root = Path(cfg["multirun_root"])
     output_dir    = Path(cfg["output_dir"])
 
-    test_years = list(cfg.get("glambie_test_years", [2020, 2021, 2022, 2023, 2024]))
-    min_runs   = int(cfg.get("min_runs_per_region", 1))
-    top_n      = int(cfg.get("top_n", 5))
+    test_years        = list(cfg.get("glambie_test_years", [2020, 2021, 2022, 2023, 2024]))
+    min_runs          = int(cfg.get("min_runs_per_region", 1))
+    top_n             = int(cfg.get("top_n", 5))
+    selection_metric  = str(cfg.get("selection_metric", "glambie_rmse"))
+
+    valid_metrics = {"glambie_rmse", "loyo_rmse", "loyo_r2"}
+    if selection_metric not in valid_metrics:
+        raise ValueError(f"selection_metric must be one of {valid_metrics}, got '{selection_metric}'")
 
     print(f"\n=== Ensemble split by use_time_encoding: {multirun_root.name} ===")
-    print(f"  Selecting top {top_n} runs per group by GLaMBIE RMSE over years {test_years}")
+    print(f"  Selecting top {top_n} runs per group by {selection_metric}"
+          + (f" over GLaMBIE test years {test_years}" if selection_metric == "glambie_rmse" else ""))
 
     # Build results table (no composite scoring needed — we rank by glambie_rmse directly)
     results_df = build_results_df(multirun_root, test_years, min_runs_per_region=1)
@@ -342,7 +360,7 @@ def run_ensemble_time_encoding(cfg: dict) -> None:
         if group.empty:
             print("  No runs found — skipping.")
             continue
-        _run_top_n_group(group, group_output_dir, top_n, min_runs)
+        _run_top_n_group(group, group_output_dir, top_n, min_runs, selection_metric)
 
 
 # ---------------------------------------------------------------------------

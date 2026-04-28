@@ -34,6 +34,15 @@ softmax_temperature: 0.1
 # Skip ensemble if fewer than this many runs have complete metrics.
 min_runs_per_region: 5
 
+# Metric used to rank and select the top-N runs per group
+# (only used by ensemble_uncertainty_time_encoding.py and ensemble_ep_alea.py).
+#   glambie_rmse  — GLaMBIE held-out test RMSE (lower is better) [default]
+#   loyo_rmse     — pretrain leave-one-year-out RMSE (lower is better)
+#   loyo_r2       — pretrain leave-one-year-out R² (higher is better)
+# NOTE: loyo_r2 requires pipeline.stages to include pretrain_cv so that
+# ._cv/metrics_oos.csv exists. Check this before switching.
+selection_metric: loyo_r2
+
 # Note: glambie_path, inp_dir and reg_subdir are read automatically from
 # .hydra/config.yaml inside the first valid run directory — no need to
 # specify them here.

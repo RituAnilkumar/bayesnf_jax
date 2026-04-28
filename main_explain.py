@@ -135,7 +135,7 @@ def _get_arch_key(params: dict):
         return None
 
 
-def _build_bnf_model(mc, arch_key: tuple) -> "BayesianNeuralField":
+def _build_bnf_model(mc, arch_key: tuple, use_time_encoding: bool = True) -> "BayesianNeuralField":
     """Build a BayesianNeuralField from a (n_layers, nhidden, out_features) arch key."""
     n_layers, nhidden, out_features = arch_key
     return BayesianNeuralField(
@@ -143,7 +143,22 @@ def _build_bnf_model(mc, arch_key: tuple) -> "BayesianNeuralField":
         n_fourier=int(mc.n_fourier),
         heteroscedastic=(out_features == 2),
         sigma_floor=float(mc.get("sigma_floor", 0.05)),
+        use_time_encoding=use_time_encoding,
     )
+
+
+def _get_run_use_time_encoding(run_dir: str) -> bool:
+    """Read model.use_time_encoding from a run's saved Hydra config (default True)."""
+    cfg_path = os.path.join(run_dir, ".hydra", "config.yaml")
+    if not os.path.exists(cfg_path):
+        return True
+    try:
+        import yaml as _yaml
+        with open(cfg_path) as fh:
+            raw = _yaml.safe_load(fh)
+        return bool(raw.get("model", {}).get("use_time_encoding", True))
+    except Exception:
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -388,34 +403,44 @@ def main(cfg: DictConfig) -> None:
         ]
 
         arch_keys = [_get_arch_key(p) for _, p in all_params_raw]
-        valid_keys = [k for k in arch_keys if k is not None]
-        if not valid_keys:
+        ute_flags = [_get_run_use_time_encoding(d) for d in run_subdirs]
+        # Group by (n_layers, nhidden, out_features, use_time_encoding) so runs with
+        # different time-encoding settings (different first-layer shapes) are not mixed.
+        full_keys = [
+            (ak[0], ak[1], ak[2], ute) if ak is not None else None
+            for ak, ute in zip(arch_keys, ute_flags)
+        ]
+        valid_full_keys = [k for k in full_keys if k is not None]
+        if not valid_full_keys:
             raise RuntimeError("Could not detect architecture from any ensemble member.")
 
-        # Pick the most common architecture across all members
-        arch_counts = Counter(valid_keys)
-        majority_arch = arch_counts.most_common(1)[0][0]
+        full_key_counts = Counter(valid_full_keys)
+        majority_full   = full_key_counts.most_common(1)[0][0]
+        majority_arch   = majority_full[:3]
+        majority_ute    = majority_full[3]
         n_layers, nhidden, out_features = majority_arch
         heteroscedastic = (out_features == 2)
 
-        if len(arch_counts) > 1:
-            print(f"[explain] Multiple architectures detected across ensemble members:")
-            for k, cnt in arch_counts.most_common():
-                tag = " ← selected (majority)" if k == majority_arch else ""
-                print(f"  layers={k[0]} nhidden={k[1]} out={k[2]}  ×{cnt} runs{tag}")
+        if len(full_key_counts) > 1:
+            print(f"[explain] Multiple arch+TE combinations detected across ensemble members:")
+            for k, cnt in full_key_counts.most_common():
+                tag = " ← selected (majority)" if k == majority_full else ""
+                print(f"  layers={k[0]} nhidden={k[1]} out={k[2]} use_time_encoding={k[3]}  "
+                      f"×{cnt} runs{tag}")
 
         compatible_dirs = []
         all_params = []
-        for (d, p), key in zip(all_params_raw, arch_keys):
-            if key == majority_arch:
+        for (d, p), fk in zip(all_params_raw, full_keys):
+            if fk == majority_full:
                 compatible_dirs.append(d)
                 all_params.append(p)
             else:
                 print(f"[explain] Skipping {os.path.basename(d)} — "
-                      f"arch {key} != majority {majority_arch}")
+                      f"arch/TE {fk} != majority {majority_full}")
 
         print(f"[explain] Using {len(all_params)}/{len(all_params_raw)} compatible ensemble members "
-              f"(layers={n_layers} nhidden={nhidden} heteroscedastic={heteroscedastic})")
+              f"(layers={n_layers} nhidden={nhidden} heteroscedastic={heteroscedastic} "
+              f"use_time_encoding={majority_ute})")
 
         # ------------------------------------------------------------------
         # Compute model weights (performance-based or equal)
@@ -456,7 +481,7 @@ def main(cfg: DictConfig) -> None:
                 ensemble_weights = ensemble_weights / ensemble_weights.sum()
             print(f"[explain] top_k_models={top_k_models}: reduced to {len(all_params)} members")
 
-        model = _build_bnf_model(mc, majority_arch)
+        model = _build_bnf_model(mc, majority_arch, use_time_encoding=majority_ute)
 
         mean_attrs, std_attrs, std_epistemic, std_structural, sample_idx = \
             compute_ensemble_attributions(
@@ -499,7 +524,8 @@ def main(cfg: DictConfig) -> None:
         run_params      = _load_params(pkl_path)
         arch_key        = _get_arch_key(run_params)
         heteroscedastic = (arch_key[2] == 2) if arch_key else False
-        model           = _build_bnf_model(mc, arch_key)
+        model           = _build_bnf_model(mc, arch_key,
+                              use_time_encoding=bool(mc.get("use_time_encoding", True)))
 
         mean_attrs, std_attrs, sample_idx = compute_attributions(
             model=model,
@@ -567,7 +593,8 @@ def main(cfg: DictConfig) -> None:
         loaded_params   = _load_params(actual_pkl)
         arch_key        = _get_arch_key(loaded_params)
         heteroscedastic = (arch_key[2] == 2) if arch_key else False
-        model           = _build_bnf_model(mc, arch_key)
+        model           = _build_bnf_model(mc, arch_key,
+                              use_time_encoding=bool(mc.get("use_time_encoding", True)))
 
         scaler        = _load_scaler(params_dir)
         target_scaler = _load_target_scaler(params_dir)
