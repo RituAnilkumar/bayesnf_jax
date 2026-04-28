@@ -22,7 +22,7 @@ Metrics reported (all at 1σ, consistent with model output convention)
   rmse          sqrt(mean((model-obs)²))
   mae           mean(|model-obs|)
   corr (r)      Pearson correlation
-  coverage_pct  % years where obs falls within model ±2σ total band
+  coverage_pct  % years where obs falls within model ±1σ total band
 
 Usage
 -----
@@ -143,7 +143,7 @@ def _metrics(sub: pd.DataFrame) -> dict:
     s    = valid["model_total_std"].values
     diff = pred - obs
     n    = len(diff)
-    within = int(np.sum((obs >= pred - 2 * s) & (obs <= pred + 2 * s)))
+    within = int(np.sum((obs >= pred - s) & (obs <= pred + s)))
     return {
         "n_years":      n,
         "bias":         float(np.mean(diff)),
@@ -173,14 +173,14 @@ def _draw_timeseries_ax(ax, sub: pd.DataFrame, name: str, rgi: str,
     s_epi = valid["model_epistemic_std"].values \
         if "model_epistemic_std" in valid.columns else None
 
-    ax.fill_between(yr, pred - 2 * s_tot, pred + 2 * s_tot,
-                    alpha=0.20, color="steelblue", label="±2σ total")
+    ax.fill_between(yr, pred - s_tot, pred + s_tot,
+                    alpha=0.20, color="steelblue", label="±1σ total")
     if s_str is not None:
-        ax.fill_between(yr, pred - 2 * s_str, pred + 2 * s_str,
-                        alpha=0.25, color="mediumorchid", label="±2σ structural")
+        ax.fill_between(yr, pred - s_str, pred + s_str,
+                        alpha=0.25, color="mediumorchid", label="±1σ structural")
     if s_epi is not None:
-        ax.fill_between(yr, pred - 2 * s_epi, pred + 2 * s_epi,
-                        alpha=0.35, color="darkorange", label="±2σ epistemic")
+        ax.fill_between(yr, pred - s_epi, pred + s_epi,
+                        alpha=0.35, color="darkorange", label="±1σ epistemic")
     ax.plot(yr, pred, color="steelblue", lw=1.6, label="Model median")
     ax.plot(yr, obs,  color="black",     lw=1.4, label="WGMS in-situ")
 
@@ -191,7 +191,7 @@ def _draw_timeseries_ax(ax, sub: pd.DataFrame, name: str, rgi: str,
         f"RMSE={m.get('rmse', float('nan')):.3f}  "
         f"bias={m.get('bias', float('nan')):+.3f}  "
         f"r={m.get('corr', float('nan')):.2f}  "
-        f"cov2σ={m.get('coverage_pct', float('nan')):.0f}%",
+        f"cov1σ={m.get('coverage_pct', float('nan')):.0f}%",
         fontsize=title_fontsize,
     )
     ax.axhline(0, color="black", lw=0.5, ls="--")
@@ -210,8 +210,8 @@ def _draw_scatter_ax(ax, sub: pd.DataFrame, name: str) -> None:
     s_tot = valid["model_total_std"].values
     years = valid["YEAR"].values
 
-    lo  = min(np.nanmin(obs), np.nanmin(pred - 2 * s_tot))
-    hi  = max(np.nanmax(obs), np.nanmax(pred + 2 * s_tot))
+    lo  = min(np.nanmin(obs), np.nanmin(pred - s_tot))
+    hi  = max(np.nanmax(obs), np.nanmax(pred + s_tot))
     pad = (hi - lo) * 0.06
     lo -= pad; hi += pad
     diag = np.linspace(lo, hi, 200)
@@ -219,7 +219,7 @@ def _draw_scatter_ax(ax, sub: pd.DataFrame, name: str) -> None:
     ax.plot(diag, diag, "k--", lw=1.0, zorder=1)
     sc = ax.scatter(obs, pred, c=years, cmap="viridis", s=18,
                     zorder=4, alpha=0.85)
-    ax.errorbar(obs, pred, yerr=2 * s_tot,
+    ax.errorbar(obs, pred, yerr=s_tot,
                 fmt="none", ecolor="gray", elinewidth=0.7,
                 capsize=2.0, alpha=0.55, zorder=3)
     plt.colorbar(sc, ax=ax, label="Year", shrink=0.75)
@@ -229,7 +229,7 @@ def _draw_scatter_ax(ax, sub: pd.DataFrame, name: str) -> None:
         f"{name}\n"
         f"r={m.get('corr', float('nan')):.2f}  "
         f"RMSE={m.get('rmse', float('nan')):.3f}  "
-        f"cov2σ={m.get('coverage_pct', float('nan')):.0f}%",
+        f"cov1σ={m.get('coverage_pct', float('nan')):.0f}%",
         fontsize=8,
     )
     ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
@@ -248,9 +248,9 @@ def _draw_residuals_ax(ax, sub: pd.DataFrame, name: str, rgi: str) -> None:
     resid = valid["model_mean_mwe"].values - valid["obs_mwe"].values
     s_tot = valid["model_total_std"].values
 
-    ax.fill_between(years, -2 * s_tot, 2 * s_tot,
+    ax.fill_between(years, -s_tot, s_tot,
                     color="steelblue", alpha=0.18, zorder=1,
-                    label="±2σ model total")
+                    label="±1σ model total")
     ax.bar(years, resid,
            color=np.where(resid >= 0, "steelblue", "firebrick"),
            alpha=0.75, width=0.8, zorder=2)
@@ -444,7 +444,7 @@ def run(cfg: dict) -> None:
               f"RMSE={m.get('rmse', float('nan')):.3f}  "
               f"bias={m.get('bias', float('nan')):+.3f}  "
               f"r={m.get('corr', float('nan')):.2f}  "
-              f"cov2σ={m.get('coverage_pct', float('nan')):.0f}%")
+              f"cov1σ={m.get('coverage_pct', float('nan')):.0f}%")
 
     metrics_df = pd.DataFrame(metrics_rows)
     metrics_df.to_csv(output_dir / "per_glacier_metrics.csv",

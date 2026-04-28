@@ -144,7 +144,7 @@ def run(cfg: dict) -> None:
               f"RMSE={m.get('rmse', float('nan')):.3f}  "
               f"bias={m.get('bias', float('nan')):+.3f}  "
               f"r={m.get('corr', float('nan')):.2f}  "
-              f"cov2σ={m.get('coverage_pct', float('nan')):.0f}%")
+              f"cov1σ={m.get('coverage_pct', float('nan')):.0f}%")
 
     pd.DataFrame(metrics_rows).to_csv(
         output_dir / "per_glacier_metrics.csv", index=False, float_format="%.4f"
