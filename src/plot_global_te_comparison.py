@@ -117,8 +117,8 @@ def _load_glambie_global(path: str | Path) -> pd.DataFrame:
 # Plot helpers
 # ---------------------------------------------------------------------------
 
-_COLOR_TE  = "steelblue"
-_COLOR_NO  = "darkorange"
+_COLOR_TE  = "darkorange"
+_COLOR_NO  = "steelblue"
 _COLOR_OBS = "black"
 
 _LABEL_TE  = "Time encoding"
