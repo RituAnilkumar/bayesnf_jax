@@ -50,7 +50,7 @@ validation_data/*/*/*
 # SLURM logs
 out_files/
 err_files/
-hyperparam_analysis/
+hyperparam_analysis*/
 *.out
 *.err
 

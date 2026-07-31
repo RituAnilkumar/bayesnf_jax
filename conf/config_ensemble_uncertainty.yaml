@@ -32,7 +32,7 @@ glambie_test_years: [2000, 2001, 2020, 2021, 2022, 2023]
 softmax_temperature: 0.1
 
 # Skip ensemble if fewer than this many runs have complete metrics.
-min_runs_per_region: 5
+min_runs_per_region: 3
 
 # Metric used to rank and select the top-N runs per group
 # (only used by ensemble_uncertainty_time_encoding.py and ensemble_ep_alea.py).

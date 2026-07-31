@@ -118,7 +118,7 @@ python src/hyperparam_tuning.py \
 # All regions (batch)
 for i in $(seq -w 1 19); do
   python src/hyperparam_tuning.py \
-    --multirun_root /scratch/.../multirun/r${i}_*/
+    --multirun_root /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r${i}_499*/
 done
 ```
 
@@ -140,8 +140,8 @@ which partitions runs into `aleatoric/` (heteroscedastic=true) and `epistemic_st
 ```bash
 for i in $(seq -w 1 19); do
   python src/ensemble_uncertainty_split.py \
-    --multirun_root /scratch/.../multirun/r${i}_*/ \
-    --output_dir outputs/ensemble/r${i}
+    --multirun_root /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r${i}_*/ \
+    --output_dir outputs/ensemble_no_ts/r${i}
 done
 ```
 
@@ -152,7 +152,7 @@ epistemic, aleatoric, and structural components:
 ```bash
 for i in $(seq -w 1 19); do
   python src/ensemble_ep_alea.py \
-    --multirun_root /scratch/.../multirun/r${i}_*/ \
+    --multirun_root /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r${i}_*/ \
     --output_dir outputs/best_model/r${i}
 done
 ```
@@ -193,11 +193,11 @@ and structural (model-to-model) uncertainty:
 
 ```bash
 python main_explain.py \
-  explain.ensemble_dir=/scratch/.../multirun/r06_12345
+  explain.ensemble_dir=/scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r06_12345
 
 # To generate a waterfall plot for a specific glacier-year:
 python main_explain.py \
-  explain.ensemble_dir=/scratch/.../multirun/r06_12345 \
+  explain.ensemble_dir=/scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r06_12345 \
   explain.waterfall_rgi_id=RGI60-06.00001 \
   explain.waterfall_year=2010
 ```
@@ -351,3 +351,13 @@ for r in $(seq -w 1 19); do
   sbatch --export=ALL,REGION=r${r} --job-name=${r}_seasonal run_regs.sh
 done
 ```
+
+After all runs are complete, I do a hyperparameter tuning and ensemble generation followed by validation regional and per glacier. Fianlly there is explain:
+
+for i in $(seq -w 1 19); do   python src/hyperparam_tuning_te.py \\;     --multirun_root /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r${i}_439*/; done
+
+for i in $(seq -w 1 19); do   python src/ensemble_uncertainty_time_encoding.py --multirun_root /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r${i}_439*/ --output_dir outputs/ensemble_te_r2/r${i}; done
+
+python src/validate_regional_te.py   --config conf/config_validate_regional.yaml   --te_group no_time_encoding   --ensemble_base_dir /scratch/b5at/ranil.b5at/bayesnf_jax/outputs/ensemble_te_r2   --output_dir outputs/validation_regional_no_te   --ensemble_filename ensemble_regional_mwe.csv
+
+python src/validate_per_glacier_te.py --te_group no_time_encoding   --ensemble_base_dir /scratch/b5at/ranil.b5at/bayesnf_jax/outputs/ensemble_te_r2   --output_dir outputs/validation_pergla_te

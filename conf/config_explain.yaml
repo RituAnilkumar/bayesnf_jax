@@ -80,7 +80,7 @@ explain:
   loyo_weight: 0.0               # weight on LOYO RMSE in composite score
   glambie_weight: 1.0            # weight on GLaMBIE RMSE in composite score
   glambie_test_years: [2000, 2001, 2020, 2021, 2022, 2023]
-  min_runs: 5                    # minimum runs required to attempt performance weighting
+  min_runs: 3                    # minimum runs required to attempt performance weighting
   top_k_models: 5             # restrict to top-k models before computing IG (saves time)
 
   # Features to exclude from a second set of plots (suffix _masked).
@@ -103,6 +103,6 @@ hydra:
   run:
     # Fixed base dir — output subdir is determined at runtime from the run/ensemble path.
     # This avoids interpolating ${model.reg_subdir} which would fail when model= is omitted.
-    dir: outputs/explain_top5_lim_glamb_meanbaseline
+    dir: outputs/explain_no_ts
   job:
     chdir: true
