@@ -99,6 +99,35 @@ def _load_group_global(ensemble_root: Path, group: str) -> pd.DataFrame | None:
     })
 
 
+def _load_wgms_global(wgms_dir: str | Path) -> pd.DataFrame:
+    """
+    Sum regional WGMS/Dussaillant gt values across all available CSV files.
+
+    Each file has columns: year, gt, gt_sigma.
+    SA1 + SA2 are summed for r17; all other files contribute one region each.
+    Returns DataFrame with columns: year, gt, gt_sigma (quadrature sum of sigmas).
+    """
+    wgms_dir = Path(wgms_dir)
+    csvs = sorted(wgms_dir.glob("*.csv"))
+    if not csvs:
+        raise FileNotFoundError(f"No CSV files found in {wgms_dir}")
+
+    all_dfs = []
+    for p in csvs:
+        df = pd.read_csv(p)[["year", "gt", "gt_sigma"]].dropna()
+        all_dfs.append(df)
+
+    combined = pd.concat(all_dfs, ignore_index=True)
+    grouped = (
+        combined
+        .groupby("year")
+        .agg(gt=("gt", "sum"), gt_sigma=("gt_sigma", lambda x: np.sqrt((x**2).sum())))
+        .reset_index()
+        .sort_values("year")
+    )
+    return grouped
+
+
 def _load_glambie_global(path: str | Path) -> pd.DataFrame:
     """
     Load GLaMBIE global CSV.
@@ -117,13 +146,15 @@ def _load_glambie_global(path: str | Path) -> pd.DataFrame:
 # Plot helpers
 # ---------------------------------------------------------------------------
 
-_COLOR_TE  = "darkorange"
-_COLOR_NO  = "steelblue"
-_COLOR_OBS = "black"
+_COLOR_TE   = "darkorange"
+_COLOR_NO   = "steelblue"
+_COLOR_OBS  = "black"
+_COLOR_WGMS = "forestgreen"
 
-_LABEL_TE  = "Time encoding"
-_LABEL_NO  = "No time encoding"
-_LABEL_OBS = "GLaMBIE global"
+_LABEL_TE   = "Time encoding"
+_LABEL_NO   = "No time encoding"
+_LABEL_OBS  = "GLaMBIE global"
+_LABEL_WGMS = "WGMS/Dussaillant regional sum"
 
 
 def _shade(ax, years, mu, std, color, label, alpha_band=0.18):
@@ -158,6 +189,33 @@ def _plot_glambie_cumulative(ax, glambie_df: pd.DataFrame, start_year: int) -> N
             ms=4, zorder=5, label=_LABEL_OBS)
 
 
+def _plot_wgms_annual(ax, wgms_df: pd.DataFrame, plot_from: int) -> None:
+    w = wgms_df[wgms_df["year"] >= plot_from]
+    if w.empty:
+        return
+    ax.errorbar(
+        w["year"].values, w["gt"].values, yerr=w["gt_sigma"].values,
+        fmt="-s", color=_COLOR_WGMS, ms=4, lw=1.2, capsize=3,
+        zorder=5, label=_LABEL_WGMS,
+    )
+
+
+def _plot_wgms_cumulative(ax, wgms_df: pd.DataFrame, start_year: int) -> None:
+    w = wgms_df[wgms_df["year"] >= start_year].copy()
+    if w.empty:
+        return
+    w_cum     = w["gt"].cumsum().values
+    w_cum_err = np.sqrt(np.cumsum(w["gt_sigma"].values ** 2))
+    ax.fill_between(
+        w["year"].values,
+        w_cum - w_cum_err,
+        w_cum + w_cum_err,
+        alpha=0.15, color=_COLOR_WGMS,
+    )
+    ax.plot(w["year"].values, w_cum, "-s", color=_COLOR_WGMS, lw=1.5,
+            ms=4, zorder=5, label=_LABEL_WGMS)
+
+
 # ---------------------------------------------------------------------------
 # Plot 1 — Annual series
 # ---------------------------------------------------------------------------
@@ -168,10 +226,12 @@ def plot_annual(
     output_path: Path,
     title: str,
     plot_from: int = 1940,
+    wgms_df: pd.DataFrame | None = None,
 ) -> None:
     """
     Args:
-        series: list of (df, color, label) — one entry per model group to plot.
+        series:   list of (df, color, label) — one entry per model group to plot.
+        wgms_df:  optional WGMS/Dussaillant regional-sum DataFrame.
     """
     fig, ax = plt.subplots(figsize=(13, 5))
 
@@ -181,6 +241,8 @@ def plot_annual(
                df["std_total"].values[mask], color, label)
 
     _plot_glambie_annual(ax, glambie_df, plot_from)
+    if wgms_df is not None:
+        _plot_wgms_annual(ax, wgms_df, plot_from)
 
     ax.axhline(0, color="black", lw=0.6, ls="--")
     ax.set_xlabel("Year")
@@ -201,10 +263,12 @@ def plot_cumulative(
     output_path: Path,
     title: str,
     start_year: int = 2000,
+    wgms_df: pd.DataFrame | None = None,
 ) -> None:
     """
     Args:
-        series: list of (df, color, label) — one entry per model group to plot.
+        series:   list of (df, color, label) — one entry per model group to plot.
+        wgms_df:  optional WGMS/Dussaillant regional-sum DataFrame.
     """
     fig, ax = plt.subplots(figsize=(13, 5))
 
@@ -216,6 +280,8 @@ def plot_cumulative(
         _shade(ax, years, cum_mu, cum_std, color, label)
 
     _plot_glambie_cumulative(ax, glambie_df, start_year)
+    if wgms_df is not None:
+        _plot_wgms_cumulative(ax, wgms_df, start_year)
 
     ax.axhline(0, color="black", lw=0.6, ls="--")
     ax.set_xlabel("Year")
@@ -252,6 +318,10 @@ def main() -> None:
                         help="Path to glambie_global.csv validation file.")
     parser.add_argument("--output_dir", default=None,
                         help="Output directory for plots. Defaults to {ensemble_root}/global_comparison/.")
+    parser.add_argument("--wgms_dir", default=None,
+                        help="Directory of per-region WGMS/Dussaillant CSVs "
+                             "(e.g. validation_data/regional_wgms_duss). "
+                             "When supplied, regional sums are overlaid on all plots.")
     parser.add_argument("--plot_from", type=int, default=1940,
                         help="First year shown in the annual plot (default 1940).")
     parser.add_argument("--cumulative_from", type=int, default=2000,
@@ -263,6 +333,13 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n=== Global TE comparison: {ensemble_root.name} ===")
+
+    wgms_df = None
+    if args.wgms_dir:
+        print(f"\nLoading WGMS/Dussaillant regional sums from {args.wgms_dir}...")
+        wgms_df = _load_wgms_global(args.wgms_dir)
+        print(f"  {len(wgms_df)} years ({wgms_df['year'].min()}–{wgms_df['year'].max()}), "
+              f"gt range [{wgms_df['gt'].min():.1f}, {wgms_df['gt'].max():.1f}] Gt/yr")
 
     print("\nLoading time_encoding group...")
     te_df = _load_group_global(ensemble_root, "time_encoding")
@@ -293,12 +370,14 @@ def main() -> None:
         output_dir / "global_annual_gt.png",
         title="Global glacier mass balance — time encoding comparison",
         plot_from=args.plot_from,
+        wgms_df=wgms_df,
     )
     plot_cumulative(
         [te_series, no_series], glambie_df,
         output_dir / "global_cumulative_gt.png",
         title="Global glacier cumulative mass balance — time encoding comparison",
         start_year=args.cumulative_from,
+        wgms_df=wgms_df,
     )
 
     # Time encoding only
@@ -307,12 +386,14 @@ def main() -> None:
         output_dir / "global_annual_gt_time_encoding.png",
         title="Global glacier mass balance — with time encoding",
         plot_from=args.plot_from,
+        wgms_df=wgms_df,
     )
     plot_cumulative(
         [te_series], glambie_df,
         output_dir / "global_cumulative_gt_time_encoding.png",
         title="Global glacier cumulative mass balance — with time encoding",
         start_year=args.cumulative_from,
+        wgms_df=wgms_df,
     )
 
     # No time encoding only
@@ -321,12 +402,14 @@ def main() -> None:
         output_dir / "global_annual_gt_no_time_encoding.png",
         title="Global glacier mass balance — no time encoding",
         plot_from=args.plot_from,
+        wgms_df=wgms_df,
     )
     plot_cumulative(
         [no_series], glambie_df,
         output_dir / "global_cumulative_gt_no_time_encoding.png",
         title="Global glacier cumulative mass balance — no time encoding",
         start_year=args.cumulative_from,
+        wgms_df=wgms_df,
     )
 
     print(f"\nDone. Outputs written to {output_dir}/")

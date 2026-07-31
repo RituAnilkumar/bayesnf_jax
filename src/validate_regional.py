@@ -131,48 +131,32 @@ def _plot_timeseries(
     region_name: str,
     sigma_mult: float,
     output_path: Path,
+    fontscale: float = 1.0,
 ) -> None:
     years = merged["year"].values
     mu    = merged["median_mwe"].values
     s_tot = merged["total_std"].values
 
-    fig, ax = plt.subplots(figsize=(11, 4))
+    lbl_fs  = round(10 * fontscale)
+    tick_fs = round(10 * fontscale)
+    leg_fs  = round(7  * fontscale)
+    ttl_fs  = round(9  * fontscale)
 
-    # Total uncertainty band
+    fig, ax = plt.subplots(figsize=(13 + 2 * (fontscale - 1), 5 + 2 * (fontscale - 1)))
+
+    # Total uncertainty band only
     ax.fill_between(
         years,
         mu - sigma_mult * s_tot,
         mu + sigma_mult * s_tot,
         alpha=0.20, color="steelblue",
-        label=f"±{sigma_mult}σ total",
+        label=f"±{sigma_mult:g}σ total",
     )
 
-    # Structural uncertainty band (if present)
-    if "structural_std" in merged.columns:
-        s_struct = merged["structural_std"].values
-        ax.fill_between(
-            years,
-            mu - sigma_mult * s_struct,
-            mu + sigma_mult * s_struct,
-            alpha=0.25, color="mediumorchid",
-            label=f"±{sigma_mult}σ structural",
-        )
-
-    # Epistemic uncertainty band (if present)
-    if "epistemic_std" in merged.columns:
-        s_epi = merged["epistemic_std"].values
-        ax.fill_between(
-            years,
-            mu - sigma_mult * s_epi,
-            mu + sigma_mult * s_epi,
-            alpha=0.35, color="darkorange",
-            label=f"±{sigma_mult}σ epistemic",
-        )
-
-    # Ensemble mean line
+    # Ensemble median line
     ax.plot(years, mu, color="steelblue", lw=1.8, label="Ensemble median")
 
-    # WGMS / Dussaillant: line + error bar dots (same colour throughout)
+    # WGMS 2026: line + error bar dots
     ax.plot(merged["year"].values, merged["mwe"].values,
             color="black", lw=1.4, zorder=5)
     ax.errorbar(
@@ -180,21 +164,22 @@ def _plot_timeseries(
         merged["mwe"].values,
         yerr=sigma_mult * merged["mwe_sigma"].values,
         fmt="o", color="black", ms=3.5, elinewidth=1.0, capsize=2.5, zorder=6,
-        label=f"WGMS/Dussaillant ±{sigma_mult}σ",
+        label=f"WGMS 2026 ±{sigma_mult:g}σ",
     )
 
     metrics = _compute_metrics(merged, sigma_mult)
     ax.set_title(
-        f"{region_name}  |  n={metrics['n_years']} yrs  "
+        f"{region_name}  |  n={metrics['n_years']} yrs\n"
         f"RMSE={metrics['rmse']:.3f}  bias={metrics['bias']:+.3f}  "
         f"r={metrics['corr']:.2f}  "
-        f"coverage={metrics['coverage_pct']:.0f}% within ±{sigma_mult}σ",
-        fontsize=9,
+        f"coverage={metrics['coverage_pct']:.0f}% within ±{sigma_mult:g}σ",
+        fontsize=ttl_fs,
     )
     ax.axhline(0, color="black", lw=0.6, ls="--")
-    ax.set_xlabel("Year")
-    ax.set_ylabel("MWE/yr (m w.e.)")
-    ax.legend(fontsize=7, ncol=2)
+    ax.set_xlabel("Year", fontsize=lbl_fs)
+    ax.set_ylabel("Mass Balance (m.w.e/yr)", fontsize=lbl_fs)
+    ax.tick_params(labelsize=tick_fs)
+    ax.legend(fontsize=leg_fs, ncol=2)
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
@@ -410,6 +395,7 @@ def run_validation(cfg: dict) -> None:
     ens_filename = cfg.get("ensemble_filename", "top_models_regional_mwe.csv")
     sigma_mult   = float(cfg.get("sigma_mult", 1))
     min_overlap  = int(cfg.get("min_overlap_years", 5))
+    fontscale    = float(cfg.get("font_scale", 1.0))
 
     print(f"\n=== Regional MWE validation ===")
     print(f"  Ensemble base : {ensemble_base}")
@@ -459,6 +445,7 @@ def run_validation(cfg: dict) -> None:
         _plot_timeseries(
             merged, name, sigma_mult,
             output_dir / f"timeseries_{subdir}.png",
+            fontscale=fontscale,
         )
         _plot_scatter_region(
             merged, name, sigma_mult,
@@ -499,8 +486,14 @@ def _parse_args() -> argparse.Namespace:
                         help="Path to YAML config file.")
     parser.add_argument("--ensemble_base_dir", default=None,
                         help="Override ensemble_base_dir from config.")
+    parser.add_argument("--ensemble_filename", default=None,
+                        help="Override ensemble_filename from config "
+                             "(may include a sub-path, e.g. no_time_encoding/ensemble_regional_mwe.csv).")
     parser.add_argument("--output_dir", default=None,
                         help="Override output_dir from config.")
+    parser.add_argument("--font_scale", type=float, default=None,
+                        help="Multiply all axis/tick/legend fontsizes by this factor "
+                             "(e.g. 2.0 for poster-ready figures).")
     return parser.parse_args()
 
 
@@ -516,8 +509,12 @@ def main() -> None:
 
     if args.ensemble_base_dir is not None:
         cfg["ensemble_base_dir"] = args.ensemble_base_dir
+    if args.ensemble_filename is not None:
+        cfg["ensemble_filename"] = args.ensemble_filename
     if args.output_dir is not None:
         cfg["output_dir"] = args.output_dir
+    if args.font_scale is not None:
+        cfg["font_scale"] = args.font_scale
 
     run_validation(cfg)
 
