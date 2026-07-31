@@ -53,6 +53,7 @@ err_files/
 hyperparam_analysis*/
 *.out
 *.err
+*_varea
 
 # OS
 .DS_Store
