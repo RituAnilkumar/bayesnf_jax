@@ -361,3 +361,123 @@ for i in $(seq -w 1 19); do   python src/ensemble_uncertainty_time_encoding.py -
 python src/validate_regional_te.py   --config conf/config_validate_regional.yaml   --te_group no_time_encoding   --ensemble_base_dir /scratch/b5at/ranil.b5at/bayesnf_jax/outputs/ensemble_te_r2   --output_dir outputs/validation_regional_no_te   --ensemble_filename ensemble_regional_mwe.csv
 
 python src/validate_per_glacier_te.py --te_group no_time_encoding   --ensemble_base_dir /scratch/b5at/ranil.b5at/bayesnf_jax/outputs/ensemble_te_r2   --output_dir outputs/validation_pergla_te
+
+---
+
+## Pretrain-year sweep (job 582*)
+
+Sweeps over `nhidden` and `pretrain_year_min` with `nlayers=4`, `use_time_encoding=false`,
+`heteroscedastic=true` fixed. Structural uncertainty spans nhidden variation **and**
+pretraining period variation (1940 / 1960 / 1980 / 2000).
+
+### Sweep command (run per region via SLURM)
+
+```bash
+python main_pipeline.py -m \
+  model=bnf_regional_seasonal/${REGION} \
+  model.model_nlayers=4 \
+  model.model_nhidden=8,16,32,64,128 \
+  model.use_time_encoding=false \
+  model.heteroscedastic=true \
+  model.pretrain_year_min=1940,1960,1980,2000 \
+  model.pretrain_year_max=2020 \
+  model.inp_dir='/scratch/b5at/ranil.b5at/bayesnf_jax/data_for_model' \
+  pipeline.stages=[pretrain_cv,pretrain_full,finetune,predict] \
+  hydra.sweep.dir=/scratch/b5at/ranil.b5at/bayesnf_jax/multirun/${REGION}_${SLURM_JOB_ID}
+```
+
+### Step 1 — Hyperparameter analysis
+
+Produces heatmaps of `nhidden × pretrain_year_min`, ranked tables, parallel
+coordinates, and parameter importance plots. Output and full console log saved
+under `hyperparam_analysis/r{nn}_582*/`.
+
+```bash
+for i in $(seq -w 1 19); do
+  python src/hyperparam_tuning.py \
+    --multirun_root /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r${i}_582*/
+done
+```
+
+**What to look at:**
+- `hyperparam_analysis/r{nn}_*/plots/heatmap_pretrain_year_min_vs_nhidden.png` — which nhidden wins for each pretrain year
+- `hyperparam_analysis/r{nn}_*/top_runs.csv` — ranked configs by composite LOYO + GLaMBIE score
+- `hyperparam_analysis/r{nn}_*/run.log` — full console output for future reference
+
+---
+
+### Step 2 — Ensemble uncertainty
+
+Selects the top 5 runs per pretrain-year group (gated at LOYO R² ≥ 0.4), then
+pools the top 2 from each group into a single `combined/` ensemble whose structural
+uncertainty spans both nhidden and pretraining period. Console log saved at
+`outputs/ensemble_pretrain_year/r{nn}/run.log`.
+
+```bash
+for i in $(seq -w 1 19); do
+  python src/ensemble_uncertainty_pretrain_year.py \
+    --multirun_root /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r${i}_582*/ \
+    --output_dir outputs/ensemble_pretrain_year/r${i} \
+    --top_n 5 \
+    --k_per_group 2 \
+    --loyo_r2_min 0.4
+done
+```
+
+**Outputs per region** (`r{nn}/`):
+- `pt1940/`, `pt1960/`, `pt1980/`, `pt2000/` — per-pretrain-year top-5 ensembles
+- `combined/` — 8-model ensemble pooling top-2 from each pretrain year (**primary deliverable**)
+
+Each subdirectory contains:
+`ensemble_glacier.csv`, `ensemble_regional_mwe.csv`, `ensemble_regional_gt.csv`,
+and plots (`ensemble_regional_gt.png`, `ensemble_cumulative_gt.png`).
+
+---
+
+### Step 3 — Validation
+
+Validates all 5 groups against WGMS/Dussaillant (regional) and WGMS in-situ
+(per-glacier). Console log saved in each output directory as `run.log`.
+
+```bash
+for group in pt1940 pt1960 pt1980 pt2000 combined; do
+  python src/validate_regional_pretrain_year.py \
+    --config conf/config_validate_regional.yaml \
+    --pretrain_year_group ${group} \
+    --ensemble_base_dir outputs/ensemble_pretrain_year \
+    --output_dir outputs/validation_regional_${group}
+
+  python src/validate_per_glacier_pretrain_year.py \
+    --pretrain_year_group ${group} \
+    --ensemble_base_dir outputs/ensemble_pretrain_year \
+    --output_dir outputs/validation_pergla_${group}
+done
+```
+
+**What to look at:**
+- `outputs/validation_regional_{group}/validation_metrics.csv` — RMSE, bias, correlation, coverage per region
+- `outputs/validation_regional_{group}/summary_multipanel.png` — all-region time series overlay
+- `outputs/validation_pergla_{group}/per_glacier_metrics.csv` — per reference glacier skill
+- `outputs/validation_pergla_{group}/scatter_per_glacier.png` — observed vs predicted scatter
+
+The `combined` group is the primary comparison target. The per-year groups are
+diagnostic — use them to assess whether a specific pretraining period is
+systematically better or worse across regions.
+
+---
+
+### Step 4 — Global Gt products
+
+```bash
+for group in pt1940 pt1960 pt1980 pt2000 combined; do
+  python src/plot_global_from_glaciers.py \
+    --ensemble_root outputs/ensemble_pretrain_year \
+    --data_root data_for_model \
+    --group ${group} \
+    --output_dir outputs/global_pretrain_year/${group}
+done
+```
+
+**What to look at:**
+- `outputs/global_pretrain_year/combined/` — global annual Gt/yr with full structural uncertainty (**report this one**)
+- Compare `global_annual_gt.png` across groups to see sensitivity to pretraining period
