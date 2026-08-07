@@ -168,7 +168,10 @@ def main() -> None:
             f"(choose one of: {_VALID_GROUPS})"
         )
 
-    run_validation(cfg)
+    from src.logging_utils import LogTee
+    output_dir = Path(cfg["output_dir"])
+    with LogTee(output_dir / "run.log"):
+        run_validation(cfg)
 
 
 if __name__ == "__main__":

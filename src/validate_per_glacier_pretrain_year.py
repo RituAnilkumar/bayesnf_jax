@@ -200,7 +200,10 @@ def main() -> None:
             f"(choose one of: {_VALID_GROUPS})"
         )
 
-    run(cfg)
+    from src.logging_utils import LogTee
+    output_dir = Path(cfg.get("per_glacier_output_dir", "outputs/validation_per_glacier_pretrain_year"))
+    with LogTee(output_dir / "run.log"):
+        run(cfg)
 
 
 if __name__ == "__main__":

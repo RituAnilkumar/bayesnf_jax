@@ -245,7 +245,10 @@ def main() -> None:
     if "output_dir" not in cfg:
         raise ValueError("output_dir must be set in config or via --output_dir")
 
-    run_ensemble_pretrain_year(cfg)
+    from src.logging_utils import LogTee
+    output_dir = Path(cfg["output_dir"])
+    with LogTee(output_dir / "run.log"):
+        run_ensemble_pretrain_year(cfg)
 
 
 if __name__ == "__main__":

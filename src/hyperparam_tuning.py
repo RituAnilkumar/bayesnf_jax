@@ -939,28 +939,14 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(fh)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Analyse bayesnf_jax hyperparameter sweep.")
-    parser.add_argument(
-        "--config",
-        default="conf/config_hyperparam_tuning.yaml",
-        help="Path to YAML config file.",
-    )
-    parser.add_argument("--multirun_root", default=None, help="Override multirun_root in config.")
-    args = parser.parse_args()
-
-    cfg = load_config(args.config)
-    if args.multirun_root:
-        cfg["multirun_root"] = args.multirun_root
-
-    multirun_root = Path(cfg["multirun_root"])
-    # Output lives under hyperparam_analysis/{region_jobid}/  e.g. hyperparam_analysis/r06_3645680/
-    output_dir = Path("hyperparam_analysis") / multirun_root.name
-    test_years    = list(cfg.get("glambie_test_years", [2021, 2022, 2023]))
-    loyo_weight   = float(cfg.get("loyo_weight",   0.5))
-    glambie_weight= float(cfg.get("glambie_weight", 0.5))
-    min_runs      = int(cfg.get("min_runs_per_region", 5))
-    top_n         = int(cfg.get("top_n", 10))
+def _run(cfg: dict, output_dir: Path) -> None:
+    """Core analysis logic, called inside the LogTee context."""
+    multirun_root  = Path(cfg["multirun_root"])
+    test_years     = list(cfg.get("glambie_test_years", [2021, 2022, 2023]))
+    loyo_weight    = float(cfg.get("loyo_weight",   0.5))
+    glambie_weight = float(cfg.get("glambie_weight", 0.5))
+    min_runs       = int(cfg.get("min_runs_per_region", 5))
+    top_n          = int(cfg.get("top_n", 10))
 
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "plots").mkdir(exist_ok=True)
@@ -1012,6 +998,29 @@ def main() -> None:
     save_top_runs(df, output_dir, top_n=top_n)
 
     print(f"\nDone. All outputs in {output_dir}/")
+
+
+def main() -> None:
+    from src.logging_utils import LogTee
+
+    parser = argparse.ArgumentParser(description="Analyse bayesnf_jax hyperparameter sweep.")
+    parser.add_argument(
+        "--config",
+        default="conf/config_hyperparam_tuning.yaml",
+        help="Path to YAML config file.",
+    )
+    parser.add_argument("--multirun_root", default=None, help="Override multirun_root in config.")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    if args.multirun_root:
+        cfg["multirun_root"] = args.multirun_root
+
+    multirun_root = Path(cfg["multirun_root"])
+    output_dir    = Path("hyperparam_analysis") / multirun_root.name
+
+    with LogTee(output_dir / "run.log"):
+        _run(cfg, output_dir)
 
 
 if __name__ == "__main__":
