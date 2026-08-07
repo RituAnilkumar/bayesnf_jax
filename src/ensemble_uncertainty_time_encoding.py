@@ -96,7 +96,8 @@ def _run_top_n_group(
     top_n: int,
     min_runs: int,
     selection_metric: str = "glambie_rmse",
-) -> None:
+    loyo_r2_min: float | None = 0.1,
+) -> bool:
     """
     Run the full ensemble pipeline for one use_time_encoding group.
 
@@ -112,6 +113,12 @@ def _run_top_n_group(
         selection_metric: Column to rank by. RMSE metrics are sorted ascending
                           (lower = better); loyo_r2 is sorted descending (higher = better).
                           One of: "glambie_rmse", "loyo_rmse", "loyo_r2".
+        loyo_r2_min:      Minimum LOYO R² a run must achieve to be eligible. Runs below
+                          this threshold are excluded before top-N selection. Set to None
+                          to disable the filter.
+
+    Returns:
+        True if the group was processed successfully, False if skipped.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -123,17 +130,25 @@ def _run_top_n_group(
         .sort_values(selection_metric, ascending=ascending)
         .reset_index(drop=True)
     )
+
+    # Apply LOYO R² quality gate before top-N selection
+    if loyo_r2_min is not None and "loyo_r2" in valid.columns:
+        n_before = len(valid)
+        valid = valid[valid["loyo_r2"] >= loyo_r2_min].reset_index(drop=True)
+        n_rejected = n_before - len(valid)
+        if n_rejected:
+            print(f"  [loyo_r2 gate] Rejected {n_rejected}/{n_before} runs with "
+                  f"loyo_r2 < {loyo_r2_min}")
+
     n_valid = len(valid)
     if n_valid < min_runs:
-        warnings.warn(
-            f"  Only {n_valid} runs with valid {selection_metric} (threshold={min_runs}) "
-            f"— skipping this group."
-        )
-        return
+        print(f"  SKIPPED: only {n_valid} run(s) pass loyo_r2 >= {loyo_r2_min} "
+              f"(need {min_runs}). Raise --loyo_r2_min or lower --min_runs to proceed.")
+        return False
 
     top = valid.head(top_n).reset_index(drop=True)
     if len(top) < top_n:
-        print(f"  WARNING: only {len(top)} valid runs available (requested top {top_n}).")
+        print(f"  WARNING: only {len(top)} qualifying runs available (requested top {top_n}).")
     print(f"  Top {len(top)} runs by {selection_metric} ({'↑ higher better' if not ascending else '↓ lower better'}):")
     for _, row in top.iterrows():
         print(f"    {row['run_id']}  {selection_metric}={row[selection_metric]:.4f}  "
@@ -303,6 +318,7 @@ def _run_top_n_group(
         ensemble_regional_gt, glambie_wide_df, oggm_df, total_area_km2, output_dir
     )
     print(f"  Done → {output_dir}/")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +340,9 @@ def run_ensemble_time_encoding(cfg: dict) -> None:
     min_runs          = int(cfg.get("min_runs_per_region", 1))
     top_n             = int(cfg.get("top_n", 5))
     selection_metric  = str(cfg.get("selection_metric", "glambie_rmse"))
+    loyo_r2_min       = cfg.get("loyo_r2_min", 0.1)
+    if loyo_r2_min is not None:
+        loyo_r2_min = float(loyo_r2_min)
 
     valid_metrics = {"glambie_rmse", "loyo_rmse", "loyo_r2"}
     if selection_metric not in valid_metrics:
@@ -332,6 +351,7 @@ def run_ensemble_time_encoding(cfg: dict) -> None:
     print(f"\n=== Ensemble split by use_time_encoding: {multirun_root.name} ===")
     print(f"  Selecting top {top_n} runs per group by {selection_metric}"
           + (f" over GLaMBIE test years {test_years}" if selection_metric == "glambie_rmse" else ""))
+    print(f"  LOYO R² gate    : >= {loyo_r2_min}" if loyo_r2_min is not None else "  LOYO R² gate    : disabled")
 
     # Build results table (no composite scoring needed — we rank by glambie_rmse directly)
     results_df = build_results_df(multirun_root, test_years, min_runs_per_region=1)
@@ -354,13 +374,21 @@ def run_ensemble_time_encoding(cfg: dict) -> None:
         (False, "no_time_encoding", output_dir / "no_time_encoding"),
     ]
 
+    skipped = []
     for flag_val, label, group_output_dir in groups:
         group = results_df[results_df["use_time_encoding"] == flag_val].copy().reset_index(drop=True)
         print(f"\n--- Group: {label} (use_time_encoding={flag_val})  —  {len(group)} runs ---")
         if group.empty:
             print("  No runs found — skipping.")
+            skipped.append(label)
             continue
-        _run_top_n_group(group, group_output_dir, top_n, min_runs, selection_metric)
+        ok = _run_top_n_group(group, group_output_dir, top_n, min_runs, selection_metric, loyo_r2_min)
+        if not ok:
+            skipped.append(label)
+
+    if skipped:
+        print(f"\n  WARNING: the following groups were skipped due to insufficient runs "
+              f"passing loyo_r2 >= {loyo_r2_min}: {skipped}")
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +407,9 @@ def _parse_args() -> argparse.Namespace:
                         help="Override output_dir from config.")
     parser.add_argument("--top_n", type=int, default=None,
                         help="Override top_n from config (default 5).")
+    parser.add_argument("--loyo_r2_min", type=float, default=None,
+                        help="Minimum LOYO R² a run must achieve to be eligible for the "
+                             "ensemble (default 0.1). Pass --loyo_r2_min=-inf to disable.")
     return parser.parse_args()
 
 
@@ -398,6 +429,8 @@ def main() -> None:
         cfg["output_dir"] = args.output_dir
     if args.top_n is not None:
         cfg["top_n"] = args.top_n
+    if args.loyo_r2_min is not None:
+        cfg["loyo_r2_min"] = args.loyo_r2_min
 
     run_ensemble_time_encoding(cfg)
 

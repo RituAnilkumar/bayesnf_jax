@@ -105,6 +105,9 @@ def run_ensemble_pretrain_year(cfg: dict) -> None:
     k_per_group      = int(cfg.get("k_per_group", 2))
     selection_metric = str(cfg.get("selection_metric", "glambie_rmse"))
     pretrain_years   = [int(y) for y in cfg.get("pretrain_years", _DEFAULT_PRETRAIN_YEARS)]
+    loyo_r2_min      = cfg.get("loyo_r2_min", 0.1)
+    if loyo_r2_min is not None:
+        loyo_r2_min = float(loyo_r2_min)
 
     valid_metrics = {"glambie_rmse", "loyo_rmse", "loyo_r2"}
     if selection_metric not in valid_metrics:
@@ -117,6 +120,7 @@ def run_ensemble_pretrain_year(cfg: dict) -> None:
     print(f"  Per-group top_n : {top_n}  |  k_per_group for combined: {k_per_group}")
     print(f"  Selection metric: {selection_metric}"
           + (f" over GLaMBIE test years {test_years}" if selection_metric == "glambie_rmse" else ""))
+    print(f"  LOYO R² gate    : >= {loyo_r2_min}" if loyo_r2_min is not None else "  LOYO R² gate    : disabled")
 
     results_df = build_results_df(multirun_root, test_years, min_runs_per_region=1)
     print(f"  {len(results_df)} total runs loaded.")
@@ -136,6 +140,7 @@ def run_ensemble_pretrain_year(cfg: dict) -> None:
     # Per-group ensembles
     # ----------------------------------------------------------------
     combined_parts = []   # collect top-k_per_group from each group for combined
+    skipped = []
 
     for year in pretrain_years:
         label        = f"pt{year}"
@@ -148,11 +153,18 @@ def run_ensemble_pretrain_year(cfg: dict) -> None:
         print(f"\n--- Group: {label} (pretrain_year_min={year})  —  {len(group)} runs ---")
         if group.empty:
             print("  No runs found — skipping.")
+            skipped.append(label)
             continue
-        _run_top_n_group(group, group_outdir, top_n, min_runs, selection_metric)
+        ok = _run_top_n_group(group, group_outdir, top_n, min_runs, selection_metric, loyo_r2_min)
+        if not ok:
+            skipped.append(label)
+            continue
 
-        # Collect top-k_per_group for the combined ensemble
-        valid = group.dropna(subset=[selection_metric]).sort_values(selection_metric, ascending=ascending)
+        # Collect top-k_per_group for the combined ensemble (same R² gate applied)
+        valid = group.dropna(subset=[selection_metric])
+        if loyo_r2_min is not None and "loyo_r2" in valid.columns:
+            valid = valid[valid["loyo_r2"] >= loyo_r2_min]
+        valid = valid.sort_values(selection_metric, ascending=ascending)
         combined_parts.append(valid.head(k_per_group))
 
     # ----------------------------------------------------------------
@@ -170,9 +182,15 @@ def run_ensemble_pretrain_year(cfg: dict) -> None:
             top_n=n_combined,        # use all pooled models, no further filtering
             min_runs=min_runs,
             selection_metric=selection_metric,
+            loyo_r2_min=None,        # already gated above; don't double-filter
         )
     else:
-        warnings.warn("  Fewer than 2 groups had valid runs — combined ensemble skipped.")
+        print(f"\n  WARNING: combined ensemble skipped — only {len(combined_parts)} group(s) "
+              f"had qualifying runs (need >= 2). Check loyo_r2 >= {loyo_r2_min} threshold.")
+
+    if skipped:
+        print(f"\n  WARNING: the following groups were skipped due to insufficient runs "
+              f"passing loyo_r2 >= {loyo_r2_min}: {skipped}")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -187,6 +205,9 @@ def _parse_args() -> argparse.Namespace:
                         help="Override output_dir from config.")
     parser.add_argument("--top_n", type=int, default=None,
                         help="Override top_n from config (default 5).")
+    parser.add_argument("--loyo_r2_min", type=float, default=None,
+                        help="Minimum LOYO R² a run must achieve to be eligible for the "
+                             "ensemble (default 0.1). Pass --loyo_r2_min=-inf to disable.")
     parser.add_argument("--k_per_group", type=int, default=None,
                         help="Runs taken from each pretrain year group for the "
                              "combined ensemble (default 2; total = k_per_group × n_groups).")
@@ -212,6 +233,8 @@ def main() -> None:
         cfg["output_dir"] = args.output_dir
     if args.top_n is not None:
         cfg["top_n"] = args.top_n
+    if args.loyo_r2_min is not None:
+        cfg["loyo_r2_min"] = args.loyo_r2_min
     if args.k_per_group is not None:
         cfg["k_per_group"] = args.k_per_group
     if args.pretrain_years is not None:
