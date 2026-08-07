@@ -46,7 +46,7 @@ from src.validate_per_glacier import (
     plot_individual,
 )
 
-_VALID_GROUPS = ["pt1940", "pt1960", "pt1980", "pt2000"]
+_VALID_GROUPS = ["pt1940", "pt1960", "pt1980", "pt2000", "combined"]
 
 
 def _load_glacier_csv(ensemble_base: Path, subdir: str, pretrain_year_group: str,

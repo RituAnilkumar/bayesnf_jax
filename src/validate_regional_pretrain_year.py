@@ -45,7 +45,7 @@ from src.validate_regional import (
     _plot_residuals,
 )
 
-_VALID_GROUPS = ["pt1940", "pt1960", "pt1980", "pt2000"]
+_VALID_GROUPS = ["pt1940", "pt1960", "pt1980", "pt2000", "combined"]
 
 
 def run_validation(cfg: dict) -> None:

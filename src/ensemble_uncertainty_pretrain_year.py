@@ -82,17 +82,27 @@ def _read_pretrain_year_min(run_dir: Path) -> int | None:
 
 def run_ensemble_pretrain_year(cfg: dict) -> None:
     """
-    Split a sweep by pretrain_year_min and run top-N ensemble for each group.
+    Split a sweep by pretrain_year_min and run top-N ensemble for each group,
+    then combine the best runs from all groups into a single ensemble whose
+    structural uncertainty spans nhidden, nlayers, AND pretrain_year_min.
 
-    Reads model.pretrain_year_min from each run's .hydra/config.yaml, partitions
-    runs into one group per pretrain_year_min value, selects top_n by the
-    selection_metric within each, and runs the full ensemble pipeline per group.
+    Per-group outputs:
+        {output_dir}/pt1940/   — top_n best runs with pretrain_year_min=1940
+        {output_dir}/pt1960/
+        {output_dir}/pt1980/
+        {output_dir}/pt2000/
+
+    Combined output:
+        {output_dir}/combined/ — top k_per_group runs from EACH group pooled
+                                 together (default k_per_group=2, so 4 groups
+                                 × 2 = 8 models in the combined ensemble)
     """
     multirun_root    = Path(cfg["multirun_root"])
     output_dir       = Path(cfg["output_dir"])
     test_years       = list(cfg.get("glambie_test_years", [2020, 2021, 2022, 2023, 2024]))
     min_runs         = int(cfg.get("min_runs_per_region", 1))
     top_n            = int(cfg.get("top_n", 5))
+    k_per_group      = int(cfg.get("k_per_group", 2))
     selection_metric = str(cfg.get("selection_metric", "glambie_rmse"))
     pretrain_years   = [int(y) for y in cfg.get("pretrain_years", _DEFAULT_PRETRAIN_YEARS)]
 
@@ -100,9 +110,12 @@ def run_ensemble_pretrain_year(cfg: dict) -> None:
     if selection_metric not in valid_metrics:
         raise ValueError(f"selection_metric must be one of {valid_metrics}, got '{selection_metric}'")
 
+    ascending = selection_metric != "loyo_r2"
+
     print(f"\n=== Ensemble split by pretrain_year_min: {multirun_root.name} ===")
-    print(f"  Pretrain years : {pretrain_years}")
-    print(f"  Top {top_n} runs per group by {selection_metric}"
+    print(f"  Pretrain years  : {pretrain_years}")
+    print(f"  Per-group top_n : {top_n}  |  k_per_group for combined: {k_per_group}")
+    print(f"  Selection metric: {selection_metric}"
           + (f" over GLaMBIE test years {test_years}" if selection_metric == "glambie_rmse" else ""))
 
     results_df = build_results_df(multirun_root, test_years, min_runs_per_region=1)
@@ -119,9 +132,14 @@ def run_ensemble_pretrain_year(cfg: dict) -> None:
             "pretrain_year_min unknown; those runs will be skipped by all groups."
         )
 
+    # ----------------------------------------------------------------
+    # Per-group ensembles
+    # ----------------------------------------------------------------
+    combined_parts = []   # collect top-k_per_group from each group for combined
+
     for year in pretrain_years:
-        label         = f"pt{year}"
-        group_outdir  = output_dir / label
+        label        = f"pt{year}"
+        group_outdir = output_dir / label
         group = (
             results_df[results_df["pretrain_year_min"] == year]
             .copy()
@@ -132,6 +150,29 @@ def run_ensemble_pretrain_year(cfg: dict) -> None:
             print("  No runs found — skipping.")
             continue
         _run_top_n_group(group, group_outdir, top_n, min_runs, selection_metric)
+
+        # Collect top-k_per_group for the combined ensemble
+        valid = group.dropna(subset=[selection_metric]).sort_values(selection_metric, ascending=ascending)
+        combined_parts.append(valid.head(k_per_group))
+
+    # ----------------------------------------------------------------
+    # Combined ensemble — structural uncertainty spans pretrain years
+    # ----------------------------------------------------------------
+    if len(combined_parts) >= 2:
+        import pandas as pd
+        combined_df = pd.concat(combined_parts).reset_index(drop=True)
+        n_combined  = len(combined_df)
+        print(f"\n--- Combined ensemble ({n_combined} models: "
+              f"top-{k_per_group} × {len(combined_parts)} pretrain years) ---")
+        _run_top_n_group(
+            combined_df,
+            output_dir / "combined",
+            top_n=n_combined,        # use all pooled models, no further filtering
+            min_runs=min_runs,
+            selection_metric=selection_metric,
+        )
+    else:
+        warnings.warn("  Fewer than 2 groups had valid runs — combined ensemble skipped.")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -146,6 +187,9 @@ def _parse_args() -> argparse.Namespace:
                         help="Override output_dir from config.")
     parser.add_argument("--top_n", type=int, default=None,
                         help="Override top_n from config (default 5).")
+    parser.add_argument("--k_per_group", type=int, default=None,
+                        help="Runs taken from each pretrain year group for the "
+                             "combined ensemble (default 2; total = k_per_group × n_groups).")
     parser.add_argument("--pretrain_years", type=int, nargs="+", default=None,
                         help="Which pretrain_year_min values to process "
                              "(default: 1940 1960 1980 2000).")
@@ -168,6 +212,8 @@ def main() -> None:
         cfg["output_dir"] = args.output_dir
     if args.top_n is not None:
         cfg["top_n"] = args.top_n
+    if args.k_per_group is not None:
+        cfg["k_per_group"] = args.k_per_group
     if args.pretrain_years is not None:
         cfg["pretrain_years"] = args.pretrain_years
 

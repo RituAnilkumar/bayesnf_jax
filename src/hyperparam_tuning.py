@@ -51,15 +51,13 @@ import yaml
 SWEEP_PARAMS = [
     "model.model_nlayers",
     "model.model_nhidden",
-    "model.heteroscedastic",
     "model.pretrain_year_min",
 ]
 
 # Short names used in plot labels / column headers
 PARAM_SHORT = {
-    "model.model_nlayers":    "nlayers",
-    "model.model_nhidden":    "nhidden",
-    "model.heteroscedastic":  "heteroscedastic",
+    "model.model_nlayers":     "nlayers",
+    "model.model_nhidden":     "nhidden",
     "model.pretrain_year_min": "pretrain_year_min",
 }
 
@@ -67,15 +65,12 @@ PARAM_SHORT = {
 PARAM_LABEL = {
     "nlayers":           "N layers",
     "nhidden":           "Hidden width",
-    "heteroscedastic":   "Heteroscedastic",
     "pretrain_year_min": "Pretrain year min",
 }
 
 # Key 2-D pairs to show in heatmaps (short names)
 HEATMAP_PAIRS = [
     ("nlayers",           "nhidden"),
-    ("heteroscedastic",   "nlayers"),
-    ("heteroscedastic",   "nhidden"),
     ("pretrain_year_min", "nlayers"),
     ("pretrain_year_min", "nhidden"),
 ]
@@ -84,6 +79,7 @@ HEATMAP_PAIRS = [
 EXTRA_OVERRIDES = {
     "model.glambie_weight":     "glambie_weight",
     "model.beta_anneal_epochs": "beta_anneal_epochs",
+    "model.heteroscedastic":    "heteroscedastic",
 }
 
 
