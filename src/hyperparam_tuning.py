@@ -33,10 +33,14 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import sys
 import warnings
 from itertools import combinations
 from pathlib import Path
 from typing import Optional
+
+# Ensure project root is on the path when the script is run directly
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
