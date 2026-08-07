@@ -52,27 +52,32 @@ SWEEP_PARAMS = [
     "model.model_nlayers",
     "model.model_nhidden",
     "model.heteroscedastic",
+    "model.pretrain_year_min",
 ]
 
 # Short names used in plot labels / column headers
 PARAM_SHORT = {
-    "model.model_nlayers":   "nlayers",
-    "model.model_nhidden":   "nhidden",
-    "model.heteroscedastic": "heteroscedastic",
+    "model.model_nlayers":    "nlayers",
+    "model.model_nhidden":    "nhidden",
+    "model.heteroscedastic":  "heteroscedastic",
+    "model.pretrain_year_min": "pretrain_year_min",
 }
 
 # Human-readable axis labels for plots
 PARAM_LABEL = {
-    "nlayers":         "N layers",
-    "nhidden":         "Hidden width",
-    "heteroscedastic": "Heteroscedastic",
+    "nlayers":           "N layers",
+    "nhidden":           "Hidden width",
+    "heteroscedastic":   "Heteroscedastic",
+    "pretrain_year_min": "Pretrain year min",
 }
 
 # Key 2-D pairs to show in heatmaps (short names)
 HEATMAP_PAIRS = [
-    ("nlayers",         "nhidden"),
-    ("heteroscedastic", "nlayers"),
-    ("heteroscedastic", "nhidden"),
+    ("nlayers",           "nhidden"),
+    ("heteroscedastic",   "nlayers"),
+    ("heteroscedastic",   "nhidden"),
+    ("pretrain_year_min", "nlayers"),
+    ("pretrain_year_min", "nhidden"),
 ]
 
 # Non-sweep overrides tracked as metadata columns (not used in scoring)
@@ -838,8 +843,10 @@ def plot_regional_ranking(df: pd.DataFrame, output_dir: Path, top_n: int = 10) -
     # Build label for each config row
     def _config_label(row) -> str:
         parts = [f"L={int(row.nlayers)}", f"H={int(row.nhidden)}"]
-        if "heteroscedastic" in row.index:
+        if "heteroscedastic" in row.index and not pd.isna(row.heteroscedastic):
             parts.append("het=" + ("Y" if row.heteroscedastic else "N"))
+        if "pretrain_year_min" in row.index and not pd.isna(row.pretrain_year_min):
+            parts.append(f"pt={int(row.pretrain_year_min)}")
         return " ".join(parts)
 
     config_labels = [_config_label(r) for _, r in top_configs.iterrows()]
