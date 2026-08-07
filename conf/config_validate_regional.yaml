@@ -70,8 +70,8 @@ region_names:
   ANT: "Antarctic & Subantarctic (r19)"
 
 # Ensemble filename to load from each region subdirectory.
-# Change to 'ensemble_regional_mwe.csv' if using ensemble_uncertainty.py output.
-ensemble_filename: top_models_regional_mwe.csv
+# Change to 'ensemble_regional_mwe.csv' if using ensemble_uncertainty.py or derivatives and or top_models_regional_mwe.csv otherwise.
+ensemble_filename: ensemble_regional_mwe.csv
 
 # Sigma multiplier for uncertainty bands.
 # 1 = 1σ (~68%): WGMS reports 1σ so this gives a like-for-like comparison.
