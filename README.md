@@ -481,3 +481,39 @@ done
 **What to look at:**
 - `outputs/global_pretrain_year/combined/` — global annual Gt/yr with full structural uncertainty (**report this one**)
 - Compare `global_annual_gt.png` across groups to see sensitivity to pretraining period
+
+---
+
+### Step 5 — Explainability (Integrated Gradients)
+
+`main_explain_pretrain_year.py` mirrors `main_explain_te.py` exactly: it reads
+`top_runs_info.csv` from `outputs/ensemble_pretrain_year/r{nn}/{group}/` to
+locate the original multirun pkl files, then runs Integrated Gradients across
+the ensemble and writes attribution CSVs + plots.
+
+Run per region × group. The `combined` group is the primary target; the per-year
+groups let you check whether feature importance shifts with the pretraining window.
+
+```bash
+for i in $(seq -w 1 19); do
+  for group in pt1940 pt1960 pt1980 pt2000 combined; do
+    python main_explain_pretrain_year.py \
+      explain.ensemble_dir=outputs/ensemble_pretrain_year/r${i} \
+      explain.pretrain_year_group=${group} \
+      explain.explain_year_max=2025
+  done
+done
+```
+
+Outputs land in `outputs/explain_pretrain_year/r{nn}/{group}/`:
+- `attributions_finetune_ensemble*_{group}.csv` — per (glacier × year) mean and std attributions
+- `importance_bar_*.png` — global feature importance with epistemic/structural breakdown
+- `beeswarm_*.png` — SHAP-style beeswarm coloured by feature value
+- `temporal_importance_*.png` — how feature importance evolves over years
+- `dependence_year*/` — dependence plots for the top-k features
+
+**What to look at:**
+- `importance_bar_*_combined.png` — which features (climate vs geometry vs time) drive the model
+- `importance_bar_*_masked.png` — same but with year/lat/lon removed so climate signal is visible
+- Compare `temporal_importance_*.png` across `pt1940` vs `pt2000` — does early vs late pretraining shift which features matter most?
+- `beeswarm_*_masked.png` — direction of each feature's effect on predicted mass balance

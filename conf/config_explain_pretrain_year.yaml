@@ -1,0 +1,89 @@
+# Explainability config for pretrain-year-split ensemble outputs.
+#
+# Variant of config_explain.yaml for ensembles produced by
+# ensemble_uncertainty_pretrain_year.py, where outputs are in nested subdirs:
+#
+#   {ensemble_base_dir}/{region}/pt1940/
+#   {ensemble_base_dir}/{region}/pt1960/
+#   {ensemble_base_dir}/{region}/pt1980/
+#   {ensemble_base_dir}/{region}/pt2000/
+#   {ensemble_base_dir}/{region}/combined/
+#
+# Requires explain.pretrain_year_group (set via CLI or override here).
+#
+# Usage:
+#   python main_explain_pretrain_year.py \
+#       explain.ensemble_dir=outputs/ensemble_pretrain_year/r01 \
+#       explain.pretrain_year_group=pt2000
+#
+#   # Combined: attributions across all pretrain years pooled
+#   python main_explain_pretrain_year.py \
+#       explain.ensemble_dir=outputs/ensemble_pretrain_year/r01 \
+#       explain.pretrain_year_group=combined
+
+defaults:
+  - model: bnf_regional_seasonal
+  - _self_
+
+model:
+  output_dir: .
+  reg_subdir: _explain_pretrain_year
+  input_type: run
+  temporal_avg_path: null
+  glambie_path: null
+  pretrained_params_path: null
+  finetuned_params_path: null
+
+explain:
+  # ---------------------------------------------------------------------------
+  # Required inputs
+  # ---------------------------------------------------------------------------
+  ensemble_dir: null        # per-region ensemble dir, e.g. outputs/ensemble_pretrain_year/r01
+  pretrain_year_group: null # "pt1940", "pt1960", "pt1980", "pt2000", or "combined"
+
+  stage: finetune      # 'finetune' or 'pretrain'
+
+  explain_split: train
+  explain_year_max: 2025
+
+  # --- IG hyperparameters ---
+  n_mc: 100
+  n_mc_per_model: 50
+  n_steps: 50
+  baseline: mean
+
+  # --- Subsampling ---
+  max_points: 2000
+  chunk_size: 500
+  seed: 0
+
+  # --- Plots ---
+  beeswarm_n_max: 1000
+  importance_top_k: null
+  dependence_top_k: 5
+
+  # --- Ensemble model weighting ---
+  # Top-N already selected by ensemble_uncertainty_pretrain_year.py.
+  # Use 'equal' (default) or 'performance' to re-weight by composite score.
+  weighting: equal
+  softmax_temperature: 0.1
+  loyo_weight: 0.0
+  glambie_weight: 1.0
+  glambie_test_years: [2000, 2001, 2020, 2021, 2022, 2023]
+  min_runs: 3
+  top_k_models: null   # null = use all from top_runs_info.csv
+
+  exclude_features:
+    - year
+    - CenLat
+    - CenLon
+
+  year_slice_years: null
+  waterfall_rgi_id: null
+  waterfall_year: null
+
+hydra:
+  run:
+    dir: outputs/explain_pretrain_year
+  job:
+    chdir: true
