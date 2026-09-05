@@ -408,13 +408,22 @@ done
 
 ### Step 2 — Ensemble uncertainty
 
-Selects the top 5 runs per pretrain-year group (gated at LOYO R² ≥ 0.4), then
-pools the top 2 from each group into a single `combined/` ensemble whose structural
+Selects the top 5 runs per pretrain-year group ranked by a composite of LOYO R² and
+GLaMBIE RMSE (equal weight by default), gated at LOYO R² ≥ 0.4 and LOGO R² ≥ 0.0.
+Pools the top 2 from each group into a single `combined/` ensemble whose structural
 uncertainty spans both nhidden and pretraining period. Console log saved at
 `outputs/ensemble_pretrain_year/r{nn}/run.log`.
 
 ```bash
-for i in $(seq -w 1 19); do   python src/ensemble_uncertainty_pretrain_year.py     --multirun_root /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r${i}_582*/     --output_dir outputs/ensemble_pretrain_year_r2min01/r${i}     --top_n 5     --k_per_group 2     --loyo_r2_min 0.1; done
+for i in $(seq -w 1 19); do
+  python src/ensemble_uncertainty_pretrain_year.py \
+    --multirun_root /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r${i}_582*/ \
+    --output_dir outputs/ensemble_pretrain_year/r${i} \
+    --top_n 5 \
+    --k_per_group 2 \
+    --loyo_r2_min 0.4 \
+    --logo_r2_min 0.0
+done
 ```
 
 **Outputs per region** (`r{nn}/`):

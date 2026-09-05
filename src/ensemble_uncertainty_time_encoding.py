@@ -90,6 +90,14 @@ def _read_use_time_encoding(run_dir: Path) -> bool | None:
 # Top-N ensemble runner for a single group
 # ---------------------------------------------------------------------------
 
+def _minmax_norm_series(s: pd.Series) -> pd.Series:
+    """Min-max normalise to [0, 1]. Returns zeros if all values are equal."""
+    lo, hi = s.min(), s.max()
+    if hi == lo:
+        return pd.Series(np.zeros(len(s)), index=s.index, dtype=float)
+    return (s - lo) / (hi - lo)
+
+
 def _run_top_n_group(
     group_df: pd.DataFrame,
     output_dir: Path,
@@ -97,41 +105,44 @@ def _run_top_n_group(
     min_runs: int,
     selection_metric: str = "glambie_rmse",
     loyo_r2_min: float | None = 0.1,
+    logo_r2_min: float | None = 0.0,
+    composite_loyo_r2_weight: float = 0.5,
 ) -> bool:
     """
-    Run the full ensemble pipeline for one use_time_encoding group.
+    Run the full ensemble pipeline for one group.
 
     Selects top_n runs by selection_metric, uses equal weights.
     All runs are expected to be heteroscedastic=true; raises if aleatoric_std
     is missing from any preds_full.csv.
 
     Args:
-        group_df:         Subset of the results DataFrame for this group.
-        output_dir:       Where to write this group's outputs.
-        top_n:            Number of top runs to include in ensemble.
-        min_runs:         Minimum runs with a valid selection_metric required to proceed.
-        selection_metric: Column to rank by. RMSE metrics are sorted ascending
-                          (lower = better); loyo_r2 is sorted descending (higher = better).
-                          One of: "glambie_rmse", "loyo_rmse", "loyo_r2".
-        loyo_r2_min:      Minimum LOYO R² a run must achieve to be eligible. Runs below
-                          this threshold are excluded before top-N selection. Set to None
-                          to disable the filter.
+        group_df:                 Subset of the results DataFrame for this group.
+        output_dir:               Where to write this group's outputs.
+        top_n:                    Number of top runs to include in ensemble.
+        min_runs:                 Minimum runs required after gating to proceed.
+        selection_metric:         Ranking criterion. One of:
+                                    "glambie_rmse" — GLaMBIE RMSE (lower=better)
+                                    "loyo_rmse"    — pretrain LOYO RMSE (lower=better)
+                                    "loyo_r2"      — pretrain LOYO R² (higher=better)
+                                    "composite"    — weighted combination of normalised
+                                                     glambie_rmse and loyo_r2 (lower=better).
+                                                     Weights: composite_loyo_r2_weight for
+                                                     loyo_r2, remainder for glambie_rmse.
+        loyo_r2_min:              Hard gate: minimum LOYO R² to be eligible. None = disabled.
+        logo_r2_min:              Hard gate: minimum LOGO R² to be eligible. None = disabled.
+        composite_loyo_r2_weight: Weight on loyo_r2 in the composite score (0–1).
+                                  glambie_rmse weight = 1 - this. Only used when
+                                  selection_metric="composite".
 
     Returns:
         True if the group was processed successfully, False if skipped.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Sort direction: R² metrics are higher-is-better; RMSE metrics are lower-is-better
-    ascending = selection_metric != "loyo_r2"
+    # Start with runs that have a valid glambie_rmse (always needed for print summary)
+    valid = group_df.dropna(subset=["glambie_rmse"]).copy().reset_index(drop=True)
 
-    valid = (
-        group_df.dropna(subset=[selection_metric])
-        .sort_values(selection_metric, ascending=ascending)
-        .reset_index(drop=True)
-    )
-
-    # Apply LOYO R² quality gate before top-N selection
+    # --- Hard gate: LOYO R² ---
     if loyo_r2_min is not None and "loyo_r2" in valid.columns:
         n_before = len(valid)
         valid = valid[valid["loyo_r2"] >= loyo_r2_min].reset_index(drop=True)
@@ -140,21 +151,55 @@ def _run_top_n_group(
             print(f"  [loyo_r2 gate] Rejected {n_rejected}/{n_before} runs with "
                   f"loyo_r2 < {loyo_r2_min}")
 
+    # --- Hard gate: LOGO R² ---
+    if logo_r2_min is not None and "logo_r2" in valid.columns:
+        n_before = len(valid)
+        valid = valid[valid["logo_r2"] >= logo_r2_min].reset_index(drop=True)
+        n_rejected = n_before - len(valid)
+        if n_rejected:
+            print(f"  [logo_r2 gate] Rejected {n_rejected}/{n_before} runs with "
+                  f"logo_r2 < {logo_r2_min}")
+
     n_valid = len(valid)
     if n_valid < min_runs:
-        print(f"  SKIPPED: only {n_valid} run(s) pass loyo_r2 >= {loyo_r2_min} "
-              f"(need {min_runs}). Raise --loyo_r2_min or lower --min_runs to proceed.")
+        gates = []
+        if loyo_r2_min is not None:
+            gates.append(f"loyo_r2 >= {loyo_r2_min}")
+        if logo_r2_min is not None:
+            gates.append(f"logo_r2 >= {logo_r2_min}")
+        gate_str = " and ".join(gates) if gates else "no gate"
+        print(f"  SKIPPED: only {n_valid} run(s) pass gates ({gate_str}) "
+              f"(need {min_runs}). Adjust thresholds or lower --min_runs.")
         return False
+
+    # --- Rank by selection_metric ---
+    if selection_metric == "composite":
+        w_loyo    = float(composite_loyo_r2_weight)
+        w_glambie = 1.0 - w_loyo
+        norm_glambie = _minmax_norm_series(valid["glambie_rmse"])
+        norm_neg_r2  = 1.0 - _minmax_norm_series(valid["loyo_r2"])
+        valid = valid.copy()
+        valid["_composite"] = w_glambie * norm_glambie + w_loyo * norm_neg_r2
+        valid = valid.sort_values("_composite", ascending=True).reset_index(drop=True)
+        rank_label = f"composite (loyo_r2 w={w_loyo:.2f}, glambie_rmse w={w_glambie:.2f}) ↓ lower better"
+    elif selection_metric == "loyo_r2":
+        valid = valid.sort_values("loyo_r2", ascending=False).reset_index(drop=True)
+        rank_label = "loyo_r2 ↑ higher better"
+    else:
+        valid = valid.sort_values(selection_metric, ascending=True).reset_index(drop=True)
+        rank_label = f"{selection_metric} ↓ lower better"
 
     top = valid.head(top_n).reset_index(drop=True)
     if len(top) < top_n:
         print(f"  WARNING: only {len(top)} qualifying runs available (requested top {top_n}).")
-    print(f"  Top {len(top)} runs by {selection_metric} ({'↑ higher better' if not ascending else '↓ lower better'}):")
+    print(f"  Top {len(top)} runs by {rank_label}:")
     for _, row in top.iterrows():
-        print(f"    {row['run_id']}  {selection_metric}={row[selection_metric]:.4f}  "
+        composite_str = (f"  composite={row['_composite']:.4f}" if "_composite" in row.index else "")
+        print(f"    {row['run_id']}{composite_str}  "
               f"glambie_rmse={row.get('glambie_rmse', float('nan')):.4f}  "
-              f"loyo_rmse={row.get('loyo_rmse', float('nan')):.4f}  "
-              f"loyo_r2={row.get('loyo_r2', float('nan')):.4f}")
+              f"loyo_r2={row.get('loyo_r2', float('nan')):.4f}  "
+              f"logo_r2={row.get('logo_r2', float('nan')):.4f}  "
+              f"loyo_rmse={row.get('loyo_rmse', float('nan')):.4f}")
 
     top.to_csv(output_dir / "top_runs_info.csv", index=False)
 
@@ -336,24 +381,28 @@ def run_ensemble_time_encoding(cfg: dict) -> None:
     multirun_root = Path(cfg["multirun_root"])
     output_dir    = Path(cfg["output_dir"])
 
-    test_years        = list(cfg.get("glambie_test_years", [2020, 2021, 2022, 2023, 2024]))
-    min_runs          = int(cfg.get("min_runs_per_region", 1))
-    top_n             = int(cfg.get("top_n", 5))
-    selection_metric  = str(cfg.get("selection_metric", "glambie_rmse"))
-    loyo_r2_min       = cfg.get("loyo_r2_min", 0.1)
+    test_years                = list(cfg.get("glambie_test_years", [2020, 2021, 2022, 2023, 2024]))
+    min_runs                  = int(cfg.get("min_runs_per_region", 1))
+    top_n                     = int(cfg.get("top_n", 5))
+    selection_metric          = str(cfg.get("selection_metric", "glambie_rmse"))
+    loyo_r2_min               = cfg.get("loyo_r2_min", 0.1)
+    logo_r2_min               = cfg.get("logo_r2_min", 0.0)
+    composite_loyo_r2_weight  = float(cfg.get("composite_loyo_r2_weight", 0.5))
     if loyo_r2_min is not None:
         loyo_r2_min = float(loyo_r2_min)
+    if logo_r2_min is not None:
+        logo_r2_min = float(logo_r2_min)
 
-    valid_metrics = {"glambie_rmse", "loyo_rmse", "loyo_r2"}
+    valid_metrics = {"glambie_rmse", "loyo_rmse", "loyo_r2", "composite"}
     if selection_metric not in valid_metrics:
         raise ValueError(f"selection_metric must be one of {valid_metrics}, got '{selection_metric}'")
 
     print(f"\n=== Ensemble split by use_time_encoding: {multirun_root.name} ===")
     print(f"  Selecting top {top_n} runs per group by {selection_metric}"
-          + (f" over GLaMBIE test years {test_years}" if selection_metric == "glambie_rmse" else ""))
+          + (f" over GLaMBIE test years {test_years}" if "glambie" in selection_metric else ""))
     print(f"  LOYO R² gate    : >= {loyo_r2_min}" if loyo_r2_min is not None else "  LOYO R² gate    : disabled")
+    print(f"  LOGO R² gate    : >= {logo_r2_min}" if logo_r2_min is not None else "  LOGO R² gate    : disabled")
 
-    # Build results table (no composite scoring needed — we rank by glambie_rmse directly)
     results_df = build_results_df(multirun_root, test_years, min_runs_per_region=1)
     print(f"  {len(results_df)} total runs loaded.")
 
@@ -382,13 +431,15 @@ def run_ensemble_time_encoding(cfg: dict) -> None:
             print("  No runs found — skipping.")
             skipped.append(label)
             continue
-        ok = _run_top_n_group(group, group_output_dir, top_n, min_runs, selection_metric, loyo_r2_min)
+        ok = _run_top_n_group(
+            group, group_output_dir, top_n, min_runs, selection_metric,
+            loyo_r2_min, logo_r2_min, composite_loyo_r2_weight,
+        )
         if not ok:
             skipped.append(label)
 
     if skipped:
-        print(f"\n  WARNING: the following groups were skipped due to insufficient runs "
-              f"passing loyo_r2 >= {loyo_r2_min}: {skipped}")
+        print(f"\n  WARNING: the following groups were skipped due to insufficient qualifying runs: {skipped}")
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +461,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--loyo_r2_min", type=float, default=None,
                         help="Minimum LOYO R² a run must achieve to be eligible for the "
                              "ensemble (default 0.1). Pass --loyo_r2_min=-inf to disable.")
+    parser.add_argument("--logo_r2_min", type=float, default=None,
+                        help="Minimum LOGO R² a run must achieve (default 0.0). "
+                             "Pass --logo_r2_min=-inf to disable.")
     return parser.parse_args()
 
 
@@ -431,6 +485,8 @@ def main() -> None:
         cfg["top_n"] = args.top_n
     if args.loyo_r2_min is not None:
         cfg["loyo_r2_min"] = args.loyo_r2_min
+    if args.logo_r2_min is not None:
+        cfg["logo_r2_min"] = args.logo_r2_min
 
     run_ensemble_time_encoding(cfg)
 

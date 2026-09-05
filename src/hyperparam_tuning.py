@@ -216,6 +216,21 @@ def _load_loyo_r2(run_dir: Path) -> float:
     return float(row.iloc[0]["r2"])
 
 
+def _load_logo_r2(run_dir: Path) -> float:
+    """Return LOGO R² from the pretrain_cv run (leave-one-glacier-out spatial generalisation)."""
+    path = run_dir / "._cv" / "metrics_oos.csv"
+    if not path.exists():
+        return float("nan")
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return float("nan")
+    row = df[df["split"] == "logo"]
+    if row.empty or "r2" not in df.columns:
+        return float("nan")
+    return float(row.iloc[0]["r2"])
+
+
 def discover_runs(multirun_root: Path) -> list[Path]:
     """Return a sorted list of run directories inside multirun_root.
 
@@ -250,7 +265,7 @@ def build_results_df(
     """Load metrics for every discovered run and return a combined DataFrame.
 
     Columns: region, run_id, run_dir, nlayers, nhidden, heteroscedastic,
-             glambie_weight, beta_anneal_epochs, loyo_rmse, loyo_r2, glambie_rmse
+             glambie_weight, beta_anneal_epochs, loyo_rmse, loyo_r2, logo_r2, glambie_rmse
     """
     run_dirs = discover_runs(multirun_root)
     # Region is derived from the multirun_root dir name (e.g. r06_3645680 → r06)
@@ -259,6 +274,7 @@ def build_results_df(
     rows = []
     missing_glambie = 0
     missing_loyo = 0
+    missing_logo = 0
 
     for run_dir in run_dirs:
         params = _parse_overrides(run_dir / ".hydra" / "overrides.yaml")
@@ -268,11 +284,14 @@ def build_results_df(
         glambie_rmse = _load_glambie_test_rmse(run_dir, test_years)
         loyo_rmse    = _load_loyo_rmse(run_dir)
         loyo_r2      = _load_loyo_r2(run_dir)
+        logo_r2      = _load_logo_r2(run_dir)
 
         if np.isnan(glambie_rmse):
             missing_glambie += 1
         if np.isnan(loyo_rmse):
             missing_loyo += 1
+        if np.isnan(logo_r2):
+            missing_logo += 1
 
         rows.append({
             "region":  params.get("region") or region,
@@ -282,6 +301,7 @@ def build_results_df(
             **{k: params.get(k) for k in EXTRA_OVERRIDES.values()},
             "loyo_rmse":    loyo_rmse,
             "loyo_r2":      loyo_r2,
+            "logo_r2":      logo_r2,
             "glambie_rmse": glambie_rmse,
         })
 
@@ -291,6 +311,8 @@ def build_results_df(
         print(f"  WARNING: {missing_glambie} runs missing glambie_test metrics")
     if missing_loyo:
         print(f"  WARNING: {missing_loyo} runs missing LOYO metrics")
+    if missing_logo:
+        print(f"  WARNING: {missing_logo} runs missing LOGO metrics")
 
     n_complete = df.dropna(subset=["loyo_rmse", "glambie_rmse"]).shape[0]
     if n_complete < min_runs_per_region:
