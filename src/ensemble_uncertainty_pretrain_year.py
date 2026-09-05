@@ -50,6 +50,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pandas as pd
 import yaml
 
 from src.ensemble_uncertainty_time_encoding import _run_top_n_group
@@ -178,7 +179,6 @@ def run_ensemble_pretrain_year(cfg: dict) -> None:
     # Combined ensemble — structural uncertainty spans pretrain years
     # ----------------------------------------------------------------
     if len(combined_parts) >= 2:
-        import pandas as pd  # noqa: PLC0415
         combined_df = pd.concat(combined_parts).reset_index(drop=True)
         n_combined  = len(combined_df)
         print(f"\n--- Combined ensemble ({n_combined} models: "
