@@ -418,11 +418,11 @@ uncertainty spans both nhidden and pretraining period. Console log saved at
 for i in $(seq -w 1 19); do
   python src/ensemble_uncertainty_pretrain_year.py \
     --multirun_root /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r${i}_582*/ \
-    --output_dir outputs/ensemble_pretrain_year/r${i} \
+    --output_dir outputs/ensemble_pretrain_year_r2loyologo/r${i} \
     --top_n 5 \
     --k_per_group 2 \
-    --loyo_r2_min 0.4 \
-    --logo_r2_min 0.0
+    --loyo_r2_min 0.2 \
+    --logo_r2_min 0.1
 done
 ```
 
@@ -442,7 +442,7 @@ Validates all 5 groups against WGMS/Dussaillant (regional) and WGMS in-situ
 (per-glacier). Console log saved in each output directory as `run.log`.
 
 ```bash
-for group in pt1940 pt1960 pt1980 pt2000 combined; do   python src/validate_regional_pretrain_year.py     --config conf/config_validate_regional.yaml     --pretrain_year_group ${group}     --ensemble_base_dir outputs/ensemble_pretrain_year_r2min01     --output_dir outputs/validation_regional_r2min01_${group};    python src/validate_per_glacier_pretrain_year.py     --pretrain_year_group ${group}     --ensemble_base_dir outputs/ensemble_pretrain_year_r2min01     --output_dir outputs/validation_pergla_r2min01_${group}; done
+for group in pt1940 pt1960 pt1980 pt2000 combined; do   python src/validate_regional_pretrain_year.py     --config conf/config_validate_regional.yaml     --pretrain_year_group ${group}     --ensemble_base_dir outputs/ensemble_pretrain_year_r2loyologo     --output_dir outputs/validation_regional_r2loyologo_${group};    python src/validate_per_glacier_pretrain_year.py     --pretrain_year_group ${group}     --ensemble_base_dir outputs/ensemble_pretrain_year_r2loyologo     --output_dir outputs/validation_pergla_r2loyologo_${group}; done
 ```
 
 **What to look at:**
@@ -462,10 +462,10 @@ systematically better or worse across regions.
 ```bash
 for group in pt1940 pt1960 pt1980 pt2000 combined; do
   python src/plot_global_from_glaciers.py \
-    --ensemble_root outputs/ensemble_pretrain_year_r2min01 \
+    --ensemble_root outputs/ensemble_pretrain_year_r2loyologo \
     --data_root data_for_model \
     --group ${group} \
-    --output_dir outputs/global_pretrain_year_r2min01/${group}
+    --output_dir outputs/global_pretrain_year_r2loyologo/${group}
 done
 ```
 
@@ -489,7 +489,7 @@ groups let you check whether feature importance shifts with the pretraining wind
 for i in $(seq -w 1 19); do
   for group in pt1940 pt1960 pt1980 pt2000 combined; do
     python main_explain_pretrain_year.py \
-      explain.ensemble_dir=outputs/ensemble_pretrain_year_r2min01/r${i} \
+      explain.ensemble_dir=outputs/ensemble_pretrain_year_r2loyologo/r${i} \
       explain.pretrain_year_group=${group} \
       explain.explain_year_max=2025
   done
