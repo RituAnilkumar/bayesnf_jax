@@ -18,11 +18,27 @@ seed: 0
 oggm_loss_fn: huber           # 'huber' or 'rmse'
 huber_delta: 0.5              # Huber transition point in scaled target units (only used if oggm_loss_fn=huber)
 glambie_weight: 2.0           # Relative weight of GLaMBIE loss vs Hugonnet temporal-avg loss.
-                              # Both losses are per-observation normalised so 1.0 = equal weight.
-                              # Reduce below 1.0 if GLaMBIE over-fits; increase to prioritise regional fit.
-kl_weight: 0.5                # Relative weight of KL term (OGGM prior strength).
-                              # Values < 1.0 weaken the OGGM prior, letting Hugonnet/GLaMBIE
-                              # dominate more. Default 1.0 = standard Bayesian continual learning.
+                              # Both losses are per-observation normalised so 1.0 would be equal
+                              # weight. Set to 2.0 (not 1.0) to compensate for kl_weight below —
+                              # see rationale there. Reduce below 1.0 if GLaMBIE over-fits;
+                              # increase further to prioritise regional fit.
+kl_weight: 0.5                # Relative weight of KL term (OGGM prior strength). 1.0 = standard
+                              # Bayesian continual learning (full-strength anchor to the OGGM
+                              # prior); values < 1.0 weaken it.
+                              # Set to 0.5 (not 1.0) deliberately: OGGM's own calibration is fit
+                              # against Hugonnet geodetic data, so the OGGM-pretrained prior
+                              # already carries a Hugonnet-derived signal. A full-strength KL
+                              # anchor (1.0) combined with the direct Hugonnet temporal-avg loss
+                              # would double-count that signal. kl_weight=0.5 discounts the
+                              # prior's pull to correct for this overlap; glambie_weight=2.0
+                              # (above) compensates by upweighting GLaMBIE, the one Stage 2
+                              # source genuinely independent of OGGM's calibration.
+                              # Caveat: this is a blunt correction — kl_weight discounts ALL of
+                              # OGGM's prior uniformly, not just the Hugonnet-duplicated part
+                              # (it also discounts OGGM's independent physical/climate-response
+                              # information). A more surgical fix would restrict
+                              # pretrain_year_min/max to years where the OGGM/Hugonnet overlap
+                              # is weakest, but that's deferred — see CONTEXT.md.
 use_time_encoding: true       # If false, Fourier time features are excluded (purely spatial model).
                               # Set to false to ablate temporal structure.
 pretrain_year_min: 1940       # Only use OGGM rows with year >= this value

@@ -191,12 +191,36 @@ architectural components are needed.
   - N_obs = total number of (year, source) observations, NOT unique years
     (so years with both gravimetry and altimetry count as 2)
 
-  Loss (minimised) = L_temporal_avg + glambie_weight * L_glambie + (beta / n_data) * KL(finetuned || pretrained)
+  Loss (minimised) = L_temporal_avg + glambie_weight * L_glambie + kl_weight * (beta / n_data) * KL(finetuned || pretrained)
   where n_data = n_period_glaciers + n_glambie_obs
 
-- glambie_weight (default 1.0): scales GLaMBIE loss relative to Hugonnet. Both losses
-  are already per-observation normalised so 1.0 = equal weight per observation.
-  Reduce below 1.0 if GLaMBIE over-fits at the expense of per-glacier accuracy.
+- glambie_weight (repo default 2.0, not the theoretically-neutral 1.0): scales
+  GLaMBIE loss relative to Hugonnet. Both losses are already per-observation
+  normalised so 1.0 would be equal weight per observation. Set to 2.0 (not 1.0)
+  deliberately — see kl_weight rationale below. Reduce below 1.0 if GLaMBIE
+  over-fits at the expense of per-glacier accuracy; increase further to
+  prioritise regional fit.
+- kl_weight (repo default 0.5, not the theoretically-neutral 1.0): scales the
+  KL(finetuned || pretrained) term, i.e. how strongly Stage 2 is anchored to
+  the OGGM-pretrained posterior.
+  **Why not 1.0 (standard Bayesian continual learning):** OGGM's own
+  calibration is itself fit against Hugonnet geodetic mass-balance data, so
+  the OGGM-pretrained prior already carries a Hugonnet-derived signal. A
+  full-strength KL anchor (kl_weight=1.0) combined with the direct
+  `L_temporal_avg` fit to the same Hugonnet period would double-count that
+  signal — once indirectly via the prior, once directly via the likelihood.
+  kl_weight=0.5 discounts the prior's pull to correct for this overlap, and
+  glambie_weight=2.0 compensates by upweighting GLaMBIE, the one Stage 2
+  observation source that is genuinely independent of OGGM's calibration
+  (satellite gravimetry/altimetry, never seen by OGGM).
+  **Known limitation:** kl_weight is a single scalar over the *entire* prior,
+  so it discounts OGGM's independent information (physical model structure,
+  climate sensitivity learned over the full pretrain window, extrapolation
+  behaviour) by the same factor as the Hugonnet-duplicated part — it cannot
+  separate the two. A more precise fix would restrict pretrain_year_min/max
+  to years where OGGM's calibration-Hugonnet overlap is weakest, but that
+  change is intentionally out of scope for now; the blanket kl_weight=0.5
+  discount is considered sufficient.
 - GLaMBIE may be absent for some regions (e.g. High Mountain Asia has no
   gravimetry) — handle gracefully, do not error if glambie file is missing
   or empty for a given source
@@ -224,7 +248,8 @@ Follow the same Hydra override pattern as jungle3:
   model.temporal_avg_path       (Stage 2 only)
   model.glambie_path            (Stage 2 only)
   model.beta_anneal_epochs      (epochs over which beta is annealed 0→1)
-  model.glambie_weight          (Stage 2 only; default 1.0)
+  model.glambie_weight          (Stage 2 only; repo default 2.0 — see rationale above)
+  model.kl_weight                (Stage 2 only; repo default 0.5 — see rationale above)
   model.pretrain_year_min       (Stage 1 only; default 2000)
   model.pretrain_year_max       (Stage 1 only; default 2020)
 

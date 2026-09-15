@@ -202,6 +202,41 @@ number of residuals ensures each data source contributes equally to the
 ELBO in expectation, and gives the KL weight beta a consistent meaning
 across terms.
 
+### Why glambie_weight=2.0 and kl_weight=0.5, not 1.0/1.0
+
+The theoretically "neutral" setting is glambie_weight=1.0, kl_weight=1.0:
+equal per-observation weight between GLaMBIE and Hugonnet, and standard-
+strength Bayesian continual learning (full KL anchor to the OGGM-pretrained
+posterior). The repo does not use this setting.
+
+The reason: OGGM's own mass-balance model calibration is itself fit against
+Hugonnet geodetic mass-balance data. This means the OGGM-pretrained posterior
+(and therefore the Stage 2 KL prior) already carries a Hugonnet-derived
+signal, baked in during Stage 1. If Stage 2 then applies a full-strength KL
+anchor (kl_weight=1.0) *and* fits `L_temporal_avg` directly to the same
+Hugonnet period, Hugonnet's influence is counted twice — once indirectly
+through the prior, once directly through the likelihood — while GLaMBIE
+(the only Stage 2 source OGGM never saw) would be relatively underweighted
+by comparison.
+
+The fix applied: kl_weight=0.5 discounts the prior's pull (reducing the
+duplicated Hugonnet-via-OGGM signal), and glambie_weight=2.0 upweights
+GLaMBIE to compensate, since GLaMBIE is the one genuinely independent
+observational source in Stage 2.
+
+This is a blunt, not surgical, correction: kl_weight is a single scalar over
+the entire KL term, so it discounts all of OGGM's contribution uniformly —
+including the parts that are *not* duplicated with Hugonnet (the physical
+mass-balance model structure, climate sensitivity learned over the full
+pretrain window, and extrapolation behaviour in years/regions Hugonnet
+doesn't cover). A more precise fix would restrict pretrain_year_min/max to
+years where the OGGM-calibration/Hugonnet overlap is weakest, isolating the
+double-counted portion rather than discounting the whole prior. This was
+considered and explicitly deferred — the blanket kl_weight=0.5 discount is
+judged sufficient for current purposes, and pretrain windowing is left as a
+separate, independent ablation axis (see the pretrain-year sweep in
+README.md) rather than a fix for this specific issue.
+
 ### Beta annealing
 
 Beta is annealed from 0 to 1 over the first ~20% of training epochs in
