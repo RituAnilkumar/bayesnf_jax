@@ -1,0 +1,82 @@
+# Explainability config for TE-split ensemble outputs.
+#
+# Variant of config_explain.yaml for ensembles produced by
+# ensemble_uncertainty_time_encoding.py, where outputs are in nested subdirs:
+#
+#   {ensemble_base_dir}/{region}/time_encoding/
+#   {ensemble_base_dir}/{region}/no_time_encoding/
+#
+# Requires explain.te_group (set via CLI or override here).
+#
+# Usage:
+#   python main_explain_te.py \
+#       explain.ensemble_dir=/scratch/.../ensemble_te_r2/r01 \
+#       explain.te_group=time_encoding
+
+defaults:
+  - model: bnf_regional_seasonal
+  - _self_
+
+model:
+  output_dir: .
+  reg_subdir: _explain_te
+  input_type: run
+  temporal_avg_path: null
+  glambie_path: null
+  pretrained_params_path: null
+  finetuned_params_path: null
+
+explain:
+  # ---------------------------------------------------------------------------
+  # Required inputs
+  # ---------------------------------------------------------------------------
+  ensemble_dir: null   # per-region TE dir, e.g. /scratch/.../ensemble_te_r2/r01
+  te_group: null       # "time_encoding" or "no_time_encoding"
+
+  stage: finetune      # 'finetune' or 'pretrain'
+
+  explain_split: train
+  explain_year_max: 2025
+
+  # --- IG hyperparameters ---
+  n_mc: 100
+  n_mc_per_model: 50
+  n_steps: 50
+  baseline: mean
+
+  # --- Subsampling ---
+  max_points: 2000
+  chunk_size: 500
+  seed: 0
+
+  # --- Plots ---
+  beeswarm_n_max: 1000
+  importance_top_k: null
+  dependence_top_k: 5
+
+  # --- Ensemble model weighting ---
+  # TE ensemble uses equal weights by default (top-N already selected by
+  # ensemble_uncertainty_time_encoding.py). Set 'performance' to re-weight
+  # by composite score if needed.
+  weighting: equal
+  softmax_temperature: 0.1
+  loyo_weight: 0.0
+  glambie_weight: 1.0
+  glambie_test_years: [2000, 2001, 2020, 2021, 2022, 2023]
+  min_runs: 3
+  top_k_models: null   # null = use all top-N from top_runs_info.csv
+
+  exclude_features:
+    - year
+    - CenLat
+    - CenLon
+
+  year_slice_years: null
+  waterfall_rgi_id: null
+  waterfall_year: null
+
+hydra:
+  run:
+    dir: outputs/explain_te
+  job:
+    chdir: true
