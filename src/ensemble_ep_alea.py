@@ -16,8 +16,9 @@ Uncertainty decomposition (law of total variance across top-N models):
 
 Only heteroscedastic runs (model.heteroscedastic=true) are considered.
 Model selection: same criteria as ensemble_uncertainty_pretrain_year.py — see
-src/ensemble_common.py::select_top_n_runs (LOYO/LOGO R² gates, WGMS validation
-RMSE exclusion gate, WGMS composite ranking with LOYO/LOGO-only fallback).
+src/wgms_validation.py::select_top_n_runs (LOYO/LOGO R² gates, WGMS validation
+RMSE exclusion gate as a sanity backstop only, WGMS validation correlation (r)
+ranking with LOYO/LOGO-only fallback).
 GLaMBIE test RMSE is reporting-only, not part of selection.
 Equal weights are used across the top-N models.
 
@@ -91,16 +92,16 @@ def pick_top_runs(
     top_n: int = 5,
     loyo_r2_min: float | None = 0.0,
     logo_r2_min: float | None = 0.0,
-    wgms_rmse_max: float = 1.0,
-    composite_weights: dict | None = None,
+    wgms_rmse_max: float = 10.0,
 ) -> pd.DataFrame:
     """
     Return the top-N heteroscedastic runs, using the same selection criteria
     as ensemble_uncertainty_pretrain_year.py (see
-    src/ensemble_common.py::select_top_n_runs for the full rules: LOYO/LOGO
-    R² gates, WGMS validation RMSE exclusion gate, WGMS composite ranking
-    with a LOYO/LOGO-only fallback for regions with no usable WGMS data, and
-    a point-wise -> period-mean fallback when too few runs pass).
+    src/wgms_validation.py::select_top_n_runs for the full rules: LOYO/LOGO
+    R² gates, WGMS validation RMSE exclusion gate (sanity backstop only),
+    WGMS validation correlation (r) ranking with a LOYO/LOGO-only fallback
+    for regions with no usable WGMS data, and a point-wise -> period-mean
+    fallback when too few runs pass).
 
     Only runs with heteroscedastic=True in their Hydra overrides are
     considered (required for the epistemic/aleatoric decomposition this
@@ -128,7 +129,7 @@ def pick_top_runs(
               "cannot pre-filter. Will validate after loading preds_full.csv.")
 
     top, rank_label = select_top_n_runs(
-        results_df, top_n, min_runs, loyo_r2_min, logo_r2_min, wgms_rmse_max, composite_weights,
+        results_df, top_n, min_runs, loyo_r2_min, logo_r2_min, wgms_rmse_max,
     )
     if top is None:
         raise RuntimeError(
@@ -494,17 +495,12 @@ def run_ep_alea(cfg: dict) -> None:
     top_n      = int(cfg.get("top_n", 5))
     loyo_r2_min   = cfg.get("loyo_r2_min", 0.0)
     logo_r2_min   = cfg.get("logo_r2_min", 0.0)
-    wgms_rmse_max = float(cfg.get("wgms_rmse_max", 1.0))
-    composite_weights = {
-        "rmse":  float(cfg.get("wgms_weight_rmse", 1 / 3)),
-        "corr":  float(cfg.get("wgms_weight_corr", 1 / 3)),
-        "medae": float(cfg.get("wgms_weight_medae", 1 / 3)),
-    }
+    wgms_rmse_max = float(cfg.get("wgms_rmse_max", 10.0))
     loyo_r2_min = float(loyo_r2_min) if loyo_r2_min is not None else None
     logo_r2_min = float(logo_r2_min) if logo_r2_min is not None else None
 
     print(f"\n=== Top-{top_n} ensemble (epistemic + aleatoric + structural): {multirun_root.name} ===")
-    print(f"  Selection: WGMS validation composite where available, else LOYO/LOGO R² composite "
+    print(f"  Selection: WGMS validation correlation (r) where available, else LOYO/LOGO R² composite "
           f"(GLaMBIE test years {test_years} are reporting-only)")
 
     # ------------------------------------------------------------------
@@ -513,7 +509,7 @@ def run_ep_alea(cfg: dict) -> None:
     top_runs = pick_top_runs(
         multirun_root, test_years, min_runs, top_n=top_n,
         loyo_r2_min=loyo_r2_min, logo_r2_min=logo_r2_min,
-        wgms_rmse_max=wgms_rmse_max, composite_weights=composite_weights,
+        wgms_rmse_max=wgms_rmse_max,
     )
     run_dirs = [Path(r["run_dir"]) for _, r in top_runs.iterrows()]
 

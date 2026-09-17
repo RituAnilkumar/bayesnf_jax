@@ -29,27 +29,31 @@ softmax_temperature: 0.1
 # Skip ensemble if fewer than this many runs have complete metrics.
 min_runs_per_region: 3
 
-# --- Selection gates + composite (shared by ensemble_uncertainty.py,
+# --- Selection gates + ranking (shared by ensemble_uncertainty.py,
 # ensemble_uncertainty_pretrain_year.py, and ensemble_ep_alea.py — see
 # src/wgms_validation.py::select_top_n_runs) ---
 #
-# Ranking: an equally-weighted composite of normalised WGMS reference/
-# benchmark-glacier validation RMSE, correlation, and MedAE (see
-# validation_data/per_gla/reference_benchmark_mb_timeseries.csv and
-# src/wgms_validation.py). Regions with no usable WGMS data (tier 3, e.g.
-# r04/r09 — see reference_benchmark_region_summary.csv) fall back to a
-# LOYO/LOGO R² composite instead. GLaMBIE is never used for selection —
-# it is reporting/testing-only (see wgms_test_*/glambie_rmse columns).
+# Ranking: WGMS reference/benchmark-glacier validation correlation (r),
+# descending (see validation_data/per_gla/reference_benchmark_mb_timeseries.csv
+# and src/wgms_validation.py). RMSE/MedAE are deliberately NOT used for
+# ranking: WGMS glaciological series are often bias-corrected against
+# geodetic measurements (the same family of signal GLaMBIE/Hugonnet
+# contribute during finetuning), so an absolute-error metric risks rewarding
+# a model for matching a bias term it may have partly learned from training
+# data. Correlation is far less sensitive to that shared bias. Regions with
+# no usable WGMS data (tier 3, e.g. r04/r09 — see
+# reference_benchmark_region_summary.csv) fall back to a LOYO/LOGO R²
+# composite instead. GLaMBIE is never used for selection — it is
+# reporting/testing-only (see wgms_test_*/glambie_rmse columns).
 #
 # Hard gates (always applied): loyo_r2 > loyo_r2_min, logo_r2 > logo_r2_min
 # (both strict; requires pipeline.stages to include pretrain_cv so that
-# ._cv/metrics_oos.csv exists), and wgms_val_rmse <= wgms_rmse_max.
+# ._cv/metrics_oos.csv exists), and wgms_val_rmse <= wgms_rmse_max — this
+# RMSE gate is a loose sanity backstop against catastrophic misfit, not a
+# ranking criterion, hence the wide default (10 m w.e./yr, not 1).
 loyo_r2_min: 0.0
 logo_r2_min: 0.0
-wgms_rmse_max: 1.0     # m w.e./yr (= 1000 mm w.e.)
-wgms_weight_rmse: 0.3333
-wgms_weight_corr: 0.3333
-wgms_weight_medae: 0.3334
+wgms_rmse_max: 10.0    # m w.e./yr — sanity backstop only, not used for ranking
 
 # Note: glambie_path, inp_dir and reg_subdir are read automatically from
 # .hydra/config.yaml inside the first valid run directory — no need to

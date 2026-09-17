@@ -23,11 +23,11 @@ where:
 
 Model weights come from the composite score computed by
 src/wgms_validation.py::select_top_n_runs — the same LOYO/LOGO-gated, WGMS
-validation-ranked (or LOYO/LOGO-ranked, for regions with no usable WGMS data)
-composite used by ensemble_uncertainty_pretrain_year.py and ensemble_ep_alea.py.
-Every run that survives the hard gates gets a continuous softmax weight here
-instead of a hard top-N cutoff (lower composite = better generalisation =
-higher weight).
+validation-correlation-ranked (or LOYO/LOGO-ranked, for regions with no usable
+WGMS data) score used by ensemble_uncertainty_pretrain_year.py and
+ensemble_ep_alea.py. Every run that survives the hard gates gets a continuous
+softmax weight here instead of a hard top-N cutoff (lower composite score =
+higher WGMS correlation = higher weight).
 
 Inputs per run directory:
   preds_full.csv             — rgi_id, year, p2_5, p50, p97_5, mean, std
@@ -532,12 +532,7 @@ def run_ensemble_uncertainty(cfg: dict) -> None:
     min_runs     = int(cfg.get("min_runs_per_region", 5))
     loyo_r2_min   = cfg.get("loyo_r2_min", 0.0)
     logo_r2_min   = cfg.get("logo_r2_min", 0.0)
-    wgms_rmse_max = float(cfg.get("wgms_rmse_max", 1.0))
-    composite_weights = {
-        "rmse":  float(cfg.get("wgms_weight_rmse", 1 / 3)),
-        "corr":  float(cfg.get("wgms_weight_corr", 1 / 3)),
-        "medae": float(cfg.get("wgms_weight_medae", 1 / 3)),
-    }
+    wgms_rmse_max = float(cfg.get("wgms_rmse_max", 10.0))
     loyo_r2_min = float(loyo_r2_min) if loyo_r2_min is not None else None
     logo_r2_min = float(logo_r2_min) if logo_r2_min is not None else None
 
@@ -547,14 +542,14 @@ def run_ensemble_uncertainty(cfg: dict) -> None:
     print(f"\n=== Ensemble uncertainty: {multirun_root.name} ===")
     results_df = build_results_df(multirun_root, test_years, min_runs_per_region=min_runs)
 
-    # Same gates/composite as ensemble_uncertainty_pretrain_year.py and
+    # Same gates/ranking as ensemble_uncertainty_pretrain_year.py and
     # ensemble_ep_alea.py (see src/wgms_validation.py::select_top_n_runs),
     # but every run that survives gating gets a continuous softmax weight
     # here instead of a hard top-N cutoff.
     valid, rank_label = select_top_n_runs(
         results_df, top_n=len(results_df), min_runs=min_runs,
         loyo_r2_min=loyo_r2_min, logo_r2_min=logo_r2_min,
-        wgms_rmse_max=wgms_rmse_max, composite_weights=composite_weights,
+        wgms_rmse_max=wgms_rmse_max,
     )
     if valid is None:
         raise RuntimeError(

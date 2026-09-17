@@ -61,8 +61,7 @@ def _run_top_n_group(
     min_runs: int,
     loyo_r2_min: float | None = 0.0,
     logo_r2_min: float | None = 0.0,
-    wgms_rmse_max: float = 1.0,
-    composite_weights: dict | None = None,
+    wgms_rmse_max: float = 10.0,
 ) -> bool:
     """
     Run the full ensemble pipeline for one group: select_top_n_runs() to pick
@@ -75,7 +74,7 @@ def _run_top_n_group(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     top, rank_label = select_top_n_runs(
-        group_df, top_n, min_runs, loyo_r2_min, logo_r2_min, wgms_rmse_max, composite_weights,
+        group_df, top_n, min_runs, loyo_r2_min, logo_r2_min, wgms_rmse_max,
     )
     if top is None:
         print(f"  SKIPPED: {rank_label}. Adjust thresholds or lower --min_runs.")

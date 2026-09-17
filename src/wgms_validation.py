@@ -28,8 +28,6 @@ import pandas as pd
 TIMESERIES_CSV      = Path("validation_data/per_gla/reference_benchmark_mb_timeseries.csv")
 REGION_SUMMARY_CSV  = Path("validation_data/per_gla/reference_benchmark_region_summary.csv")
 
-RMSE_EXCLUDE_THRESHOLD_MWE = 1.0   # 1000 mm w.e./yr — hard exclusion gate
-
 
 @lru_cache(maxsize=1)
 def _load_timeseries() -> pd.DataFrame:
@@ -179,18 +177,24 @@ def _recompute_wgms_period_mean(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _wgms_composite_rank(df: pd.DataFrame, weights: dict) -> pd.DataFrame:
-    """Composite of normalised WGMS validation RMSE, correlation (inverted so
-    lower=better), and MedAE. Equal weights by default."""
+def _wgms_corr_rank(df: pd.DataFrame) -> pd.DataFrame:
+    """Rank by WGMS validation correlation (r), descending (higher = better).
+
+    Correlation is used instead of an RMSE/MedAE-based composite because WGMS
+    glaciological series are often themselves bias-corrected against geodetic
+    (satellite) measurements — the same family of signal GLaMBIE/Hugonnet
+    contribute during finetuning. An absolute-error metric like RMSE or MedAE
+    can therefore reward a model for matching a bias term it may have partly
+    learned from training data, whereas correlation only credits matching the
+    interannual pattern and is far less sensitive to that shared bias.
+
+    Runs with an undefined correlation (e.g. zero variance in obs or pred)
+    are treated as worst rather than dropped.
+    """
     df = df.copy()
-    norm_rmse  = _minmax_norm_series(df["wgms_val_rmse"])
-    norm_medae = _minmax_norm_series(df["wgms_val_medae"])
     corr_filled = df["wgms_val_corr"].fillna(df["wgms_val_corr"].min()
                                               if df["wgms_val_corr"].notna().any() else 0.0)
-    norm_neg_corr = 1.0 - _minmax_norm_series(corr_filled)
-    df["_composite"] = (weights["rmse"] * norm_rmse
-                         + weights["corr"] * norm_neg_corr
-                         + weights["medae"] * norm_medae)
+    df["_composite"] = 1.0 - _minmax_norm_series(corr_filled)
     return df.sort_values("_composite", ascending=True).reset_index(drop=True)
 
 
@@ -211,8 +215,7 @@ def select_top_n_runs(
     min_runs: int,
     loyo_r2_min: float | None = 0.0,
     logo_r2_min: float | None = 0.0,
-    wgms_rmse_max: float = 1.0,
-    composite_weights: dict | None = None,
+    wgms_rmse_max: float = 10.0,
 ) -> tuple[pd.DataFrame | None, str]:
     """
     Apply the shared selection criteria used by every ensemble-building script
@@ -224,14 +227,21 @@ def select_top_n_runs(
         - loyo_r2 > loyo_r2_min   (pretrain leave-one-year-out R², strictly positive by default)
         - logo_r2 > logo_r2_min   (pretrain leave-one-glacier-out R², strictly positive by default)
         - wgms_val_rmse <= wgms_rmse_max (excludes runs with WGMS validation
-          RMSE above 1000 mm w.e./yr by default) — only applied when the
-          region has usable WGMS data (see tiers below).
+          RMSE above 10 m w.e./yr by default — a loose sanity backstop against
+          catastrophic misfit, not a ranking criterion; see below for why) —
+          only applied when the region has usable WGMS data (see tiers below).
 
       Ranking:
         - Regions with usable WGMS reference/benchmark data (tier 1 or 2,
-          per reference_benchmark_region_summary.csv): rank by an equally-
-          weighted composite of normalised WGMS validation RMSE, correlation
-          (inverted), and MedAE.
+          per reference_benchmark_region_summary.csv): rank by WGMS validation
+          correlation (r), descending. RMSE/MedAE are deliberately NOT used
+          for ranking — WGMS glaciological series are often bias-corrected
+          against geodetic measurements, the same family of signal GLaMBIE/
+          Hugonnet contribute during finetuning, so an absolute-error metric
+          risks rewarding a model for matching a bias term it may have partly
+          learned from training data. Correlation is far less sensitive to
+          that shared bias. (wgms_val_rmse/medae are still computed and saved
+          for reporting — see the caller's saved info CSV.)
         - Regions with no usable WGMS data (tier 3, e.g. r04/r09): rank by a
           composite of normalised loyo_r2/logo_r2 instead — GLaMBIE is never
           part of selection at any tier (it is testing-only; see wgms_test_*
@@ -254,16 +264,12 @@ def select_top_n_runs(
         logo_r2_min:       Hard gate threshold (strict >). None disables.
         wgms_rmse_max:     Hard exclusion threshold on WGMS validation RMSE
                           (m w.e./yr). Only applied where WGMS data is used.
-        composite_weights: {"rmse": w, "corr": w, "medae": w} for the WGMS
-                          composite ranking. Defaults to equal thirds.
 
     Returns:
         (top_df, rank_label) — top_df has a `_composite` column (lower =
         better) and may have fewer than top_n rows. (None, reason) if fewer
         than min_runs runs survive even after the period-mean fallback.
     """
-    wgms_weights = composite_weights or {"rmse": 1 / 3, "corr": 1 / 3, "medae": 1 / 3}
-
     gated = group_df.copy().reset_index(drop=True)
 
     if loyo_r2_min is not None and "loyo_r2" in gated.columns:
@@ -300,9 +306,9 @@ def select_top_n_runs(
             print(f"  [wgms_rmse gate{'  (period-mean)' if period_mean else ''}] "
                   f"Rejected {n_rejected}/{n_before} runs with wgms_val_rmse > {wgms_rmse_max} m w.e./yr")
         scored = scored.dropna(subset=["wgms_val_rmse"])
-        label = ("WGMS validation composite (RMSE+corr+MedAE)"
+        label = ("WGMS validation correlation (r)"
                  + ("  [period-mean fallback]" if period_mean else "  [point-wise]"))
-        return _wgms_composite_rank(scored, wgms_weights), label
+        return _wgms_corr_rank(scored), label
 
     ranked, rank_label = _score(period_mean=False)
     if has_wgms and len(ranked) < top_n:
