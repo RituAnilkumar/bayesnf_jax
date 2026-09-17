@@ -42,6 +42,7 @@ from src.data_utils import (
     extract_hugonnet_region,
     FEATURE_COLS,
 )
+from src import area_rates
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +330,33 @@ def _save_regional_csvs(regional: dict, output_dir: str, suffix: str = "") -> No
         "mean": gt["mean"], "std": gt["std"],
     }).to_csv(os.path.join(output_dir, f"regional_annual_gt{suffix}.csv"), index=False)
     print(f"Saved regional_annual_mwe{suffix}.csv and regional_annual_gt{suffix}.csv")
+
+
+def _save_variable_area_gt(regional: dict, reg_subdir: str, output_dir: str, suffix: str = "") -> dict:
+    """
+    Alternative Gt/yr conversion using the GLaMBIE-prescribed linear regional
+    area-change rate (src/area_rates.py) instead of the fixed (constant)
+    total_area_km2 used by _save_regional_csvs. Same MWE samples, different
+    area multiplier — no re-prediction involved. See area_rates.py and
+    CONTEXT.md, "Fixed vs. variable area Gt conversion" for the rationale and
+    assumptions (in particular: the true value is expected to lie between the
+    fixed-area and variable-area series, not to equal either).
+
+    Returns the summarised Gt dict (for use by the comparison plot) so callers
+    don't need to re-read the CSV just written.
+    """
+    years = np.array(regional["years"], dtype=float)
+    scale_variable = area_rates.variable_area_scale(reg_subdir, years)   # (n_years,)
+    gt_samples_variable = regional["mwe_samples"] * scale_variable[np.newaxis, :]
+    gt_variable = _summarise(gt_samples_variable)
+
+    pd.DataFrame({
+        "year": regional["years"],
+        "p2_5": gt_variable["p2_5"], "p50": gt_variable["p50"], "p97_5": gt_variable["p97_5"],
+        "mean": gt_variable["mean"], "std": gt_variable["std"],
+    }).to_csv(os.path.join(output_dir, f"regional_annual_gt_variable_area{suffix}.csv"), index=False)
+    print(f"Saved regional_annual_gt_variable_area{suffix}.csv")
+    return gt_variable
 
 
 # ---------------------------------------------------------------------------
@@ -680,6 +708,11 @@ def run_predict(cfg: DictConfig) -> None:
 
     regional_fin = compute_regional_series(mc_fin, pred_grid)
     _save_regional_csvs(regional_fin, cfg.model.output_dir, suffix="")
+    gt_variable_fin = None
+    try:
+        gt_variable_fin = _save_variable_area_gt(regional_fin, cfg.model.reg_subdir, cfg.model.output_dir, suffix="")
+    except KeyError as exc:
+        print(f"WARNING: variable-area Gt skipped for finetune — {exc}")
 
     # --- Pretrained inference (if params exist) ---
     pretrain_path = cfg.model.get("pretrained_params_path", None)
@@ -699,8 +732,14 @@ def run_predict(cfg: DictConfig) -> None:
 
         regional_pre = compute_regional_series(mc_pre, pred_grid)
         _save_regional_csvs(regional_pre, cfg.model.output_dir, suffix="_pretrain")
+        gt_variable_pre = None
+        try:
+            gt_variable_pre = _save_variable_area_gt(regional_pre, cfg.model.reg_subdir, cfg.model.output_dir, suffix="_pretrain")
+        except KeyError as exc:
+            print(f"WARNING: variable-area Gt skipped for pretrain — {exc}")
     else:
         print("WARNING: pretrained_params_path not found — pretrain plots skipped")
+        gt_variable_pre = None
 
     # --- Load auxiliary data ---
     glambie_wide_df = None
@@ -746,3 +785,21 @@ def run_predict(cfg: DictConfig) -> None:
         plot_hugonnet_scatters(preds_fin, hugo_df, "finetune", cfg.model.output_dir)
         if preds_pre is not None:
             plot_hugonnet_scatters(preds_pre, hugo_df, "pretrain", cfg.model.output_dir)
+
+    # 6. Fixed vs. variable area Gt comparison
+    if gt_variable_fin is not None:
+        gt_fixed_fin = _summarise(regional_fin["gt_samples"])
+        area_rates.plot_fixed_vs_variable_area(
+            regional_fin["years"], gt_fixed_fin["mean"], gt_fixed_fin["std"],
+            gt_variable_fin["mean"], gt_variable_fin["std"],
+            os.path.join(cfg.model.output_dir, "regional_gt_area_comparison.png"),
+            title=f"{cfg.model.reg_subdir} — fixed vs. variable area (finetune)",
+        )
+    if regional_pre is not None and gt_variable_pre is not None:
+        gt_fixed_pre = _summarise(regional_pre["gt_samples"])
+        area_rates.plot_fixed_vs_variable_area(
+            regional_pre["years"], gt_fixed_pre["mean"], gt_fixed_pre["std"],
+            gt_variable_pre["mean"], gt_variable_pre["std"],
+            os.path.join(cfg.model.output_dir, "regional_gt_area_comparison_pretrain.png"),
+            title=f"{cfg.model.reg_subdir} — fixed vs. variable area (pretrain)",
+        )

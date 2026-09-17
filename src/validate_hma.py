@@ -45,6 +45,7 @@ from src.cumulative_uncertainty import (
     combine_cumulative_scenarios,
     plot_cumulative_sensitivity,
 )
+from src import area_rates
 
 # RGI subdirectories that make up HMA
 HMA_REGIONS = {
@@ -63,8 +64,8 @@ SATELLITE_STYLES = {
 # Loading helpers
 # ---------------------------------------------------------------------------
 
-def _load_regional_gt(region_dir: Path) -> pd.DataFrame | None:
-    path = region_dir / "top_models_regional_gt.csv"
+def _load_regional_gt(region_dir: Path, filename: str = "top_models_regional_gt.csv") -> pd.DataFrame | None:
+    path = region_dir / filename
     if not path.exists():
         warnings.warn(f"top_models_regional_gt.csv not found in {region_dir}")
         return None
@@ -100,7 +101,10 @@ def _load_satellite(path: Path) -> pd.DataFrame:
 # Combine HMA regions
 # ---------------------------------------------------------------------------
 
-def combine_hma(ensemble_base: Path) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]] | tuple[None, None]:
+def combine_hma(
+    ensemble_base: Path,
+    filename: str = "top_models_regional_gt.csv",
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]] | tuple[None, None]:
     """
     Sum Gt across r13, r14, r15; propagate annual (non-cumulative) uncertainty
     in quadrature — valid here because each region is its own independently-
@@ -108,12 +112,16 @@ def combine_hma(ensemble_base: Path) -> tuple[pd.DataFrame, dict[str, pd.DataFra
     is unaffected by the cumulative-uncertainty fix; only make_cumulative()
     needs the per-region DataFrames this function also returns.
 
+    Pass filename="top_models_regional_gt_variable_area.csv" for the
+    variable-area version (src/area_rates.py) instead of the fixed-area
+    default.
+
     Returns (combined_df, per_region_dfs) or (None, None) if any region's
-    top_models_regional_gt.csv could not be loaded.
+    file could not be loaded.
     """
     dfs = {}
     for rgi in HMA_REGIONS:
-        df = _load_regional_gt(ensemble_base / rgi)
+        df = _load_regional_gt(ensemble_base / rgi, filename=filename)
         if df is None:
             return None, None
         dfs[rgi] = df.set_index("year")
@@ -485,6 +493,23 @@ def run_hma_validation(cfg: dict) -> None:
     print(f"  Saved hma_cumulative_gt.csv")
     plot_cumulative_sensitivity(cum_variants_df, output_dir / "hma_cumulative_gt_sensitivity.png")
     print(f"  Saved hma_cumulative_gt_sensitivity.png")
+
+    # ------------------------------------------------------------------
+    # 1b. Fixed vs. variable area comparison
+    # ------------------------------------------------------------------
+    ens_variable, _ = combine_hma(ensemble_base, filename="top_models_regional_gt_variable_area.csv")
+    if ens_variable is not None:
+        merged = ens.merge(ens_variable, on="year", suffixes=("_fixed", "_variable"))
+        area_rates.plot_fixed_vs_variable_area(
+            merged["year"].values,
+            merged["median_gt_fixed"].values, merged["total_std_fixed"].values,
+            merged["median_gt_variable"].values, merged["total_std_variable"].values,
+            output_dir / "hma_area_comparison.png",
+            title="HMA (r13+r14+r15) — fixed vs. variable area", sigma_mult=sigma_mult,
+        )
+    else:
+        print("  No top_models_regional_gt_variable_area.csv found for r13/r14/r15 — "
+              "skipping fixed-vs-variable comparison.")
 
     # ------------------------------------------------------------------
     # 2. Load and align satellite data

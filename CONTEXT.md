@@ -487,3 +487,114 @@ tens of GB. This was deferred by explicit decision (the user wants the full
 86-year capability eventually, not the cheaper 20-year-window version, and
 declined to build the cheaper partial version now) — not fixed, and not
 silently ignored: flagged inline at `plot_hugonnet_scatters` and here.
+
+---
+
+## Fixed vs. variable area Gt conversion
+
+Every Gt/yr series in this pipeline is derived from an MWE/yr series via
+`Gt = MWE * area_km2 * 1e-3`, where `area_km2` was always a single constant
+per region (from `main_features_{region}.csv`'s `Area` column, duplicated
+across every year — glaciers don't actually shrink in this input data). This
+adds a second, "variable area" conversion using a real, region-specific
+linear area-change rate, alongside the existing fixed-area one — never
+replacing it — at every site that produces a Gt series.
+
+### Data source and derivation
+
+Rates were fit from GLaMBIE's own `calendar_years` regional area series
+(`GlaMBIE_Data_DOI_10.5904_wgms-glambie-2024-07/glambie_results_20240716/
+calendar_years/{n}_{name}.csv`, one file per RGI region, annual `glacier_area`
+2000-2024) — a local path (`/mnt/c/Users/.../OneDrive - University of
+Bristol/...`) not reachable from the HPC/scratch environment the pipeline
+actually runs in, so the fitted rates (`slope_km2_per_yr` / `intercept_km2`
+from `area = slope*year + intercept`, OLS fit against each period's midpoint
+year) are embedded directly as a Python dict (`_AREA_RATES`) in
+`src/area_rates.py`, not read from a data file. This was originally a
+`data_for_model/glambie_area_change_rates.csv`, but `data_for_model/` is
+blanket-gitignored for the pipeline's actual (large, regenerable) data, and
+git's ignore semantics don't allow excepting a single file out of an
+already-ignored directory once the directory itself is matched by a
+trailing-slash pattern (confirmed empirically — a `!data_for_model/
+glambie_area_change_rates.csv` negation rule was added and tested, and
+`git check-ignore` still reported the file as ignored). Embedding the (tiny,
+19-row, fixed) table directly avoids the packaging problem entirely.
+
+**Important interpretive note**: every region's fit has R² = 1.000. This is
+not us fitting a noisy independent measurement — GLaMBIE's own
+`glacier_area` series is already a perfectly linear function of year (almost
+certainly a two-point interpolation/extrapolation between RGI inventory
+snapshots in GLaMBIE's own methodology, not an independently-measured yearly
+area). So "the linear rate" is exactly the rate GLaMBIE's methodology
+already assumes — describe it as "GLaMBIE-prescribed", not "our estimate".
+
+### Extrapolation range and why no floor/clamp was needed
+
+The fit window is 2000-2024; the pipeline's actual prediction range is
+~1940-2025 (extended to at most 2050 by a separate "quadratic extension"
+analysis in `outputs/paper_figures/task3_continuation/`, which is out of
+scope here — see below). Checked empirically before implementing: naively
+extrapolating every region's linear fit out to 2100 sends r16 (Low
+Latitudes) area negative (crosses zero ~2085) and gets r11/r18 uncomfortably
+close to zero — but within this pipeline's actual range (through 2050), every
+region stays comfortably positive (r16, the tightest case, is still ~976 km²
+at 2050 against ~1700 km² in 2024). So no floor/clamp logic was implemented;
+`dynamic_area_km2()` is a bare, unguarded linear extrapolation, and the
+module docstring in `src/area_rates.py` states exactly why that's safe over
+this pipeline's range and would not be beyond ~2085.
+
+Backward extrapolation to 1940 is an **acknowledged limitation, not a
+validated assumption**: real glacier retreat has generally accelerated over
+time (a step change around the 1980s-1990s in most regions), so applying a
+constant 2000-2024 rate back to 1940 likely overstates early-decade area
+loss. This is exactly why the fixed-area and variable-area series are always
+shown side by side rather than the variable-area one replacing the fixed-area
+default — the true historical value is expected to lie somewhere between the
+two, not to equal either.
+
+### Where this was wired in (no retraining — same MWE series, different area multiplier)
+
+Purely post-hoc, same pattern as the uncertainty-aggregation fixes above:
+every site already had an MWE series and a constant `total_area_km2` (or
+equivalent); a second Gt series was added using
+`area_rates.variable_area_scale(region, years)` instead, plus a
+fixed-vs-variable comparison plot (`area_rates.plot_fixed_vs_variable_area`).
+
+- `src/inference/predict.py` — `regional_annual_gt_variable_area.csv`
+  (finetune and pretrain), `regional_gt_area_comparison[_pretrain].png`.
+- `src/ensemble_common.py` (`_run_top_n_group`, used by
+  `ensemble_uncertainty_pretrain_year.py`), `src/ensemble_uncertainty.py` —
+  `ensemble_regional_gt_variable_area.csv`, `ensemble_regional_gt_area_comparison.png`.
+- `src/ensemble_ep_alea.py` — `top_models_regional_gt_variable_area.csv`,
+  `top_models_regional_gt_area_comparison.png`.
+- `src/plot_global_from_glaciers.py` — `build_global()`/`load_regional_gt()`
+  take a `filename` parameter so the same summation code produces both the
+  fixed-area and variable-area global series; `global_from_glaciers_area_comparison.png`.
+- `src/validate_hma.py` — `combine_hma()` takes the same `filename`
+  parameter; combines r13/r14/r15's variable-area series the same way as the
+  fixed-area one; `hma_area_comparison.png`.
+- `src/plot_model_animations.py` — derives variable-area Gt directly from the
+  already-loaded per-region MWE series (no new file dependency) for a single
+  static comparison plot (`global_cumulative_area_comparison.png`); a full
+  animated fixed-vs-variable comparison was judged not worth the added
+  rendering complexity for a decorative racing-animation product.
+- `src/plot_acceleration_analysis.py` — `load_global_gt()`/
+  `load_global_gt_uncertainty()` take the same `filename` parameter;
+  `acceleration_area_comparison.png`.
+
+All variable-area code paths degrade gracefully (print a warning and skip
+the comparison) when the variable-area CSV doesn't exist yet for a given
+output directory — e.g. ensembles built before this feature was added.
+
+### Explicitly out of scope for this feature
+
+`outputs/paper_figures/` (`common_draws.py`, the Task 1-3 headline-results
+series including `task3_continuation/make_continuation.py`'s quadratic
+extension to 2035/2050) was **not** touched — the user explicitly said to
+ignore that whole directory for this work ("I'll deal with quadratic
+later"). That pipeline also does its own MWE-to-Gt conversion with a
+similarly-static area assumption and has its own, separately-confirmed
+correlation-structure rules for structural vs. epistemic/aleatoric
+uncertainty that differ from (in fact partly invert) the rules implemented
+in `src/cumulative_uncertainty.py` above — if that pipeline is revisited
+later, do not assume the `src/` rules transfer to it without re-confirming.

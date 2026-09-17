@@ -51,6 +51,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src import area_rates
+
 HIST_MIN, HIST_MAX = 1940, 2020
 BLOCK_WIDTH = 20
 _FS = 13
@@ -64,15 +68,18 @@ def load_regional_gt(
     ensemble_root: Path,
     region: str,
     group: str,
+    filename: str = "ensemble_regional_gt.csv",
 ) -> pd.DataFrame | None:
     """
-    Load ensemble_regional_gt.csv for one region. This file already correctly
-    propagates structural and epistemic uncertainty across glaciers within the
-    region (see module docstring) — no re-derivation from per-glacier data
-    happens here. Returns a DataFrame indexed by year with columns:
-    median_gt, var_alea, var_epist, var_struct, var_total.
+    Load a region's regional Gt CSV — either the fixed-area
+    ensemble_regional_gt.csv (default) or, via `filename`, the variable-area
+    ensemble_regional_gt_variable_area.csv (see src/area_rates.py). Both
+    already correctly propagate structural and epistemic uncertainty across
+    glaciers within the region (see module docstring) — no re-derivation from
+    per-glacier data happens here. Returns a DataFrame indexed by year with
+    columns: median_gt, var_alea, var_epist, var_struct, var_total.
     """
-    p = ensemble_root / region / group / "ensemble_regional_gt.csv"
+    p = ensemble_root / region / group / filename
     if not p.exists():
         print(f"  MISSING: {p}")
         return None
@@ -94,11 +101,15 @@ def load_regional_gt(
 def build_global(
     ensemble_root: Path,
     group: str,
+    filename: str = "ensemble_regional_gt.csv",
 ) -> pd.DataFrame:
     """
     Sum each region's regional annual Gt/yr estimate → global annual series.
     Every region is read the same way (load_regional_gt); there is no
     per-glacier vs fallback branching any more (see module docstring).
+    Pass filename="ensemble_regional_gt_variable_area.csv" for the
+    variable-area version (src/area_rates.py) instead of the fixed-area
+    default.
     """
     regions = sorted(
         d.name for d in ensemble_root.iterdir()
@@ -107,7 +118,7 @@ def build_global(
 
     global_acc = None
     for r in regions:
-        ann = load_regional_gt(ensemble_root, r, group)
+        ann = load_regional_gt(ensemble_root, r, group, filename=filename)
         if ann is None:
             continue
         global_acc = ann if global_acc is None else global_acc.add(ann, fill_value=0)
@@ -359,6 +370,22 @@ def main() -> None:
         blocks,
         output_dir / "global_from_glaciers_uncertainty.png",
     )
+
+    print("\nLoading variable-area (GLaMBIE-prescribed linear rate) per-region data...")
+    try:
+        global_df_variable = build_global(
+            ensemble_root, args.group, filename="ensemble_regional_gt_variable_area.csv"
+        )
+        area_rates.plot_fixed_vs_variable_area(
+            global_df.index.values,
+            global_df["median_gt"].values, global_df["std_total"].values,
+            global_df_variable["median_gt"].values, global_df_variable["std_total"].values,
+            output_dir / "global_from_glaciers_area_comparison.png",
+            title="Global — fixed vs. variable area", sigma_mult=2.0,
+        )
+    except RuntimeError:
+        print("  No ensemble_regional_gt_variable_area.csv found for any region — "
+              "skipping fixed-vs-variable comparison (older ensemble output predating this feature?).")
 
     print(f"\nDone → {output_dir}/")
 

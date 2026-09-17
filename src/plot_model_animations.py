@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 import warnings
 from pathlib import Path
 
@@ -29,6 +30,9 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src import area_rates
 
 # ---------------------------------------------------------------------------
 # Region metadata — Paul Tol "Muted"/"Bright" blend (colorblind-aware)
@@ -532,6 +536,58 @@ def anim_mwe_bar(mwe: dict, output_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Fixed vs. variable area — global cumulative comparison (static, not animated)
+# ---------------------------------------------------------------------------
+
+def plot_global_cumulative_area_comparison(
+    gt: dict[str, pd.Series],
+    mwe: dict[str, pd.Series],
+    output_path: Path,
+    start_year: int = START_YEAR,
+) -> None:
+    """
+    A single static comparison plot (not an animation) of global cumulative
+    mass change under the pipeline's usual fixed (constant per-region) area
+    vs. the GLaMBIE-prescribed variable (linearly changing) area — see
+    src/area_rates.py. Skips regions missing from either dict.
+
+    A full animated fixed-vs-variable sensitivity comparison was judged not
+    worth the added rendering complexity for a decorative racing-animation
+    product — see CONTEXT.md, "Fixed vs. variable area Gt conversion".
+    """
+    years = list(range(start_year, 2026))
+
+    fixed_total = np.zeros(len(years))
+    variable_total = np.zeros(len(years))
+    for r in gt:
+        if r not in mwe:
+            continue
+        fixed_total += gt[r].reindex(years, fill_value=0.0).values
+        try:
+            dyn_area = area_rates.dynamic_area_km2(r, np.array(years, dtype=float))
+        except KeyError:
+            continue
+        variable_total += mwe[r].reindex(years, fill_value=0.0).values * dyn_area * area_rates.MWE_TO_GT
+
+    cum_fixed = np.cumsum(fixed_total)
+    cum_variable = np.cumsum(variable_total)
+
+    fig, ax = plt.subplots(figsize=(12, 5.5))
+    ax.plot(years, cum_fixed, color="steelblue", lw=2.0, label="Fixed area (current pipeline default)")
+    ax.plot(years, cum_variable, color="darkorange", lw=2.0, label="Variable area (GLaMBIE-prescribed rate)")
+    ax.axhline(0, color="black", lw=0.6, ls="--")
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Cumulative global mass change (Gt)")
+    ax.set_title(f"Global cumulative glacier mass change from {start_year} — fixed vs. variable area")
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved {output_path}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -571,6 +627,9 @@ def main() -> None:
 
     print(f"[4/4] MWE/yr bar animation ({FPS_MWE} fps) ...")
     anim_mwe_bar(mwe, output_dir / "racing_bar_mwe")
+
+    print("[extra] Fixed vs. variable area — global cumulative comparison (static plot) ...")
+    plot_global_cumulative_area_comparison(gt, mwe, output_dir / "global_cumulative_area_comparison.png")
 
     print(f"\nDone. Files in {output_dir}/")
 

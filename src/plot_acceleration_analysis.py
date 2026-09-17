@@ -26,7 +26,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src import area_rates
 
 import matplotlib
 matplotlib.use("Agg")
@@ -107,24 +111,34 @@ _FS = 13  # base font size
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_global_gt(ensemble_root: Path, group: str) -> pd.Series:
-    """Sum regional median Gt/yr across all regions → global annual series."""
+def load_global_gt(
+    ensemble_root: Path, group: str, filename: str = "ensemble_regional_gt.csv"
+) -> pd.Series:
+    """
+    Sum regional median Gt/yr across all regions → global annual series.
+    Pass filename="ensemble_regional_gt_variable_area.csv" for the
+    variable-area version (src/area_rates.py).
+    """
     regions = sorted(d.name for d in ensemble_root.iterdir()
                      if d.is_dir() and d.name.startswith("r"))
     all_series = []
     for r in regions:
-        p = ensemble_root / r / group / "ensemble_regional_gt.csv"
+        p = ensemble_root / r / group / filename
         if not p.exists():
             print(f"  MISSING: {p}")
             continue
         df = pd.read_csv(p).sort_values("year")
         df = df[(df["year"] >= HIST_MIN) & (df["year"] <= HIST_MAX)]
         all_series.append(df.set_index("year")["median_gt"])
+    if not all_series:
+        return pd.Series(dtype=float)
     global_gt = pd.concat(all_series, axis=1).sum(axis=1).sort_index()
     return global_gt
 
 
-def load_global_gt_uncertainty(ensemble_root: Path, group: str) -> pd.DataFrame:
+def load_global_gt_uncertainty(
+    ensemble_root: Path, group: str, filename: str = "ensemble_regional_gt.csv"
+) -> pd.DataFrame:
     """
     Sum regional median + quadrature-summed std (total and per-component) →
     global series. Per-component columns (std_structural/std_epistemic/
@@ -132,12 +146,15 @@ def load_global_gt_uncertainty(ensemble_root: Path, group: str) -> pd.DataFrame:
     block-mean uncertainty can treat structural+epistemic as persistent across
     years and aleatoric as independent, rather than lumping everything into
     one independent-years quadrature sum — see plot_20yr_blocks().
+
+    Pass filename="ensemble_regional_gt_variable_area.csv" for the
+    variable-area version (src/area_rates.py).
     """
     regions = sorted(d.name for d in ensemble_root.iterdir()
                      if d.is_dir() and d.name.startswith("r"))
     med_list, var_list, var_struct_list, var_epi_list, var_alea_list = [], [], [], [], []
     for r in regions:
-        p = ensemble_root / r / group / "ensemble_regional_gt.csv"
+        p = ensemble_root / r / group / filename
         if not p.exists():
             continue
         df = pd.read_csv(p).sort_values("year")
@@ -148,6 +165,8 @@ def load_global_gt_uncertainty(ensemble_root: Path, group: str) -> pd.DataFrame:
         var_struct_list.append(df["std_structural"] ** 2)
         var_epi_list.append(df["std_epistemic"] ** 2)
         var_alea_list.append(df["std_aleatoric"].fillna(0.0) ** 2)
+    if not med_list:
+        return pd.DataFrame(columns=["median_gt", "std_total", "std_structural", "std_epistemic", "std_aleatoric"])
     global_med    = pd.concat(med_list, axis=1).sum(axis=1).sort_index()
     global_std    = pd.concat(var_list, axis=1).sum(axis=1).pipe(np.sqrt).sort_index()
     global_struct = pd.concat(var_struct_list, axis=1).sum(axis=1).pipe(np.sqrt).sort_index()
@@ -696,6 +715,20 @@ def main() -> None:
     print("  Figure 4: combined summary panel")
     plot_combined_summary(ensemble_root, global_df, global_gt,
                           args.group, output_dir / "acceleration_summary_panel.png")
+
+    print("  Figure 5: fixed vs. variable area comparison")
+    global_df_variable = load_global_gt_uncertainty(
+        ensemble_root, args.group, filename="ensemble_regional_gt_variable_area.csv"
+    )
+    if not global_df_variable.empty:
+        area_rates.plot_fixed_vs_variable_area(
+            global_df.index.values, global_df["median_gt"].values, global_df["std_total"].values,
+            global_df_variable["median_gt"].values, global_df_variable["std_total"].values,
+            output_dir / "acceleration_area_comparison.png",
+            title="Global — fixed vs. variable area",
+        )
+    else:
+        print("    No ensemble_regional_gt_variable_area.csv found for any region — skipping.")
 
     print(f"\nDone → {output_dir}/")
 

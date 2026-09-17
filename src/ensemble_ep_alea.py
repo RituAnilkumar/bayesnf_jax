@@ -73,6 +73,7 @@ from src.cumulative_uncertainty import (
     compute_cumulative_gt_variants,
     plot_cumulative_sensitivity,
 )
+from src import area_rates
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +534,34 @@ def run_ep_alea(cfg: dict) -> None:
     })
     regional_gt.to_csv(output_dir / "top_models_regional_gt.csv", index=False)
     print(f"  Saved top_models_regional_gt.csv")
+
+    # ------------------------------------------------------------------
+    # 5a. Regional Gt — variable area (GLaMBIE-prescribed linear rate)
+    # ------------------------------------------------------------------
+    try:
+        scale_variable = area_rates.variable_area_scale(reg_subdir, regional_mwe["year"].values.astype(float))
+        regional_gt_variable = pd.DataFrame({
+            "year":           regional_mwe["year"].values,
+            "median_gt":      regional_mwe["median_mwe"].values      * scale_variable,
+            "epistemic_std":  regional_mwe["epistemic_std"].values   * scale_variable,
+            "aleatoric_std":  np.where(
+                regional_mwe["aleatoric_std"].isna(),
+                np.nan,
+                regional_mwe["aleatoric_std"].fillna(0).values * scale_variable,
+            ),
+            "structural_std": regional_mwe["structural_std"].values  * scale_variable,
+            "total_std":      regional_mwe["total_std"].values       * scale_variable,
+        })
+        regional_gt_variable.to_csv(output_dir / "top_models_regional_gt_variable_area.csv", index=False)
+        print(f"  Saved top_models_regional_gt_variable_area.csv")
+        area_rates.plot_fixed_vs_variable_area(
+            regional_gt["year"].values, regional_gt["median_gt"].values, regional_gt["total_std"].values,
+            regional_gt_variable["median_gt"].values, regional_gt_variable["total_std"].values,
+            output_dir / "top_models_regional_gt_area_comparison.png",
+            title=f"{reg_subdir} — fixed vs. variable area (top-N ensemble)",
+        )
+    except KeyError as exc:
+        print(f"  WARNING: variable-area Gt skipped — {exc}")
 
     # ------------------------------------------------------------------
     # 5b. Cumulative Gt — four correlation-assumption scenarios

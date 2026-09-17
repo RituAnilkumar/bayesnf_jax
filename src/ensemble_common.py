@@ -41,6 +41,7 @@ from src.cumulative_uncertainty import (
     compute_cumulative_gt_variants,
     plot_cumulative_sensitivity,
 )
+from src import area_rates
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +311,30 @@ def _run_top_n_group(
     })
     ensemble_regional_gt.to_csv(output_dir / "ensemble_regional_gt.csv", index=False)
     print(f"  Saved ensemble_regional_gt.csv")
+
+    # ----------------------------------------------------------------
+    # Regional Gt — variable area (GLaMBIE-prescribed linear rate)
+    # ----------------------------------------------------------------
+    try:
+        scale_variable = area_rates.variable_area_scale(reg_subdir, np.asarray(years, dtype=float))
+        ensemble_regional_gt_variable = pd.DataFrame({
+            "year":           years,
+            "median_gt":      reg_comps["median_mwe"]     * scale_variable,
+            "std_structural": reg_comps["std_structural"] * scale_variable,
+            "std_epistemic":  reg_comps["std_epistemic"]  * scale_variable,
+            "std_aleatoric":  np.where(~np.isnan(reg_aleatoric_arr), reg_aleatoric_arr * scale_variable, np.nan),
+            "std_total":      reg_std_total * scale_variable,
+        })
+        ensemble_regional_gt_variable.to_csv(output_dir / "ensemble_regional_gt_variable_area.csv", index=False)
+        print(f"  Saved ensemble_regional_gt_variable_area.csv")
+        area_rates.plot_fixed_vs_variable_area(
+            years, ensemble_regional_gt["median_gt"].values, ensemble_regional_gt["std_total"].values,
+            ensemble_regional_gt_variable["median_gt"].values, ensemble_regional_gt_variable["std_total"].values,
+            output_dir / "ensemble_regional_gt_area_comparison.png",
+            title=f"{reg_subdir} — fixed vs. variable area (ensemble)",
+        )
+    except KeyError as exc:
+        print(f"  WARNING: variable-area Gt skipped — {exc}")
 
     # ----------------------------------------------------------------
     # Cumulative Gt — four correlation-assumption scenarios
