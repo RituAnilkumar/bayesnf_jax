@@ -35,7 +35,8 @@ softmax_temperature: 0.1
 min_runs_per_region: 3
 
 # Metric used to rank and select the top-N runs per group
-# (only used by ensemble_uncertainty_time_encoding.py and ensemble_ep_alea.py).
+# (only used by ensemble_uncertainty_pretrain_year.py, via src/ensemble_common.py,
+# and ensemble_ep_alea.py).
 #   glambie_rmse  — GLaMBIE held-out test RMSE (lower is better) [default]
 #   loyo_rmse     — pretrain leave-one-year-out RMSE (lower is better)
 #   loyo_r2       — pretrain leave-one-year-out R² (higher is better)

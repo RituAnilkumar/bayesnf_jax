@@ -44,7 +44,7 @@ Usage:
 
 Batch usage:
 for i in $(seq -w 1 19); do
-  python src/ensemble_uncertainty_split.py \
+  python src/ensemble_uncertainty.py \
     --multirun_root /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r${i}_397*/ \
     --output_dir outputs/all_regs/r${i}
 done
@@ -72,6 +72,10 @@ import yaml
 from src.hyperparam_tuning import (
     build_results_df,
     add_composite_score,
+)
+from src.cumulative_uncertainty import (
+    compute_cumulative_gt_variants,
+    plot_cumulative_sensitivity,
 )
 
 
@@ -692,6 +696,28 @@ def run_ensemble_uncertainty(cfg: dict) -> None:
     })
     ensemble_regional_gt.to_csv(output_dir / "ensemble_regional_gt.csv", index=False)
     print(f"  Saved ensemble_regional_gt.csv")
+
+    # ------------------------------------------------------------------
+    # 4b. Cumulative Gt — four correlation-assumption scenarios
+    # ------------------------------------------------------------------
+    print("\n--- Cumulative Gt (sensitivity to correlation assumptions) ---")
+    alea_for_cum = np.where(np.isnan(ensemble_regional_gt["std_aleatoric"].values), 0.0,
+                             ensemble_regional_gt["std_aleatoric"].values)
+    cum_df = compute_cumulative_gt_variants(
+        run_dirs=regional_run_dirs,
+        weights=regional_weights_arr,
+        years=years,
+        median_gt=ensemble_regional_gt["median_gt"].values,
+        std_structural=ensemble_regional_gt["std_structural"].values,
+        std_epistemic=ensemble_regional_gt["std_epistemic"].values,
+        std_aleatoric=alea_for_cum,
+        file_name="regional_annual_gt.csv",
+        value_col="mean",
+    )
+    cum_df.to_csv(output_dir / "ensemble_cumulative_gt.csv", index=False)
+    print(f"  Saved ensemble_cumulative_gt.csv")
+    plot_cumulative_sensitivity(cum_df, output_dir / "ensemble_cumulative_gt_sensitivity.png")
+    print(f"  Saved ensemble_cumulative_gt_sensitivity.png")
 
     # ------------------------------------------------------------------
     # 5. Load auxiliary data for plots

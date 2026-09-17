@@ -562,6 +562,17 @@ def plot_hugonnet_scatters(
     stage: str,
     output_dir: str,
 ) -> None:
+    # NOTE: per-glacier temporal aggregation is not rigorously handled here.
+    # The `std` column below is averaged across the period's years per glacier
+    # (.agg({"std": "mean"})) rather than derived from each glacier's own raw
+    # per-draw period-mean trajectory. A rigorous treatment (draw the period
+    # mean per MC sample, then take std across samples, per glacier) would
+    # require saving per-glacier raw MC samples across the relevant window —
+    # deferred due to storage cost (full 86-year per-glacier samples across
+    # most of a region's glaciers reach GB-scale even for a single model; see
+    # CONTEXT.md, "Per-glacier temporal aggregation"). The plain average used
+    # here happens to be directionally reasonable for a persistent
+    # (non-shrinking) quantity like epistemic std, but is not exact.
     for (pstart, pend), period_hugo in hugo_df.groupby(["start_date", "end_date"]):
         period_preds = preds_df[(preds_df["year"] >= pstart) & (preds_df["year"] < pend)]
         if period_preds.empty:

@@ -69,6 +69,10 @@ from src.ensemble_uncertainty import (
     _ensemble_components,
     _savefig,
 )
+from src.cumulative_uncertainty import (
+    compute_cumulative_gt_variants,
+    plot_cumulative_sensitivity,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +221,7 @@ def compute_regional_uncertainties(
     top_runs: pd.DataFrame,
     inp_dir: str,
     reg_subdir: str,
-) -> tuple[pd.DataFrame, np.ndarray]:
+) -> tuple[pd.DataFrame, np.ndarray, list[Path], np.ndarray]:
     """
     Aggregate per-glacier uncertainties to annual regional series for top-N ensemble.
 
@@ -230,6 +234,10 @@ def compute_regional_uncertainties(
         regional_df    — DataFrame: year, median_mwe, epistemic_std, aleatoric_std,
                          structural_std, total_std
         total_area_km2 — numpy array (for Gt conversion)
+        valid_dirs     — run directories actually used (may be a subset of top_runs'
+                         run_dir if some are missing regional_annual_mwe.csv) — needed
+                         by the caller for exact cumulative-uncertainty propagation
+        weights        — normalised weights matching valid_dirs, same order
     """
     run_dirs = [Path(r["run_dir"]) for _, r in top_runs.iterrows()]
 
@@ -281,7 +289,7 @@ def compute_regional_uncertainties(
         "structural_std": comp["std_structural"],
         "total_std":      total_std,
     })
-    return regional_df, total_area_km2
+    return regional_df, total_area_km2, valid_dirs, weights
 
 
 # ---------------------------------------------------------------------------
@@ -500,7 +508,7 @@ def run_ep_alea(cfg: dict) -> None:
     # 4. Regional MWE uncertainty
     # ------------------------------------------------------------------
     print("\n--- Regional uncertainty ---")
-    regional_mwe, total_area_km2 = compute_regional_uncertainties(
+    regional_mwe, total_area_km2, regional_run_dirs, regional_weights = compute_regional_uncertainties(
         glacier_df, top_runs, inp_dir, reg_subdir
     )
     regional_mwe.to_csv(output_dir / "top_models_regional_mwe.csv", index=False)
@@ -525,6 +533,28 @@ def run_ep_alea(cfg: dict) -> None:
     })
     regional_gt.to_csv(output_dir / "top_models_regional_gt.csv", index=False)
     print(f"  Saved top_models_regional_gt.csv")
+
+    # ------------------------------------------------------------------
+    # 5b. Cumulative Gt — four correlation-assumption scenarios
+    # ------------------------------------------------------------------
+    print("\n--- Cumulative Gt (sensitivity to correlation assumptions) ---")
+    alea_for_cum = np.where(np.isnan(regional_gt["aleatoric_std"].values), 0.0,
+                             regional_gt["aleatoric_std"].values)
+    cum_df = compute_cumulative_gt_variants(
+        run_dirs=regional_run_dirs,
+        weights=regional_weights,
+        years=regional_gt["year"].values,
+        median_gt=regional_gt["median_gt"].values,
+        std_structural=regional_gt["structural_std"].values,
+        std_epistemic=regional_gt["epistemic_std"].values,
+        std_aleatoric=alea_for_cum,
+        file_name="regional_annual_gt.csv",
+        value_col="mean",
+    )
+    cum_df.to_csv(output_dir / "top_models_cumulative_gt.csv", index=False)
+    print(f"  Saved top_models_cumulative_gt.csv")
+    plot_cumulative_sensitivity(cum_df, output_dir / "top_models_cumulative_gt_sensitivity.png")
+    print(f"  Saved top_models_cumulative_gt_sensitivity.png")
 
     # ------------------------------------------------------------------
     # 6. Auxiliary data for plots

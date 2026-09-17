@@ -53,7 +53,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 import yaml
 
-from src.ensemble_uncertainty_time_encoding import _run_top_n_group
+from src.ensemble_common import _run_top_n_group
 from src.hyperparam_tuning import build_results_df
 
 _DEFAULT_PRETRAIN_YEARS = [1940, 1960, 1980, 2000]
