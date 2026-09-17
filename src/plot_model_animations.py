@@ -99,6 +99,12 @@ FPS_MWE    = 3         # slower fps for MWE bar (333 ms/frame)
 # ---------------------------------------------------------------------------
 
 def load_all(ensemble_root: Path, group: str) -> tuple[dict, dict, dict]:
+    """
+    gt_std[r] holds the per-year std_structural/std_epistemic/std_aleatoric
+    columns (not just std_total) so cumulative uncertainty can be computed
+    without conflating persistent (structural/epistemic) and independent
+    (aleatoric) components — see anim_cumulative().
+    """
     gt, mwe, gt_std = {}, {}, {}
     for r in REGIONS:
         p_gt  = ensemble_root / r / group / "ensemble_regional_gt.csv"
@@ -106,7 +112,7 @@ def load_all(ensemble_root: Path, group: str) -> tuple[dict, dict, dict]:
         if p_gt.exists():
             df = pd.read_csv(p_gt).set_index("year")
             gt[r]     = df["median_gt"]
-            gt_std[r] = df["std_total"]
+            gt_std[r] = df[["std_structural", "std_epistemic", "std_aleatoric"]].fillna(0.0)
         if p_mwe.exists():
             mwe[r] = pd.read_csv(p_mwe).set_index("year")["median_mwe"]
     return gt, mwe, gt_std
@@ -151,9 +157,21 @@ def anim_cumulative(
 
     start_year   : first year of cumulative sum (default START_YEAR = 1940).
     static_lw    : if True, line widths are fixed at 2025-proportional values.
-    gt_std       : per-region std_total series; when supplied, a ±2σ band is
-                   drawn around the global cumulative line.
+    gt_std       : per-region DataFrame of std_structural/std_epistemic/std_aleatoric
+                   (from load_all()); when supplied, a ±2σ band is drawn around
+                   the global cumulative line.
     year_txt_loc : axes-fraction (x, y) for the year counter label.
+
+    Cumulative uncertainty treatment: structural and epistemic are treated as
+    persistent across years (linear sum, no shrink — both arise from a fixed
+    trained model whose bias doesn't average out over time), aleatoric as
+    independent (quadrature sum). Regions are combined via quadrature (valid:
+    each region is its own independently-trained ensemble). This is the same
+    persistent/independent split used in compute_blocks() in
+    plot_global_from_glaciers.py and in cumulative_uncertainty.py, but uses the
+    simpler "persistent" approximation for structural rather than the exact
+    per-model computation (which would require plumbing each region's
+    top_runs_info.csv through this animation-only path) — see CONTEXT.md.
     """
     years   = list(range(start_year, 2026))
     n_years = len(years)
@@ -165,16 +183,22 @@ def anim_cumulative(
         cum[r] = s.cumsum().values
     global_cum = np.sum(list(cum.values()), axis=0)
 
-    # Cumulative global ±2σ uncertainty (regions independent, years independent)
+    # Cumulative global ±2σ uncertainty: structural+epistemic persistent (no
+    # shrink) per region, aleatoric independent (shrink) per region, then
+    # quadrature-combine across regions (regions are independent).
     global_std_cum = None
     if gt_std:
-        annual_var = np.zeros(n_years)
-        for r, std_series in gt_std.items():
+        cum_struct_epi_var = np.zeros(n_years)   # accumulates (persistent sum)^2 per region
+        cum_alea_var       = np.zeros(n_years)   # accumulates independent variance per region
+        for r, std_df in gt_std.items():
             if r not in cum:
                 continue
-            s = std_series.reindex(years, fill_value=0.0)
-            annual_var += s.values ** 2
-        global_std_cum = np.sqrt(np.cumsum(annual_var))
+            sd = std_df.reindex(years, fill_value=0.0)
+            struct_epi_persist = np.cumsum(sd["std_structural"].values + sd["std_epistemic"].values)
+            alea_indep_var     = np.cumsum(sd["std_aleatoric"].values ** 2)
+            cum_struct_epi_var += struct_epi_persist ** 2
+            cum_alea_var       += alea_indep_var
+        global_std_cum = np.sqrt(cum_struct_epi_var + cum_alea_var)
 
     # Compute zero-aligned axis limits
     regional_vals = np.concatenate(list(cum.values()))
@@ -535,12 +559,12 @@ def main() -> None:
 
     print("[1/4] Cumulative line animation — static lw, from 1940 ...")
     anim_cumulative(gt, output_dir / "racing_cumulative_gt",
-                    start_year=START_YEAR, static_lw=True)
+                    start_year=START_YEAR, static_lw=True, gt_std=gt_std)
 
     print("[2/4] Cumulative line animation — static lw, from 1975 ...")
     anim_cumulative(gt, output_dir / "racing_cumulative_gt_from1975",
                     start_year=1975, static_lw=True,
-                    year_txt_loc=(0.015, 0.34))
+                    year_txt_loc=(0.015, 0.34), gt_std=gt_std)
 
     print(f"[3/4] Annual Gt/yr bar animation ({FPS} fps) ...")
     anim_gt_bar(gt, output_dir / "racing_bar_gt")

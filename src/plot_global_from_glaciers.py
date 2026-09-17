@@ -1,16 +1,27 @@
 """
 src/plot_global_from_glaciers.py
 
-Builds global mass balance estimates directly from per-glacier ensemble_glacier.csv
-files, rather than from pre-aggregated regional CSVs.  This gives full control
-over the uncertainty propagation and produces internally consistent global figures.
+Builds global mass balance estimates by summing each region's already-correct
+ensemble_regional_gt.csv (produced by ensemble_uncertainty_pretrain_year.py /
+ensemble_uncertainty.py / ensemble_ep_alea.py, where structural and epistemic
+uncertainty are propagated correctly across glaciers within the region — see
+CONTEXT.md, "Category 1: glacier -> region spatial aggregation").
 
-Conversion:  Gt/yr = MWE/yr × area_km² × 1e-3
-  (1 MWE/yr over 1 km² = 10⁶ m² × 1 m × 10³ kg/m³ = 10⁹ kg/yr = 10⁻³ Gt/yr)
+Prior to this fix, region-level uncertainty here was re-derived by summing
+per-glacier variance from ensemble_glacier.csv assuming glaciers' epistemic and
+structural deviations were independent of each other. That assumption is wrong:
+all glaciers in a region are predicted by the same trained model(s), so a given
+model's bias shifts many/all glaciers together rather than averaging out. That
+per-glacier re-derivation has been removed; regional values are always read
+directly from ensemble_regional_gt.csv, and only summed (never re-derived)
+across regions here. Summing across regions via quadrature is valid because
+each region has its own independently-trained model ensemble (one-model-per-
+RGI-region design) — region-to-region correlation is not a concern the way
+glacier-to-glacier correlation within a region was.
 
 Uncertainty propagation
   Annual global sum
-    σ²_component = Σ_i  (σ_component,i × area_i × 1e-3)²   [quadrature over glaciers]
+    σ²_component = Σ_region  σ_component,region²   [quadrature over regions — valid, see above]
 
   20-year block mean (T = 20 years)
     Aleatoric   — independent across years  →  σ_block = √(mean σ_t²) / √T
@@ -25,7 +36,6 @@ Outputs (saved to --output_dir):
 Usage:
     python src/plot_global_from_glaciers.py \\
         --ensemble_root outputs/egu_fin/ensemble_te_r2 \\
-        --data_root     data_for_model \\
         --group         no_time_encoding \\
         --output_dir    outputs/egu_fin/global_from_glaciers
 """
@@ -43,117 +53,52 @@ import pandas as pd
 
 HIST_MIN, HIST_MAX = 1940, 2020
 BLOCK_WIDTH = 20
-MWE_TO_GT = 1e-3   # Gt per (MWE/yr · km²)
 _FS = 13
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — load per-glacier areas (one value per rgi_id)
+# Step 1 — load one region's already-correct regional Gt series
 # ---------------------------------------------------------------------------
 
-def load_areas(data_root: Path, region: str) -> pd.Series:
-    """Return Series: rgi_id → area_km²  (one row per glacier, deduplicated)."""
-    p = data_root / region / f"main_features_{region}.csv"
-    df = pd.read_csv(p, usecols=["rgi_id", "Area"])
-    return df.drop_duplicates("rgi_id").set_index("rgi_id")["Area"]
-
-
-# ---------------------------------------------------------------------------
-# Step 2 — load per-glacier predictions and convert to Gt/yr
-# ---------------------------------------------------------------------------
-
-def load_glacier_gt(
-    ensemble_root: Path,
-    data_root: Path,
-    region: str,
-    group: str,
-) -> pd.DataFrame | None:
-    """
-    Load ensemble_glacier.csv for one region, merge glacier areas, convert
-    all MWE/yr columns to Gt/yr.  Returns a DataFrame indexed by year with
-    columns: median_gt, var_aleatoric, var_epistemic, var_structural, var_total.
-    """
-    p = ensemble_root / region / group / "ensemble_glacier.csv"
-    if not p.exists():
-        print(f"  MISSING: {p}")
-        return None
-
-    areas = load_areas(data_root, region)
-
-    df = pd.read_csv(p)
-    df = df[(df["year"] >= HIST_MIN) & (df["year"] <= HIST_MAX)]
-
-    # Attach area
-    df = df.join(areas.rename("area_km2"), on="rgi_id")
-    missing = df["area_km2"].isna().sum()
-    if missing > 0:
-        print(f"  WARNING {region}: {missing} rows with no area — dropping")
-        df = df.dropna(subset=["area_km2"])
-
-    # Scale factor per glacier-row: area_km2 × MWE_TO_GT
-    scale = df["area_km2"] * MWE_TO_GT
-
-    # Per-glacier Gt/yr contributions
-    df["gt_median"]   = df["median_mwe"]       * scale
-    df["gt2_alea"]    = (df["std_aleatoric"]   * scale) ** 2
-    df["gt2_epist"]   = (df["std_epistemic"]   * scale) ** 2
-    df["gt2_struct"]  = (df["std_structural"]  * scale) ** 2
-    df["gt2_total"]   = (df["std_total"]       * scale) ** 2
-
-    # Sum across glaciers within each year
-    ann = (
-        df.groupby("year")
-        .agg(
-            median_gt   = ("gt_median",  "sum"),
-            var_alea    = ("gt2_alea",   "sum"),
-            var_epist   = ("gt2_epist",  "sum"),
-            var_struct  = ("gt2_struct", "sum"),
-            var_total   = ("gt2_total",  "sum"),
-        )
-        .sort_index()
-    )
-    return ann
-
-
-# ---------------------------------------------------------------------------
-# Step 3 — aggregate across all regions
-# ---------------------------------------------------------------------------
-
-def load_regional_gt_fallback(
+def load_regional_gt(
     ensemble_root: Path,
     region: str,
     group: str,
 ) -> pd.DataFrame | None:
     """
-    Fallback for regions without a features file (e.g. r19).
-    Reads ensemble_regional_gt.csv and returns the same column structure
-    as load_glacier_gt, treating the regional uncertainty as fully correlated
-    (i.e. stored in var_struct; var_alea and var_epist set to zero).
+    Load ensemble_regional_gt.csv for one region. This file already correctly
+    propagates structural and epistemic uncertainty across glaciers within the
+    region (see module docstring) — no re-derivation from per-glacier data
+    happens here. Returns a DataFrame indexed by year with columns:
+    median_gt, var_alea, var_epist, var_struct, var_total.
     """
     p = ensemble_root / region / group / "ensemble_regional_gt.csv"
     if not p.exists():
+        print(f"  MISSING: {p}")
         return None
     df = pd.read_csv(p).sort_values("year")
     df = df[(df["year"] >= HIST_MIN) & (df["year"] <= HIST_MAX)].set_index("year")
-    out = pd.DataFrame({
+    return pd.DataFrame({
         "median_gt":  df["median_gt"],
-        "var_alea":   0.0,
-        "var_epist":  0.0,
-        "var_struct": df["std_total"] ** 2,
+        "var_alea":   df["std_aleatoric"].fillna(0.0) ** 2,
+        "var_epist":  df["std_epistemic"] ** 2,
+        "var_struct": df["std_structural"] ** 2,
         "var_total":  df["std_total"] ** 2,
     })
-    return out
 
+
+# ---------------------------------------------------------------------------
+# Step 2 — aggregate across all regions
+# ---------------------------------------------------------------------------
 
 def build_global(
     ensemble_root: Path,
-    data_root: Path,
     group: str,
 ) -> pd.DataFrame:
     """
-    Sum regional annual Gt/yr estimates → global annual series.
-    Regions with a main_features file are aggregated from per-glacier data.
-    Regions without one (r19) fall back to the pre-aggregated regional CSV.
+    Sum each region's regional annual Gt/yr estimate → global annual series.
+    Every region is read the same way (load_regional_gt); there is no
+    per-glacier vs fallback branching any more (see module docstring).
     """
     regions = sorted(
         d.name for d in ensemble_root.iterdir()
@@ -162,12 +107,7 @@ def build_global(
 
     global_acc = None
     for r in regions:
-        features_path = data_root / r / f"main_features_{r}.csv"
-        if features_path.exists():
-            ann = load_glacier_gt(ensemble_root, data_root, r, group)
-        else:
-            print(f"  {r}: no features file — using pre-aggregated regional GT")
-            ann = load_regional_gt_fallback(ensemble_root, r, group)
+        ann = load_regional_gt(ensemble_root, r, group)
         if ann is None:
             continue
         global_acc = ann if global_acc is None else global_acc.add(ann, fill_value=0)
@@ -383,19 +323,17 @@ def plot_uncertainty_decomposition(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ensemble_root", default="outputs/egu_fin/ensemble_te_r2")
-    parser.add_argument("--data_root",     default="data_for_model")
     parser.add_argument("--group",         default="no_time_encoding")
     parser.add_argument("--output_dir",    default="outputs/egu_fin/global_from_glaciers")
     args = parser.parse_args()
 
     ensemble_root = Path(args.ensemble_root)
-    data_root     = Path(args.data_root)
     output_dir    = Path(args.output_dir)
 
     print(f"\n=== Global from glaciers — {args.group} ===\n")
 
-    print("Loading per-glacier data and aggregating...")
-    global_df = build_global(ensemble_root, data_root, args.group)
+    print("Loading per-region data and aggregating...")
+    global_df = build_global(ensemble_root, args.group)
 
     print(f"\nGlobal series: {len(global_df)} years, "
           f"{global_df.index.min()}–{global_df.index.max()}")

@@ -125,10 +125,17 @@ def load_global_gt(ensemble_root: Path, group: str) -> pd.Series:
 
 
 def load_global_gt_uncertainty(ensemble_root: Path, group: str) -> pd.DataFrame:
-    """Sum regional median + quadrature-summed total std → global series."""
+    """
+    Sum regional median + quadrature-summed std (total and per-component) →
+    global series. Per-component columns (std_structural/std_epistemic/
+    std_aleatoric) are kept, not just std_total, so downstream cumulative/
+    block-mean uncertainty can treat structural+epistemic as persistent across
+    years and aleatoric as independent, rather than lumping everything into
+    one independent-years quadrature sum — see plot_20yr_blocks().
+    """
     regions = sorted(d.name for d in ensemble_root.iterdir()
                      if d.is_dir() and d.name.startswith("r"))
-    med_list, var_list = [], []
+    med_list, var_list, var_struct_list, var_epi_list, var_alea_list = [], [], [], [], []
     for r in regions:
         p = ensemble_root / r / group / "ensemble_regional_gt.csv"
         if not p.exists():
@@ -138,9 +145,21 @@ def load_global_gt_uncertainty(ensemble_root: Path, group: str) -> pd.DataFrame:
         df = df.set_index("year")
         med_list.append(df["median_gt"])
         var_list.append(df["std_total"] ** 2)
-    global_med = pd.concat(med_list, axis=1).sum(axis=1).sort_index()
-    global_std = pd.concat(var_list, axis=1).sum(axis=1).pipe(np.sqrt).sort_index()
-    return pd.DataFrame({"median_gt": global_med, "std_total": global_std})
+        var_struct_list.append(df["std_structural"] ** 2)
+        var_epi_list.append(df["std_epistemic"] ** 2)
+        var_alea_list.append(df["std_aleatoric"].fillna(0.0) ** 2)
+    global_med    = pd.concat(med_list, axis=1).sum(axis=1).sort_index()
+    global_std    = pd.concat(var_list, axis=1).sum(axis=1).pipe(np.sqrt).sort_index()
+    global_struct = pd.concat(var_struct_list, axis=1).sum(axis=1).pipe(np.sqrt).sort_index()
+    global_epi    = pd.concat(var_epi_list, axis=1).sum(axis=1).pipe(np.sqrt).sort_index()
+    global_alea   = pd.concat(var_alea_list, axis=1).sum(axis=1).pipe(np.sqrt).sort_index()
+    return pd.DataFrame({
+        "median_gt":      global_med,
+        "std_total":      global_std,
+        "std_structural": global_struct,
+        "std_epistemic":  global_epi,
+        "std_aleatoric":  global_alea,
+    })
 
 
 def load_regional_mwe(ensemble_root: Path, region: str, group: str) -> pd.DataFrame | None:
@@ -366,10 +385,21 @@ def plot_20yr_blocks(
       Top — annual time series with block means drawn as horizontal steps,
              uncertainty (±1σ block-mean std) shaded per block.
       Bottom — bar chart of block means for direct comparison.
+
+    Block-mean uncertainty treatment: structural and epistemic are persistent
+    across years (a fixed trained model's bias doesn't average out — no
+    shrink), aleatoric is independent (shrinks as 1/sqrt(T)). Naively shrinking
+    std_total as a whole (the previous behaviour here) incorrectly shrinks the
+    structural/epistemic contribution too — see compute_blocks() in
+    plot_global_from_glaciers.py for the reference implementation of this same
+    split, and CONTEXT.md for the full reasoning.
     """
     years = global_df.index.values
     med   = global_df["median_gt"].values
     std   = global_df["std_total"].values
+    std_struct = global_df["std_structural"].values
+    std_epi    = global_df["std_epistemic"].values
+    std_alea   = global_df["std_aleatoric"].values
 
     # Build non-overlapping blocks from HIST_MIN
     y_start = HIST_MIN
@@ -380,9 +410,13 @@ def plot_20yr_blocks(
         if mask.sum() == 0:
             y_start = y_end
             continue
-        block_med  = med[mask].mean()
-        # Uncertainty on the block mean: quadrature mean of annual variances / n
-        block_std  = np.sqrt((std[mask] ** 2).mean()) / np.sqrt(mask.sum())
+        block_med = med[mask].mean()
+        T = mask.sum()
+        # Structural + epistemic: persistent across years -> mean sigma, no shrink
+        block_struct_epi = np.sqrt(std_struct[mask] ** 2 + std_epi[mask] ** 2).mean()
+        # Aleatoric: independent across years -> shrinks with sqrt(T)
+        block_alea = np.sqrt((std_alea[mask] ** 2).mean() / T)
+        block_std  = np.sqrt(block_struct_epi ** 2 + block_alea ** 2)
         blocks.append({
             "label":  f"{y_start}–{y_end - 1}",
             "y0":     y_start,

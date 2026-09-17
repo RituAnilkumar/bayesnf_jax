@@ -40,6 +40,12 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from src.cumulative_uncertainty import (
+    compute_cumulative_components,
+    combine_cumulative_scenarios,
+    plot_cumulative_sensitivity,
+)
+
 # RGI subdirectories that make up HMA
 HMA_REGIONS = {
     "r13": "Central Asia",
@@ -94,13 +100,22 @@ def _load_satellite(path: Path) -> pd.DataFrame:
 # Combine HMA regions
 # ---------------------------------------------------------------------------
 
-def combine_hma(ensemble_base: Path) -> pd.DataFrame | None:
-    """Sum Gt across r13, r14, r15; propagate uncertainty in quadrature."""
+def combine_hma(ensemble_base: Path) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]] | tuple[None, None]:
+    """
+    Sum Gt across r13, r14, r15; propagate annual (non-cumulative) uncertainty
+    in quadrature — valid here because each region is its own independently-
+    trained ensemble (see CONTEXT.md, "Category 1"). This per-year combination
+    is unaffected by the cumulative-uncertainty fix; only make_cumulative()
+    needs the per-region DataFrames this function also returns.
+
+    Returns (combined_df, per_region_dfs) or (None, None) if any region's
+    top_models_regional_gt.csv could not be loaded.
+    """
     dfs = {}
     for rgi in HMA_REGIONS:
         df = _load_regional_gt(ensemble_base / rgi)
         if df is None:
-            return None
+            return None, None
         dfs[rgi] = df.set_index("year")
 
     # Align to common years
@@ -128,37 +143,114 @@ def combine_hma(ensemble_base: Path) -> pd.DataFrame | None:
             "total_std":     _quad("total_std"),
         })
 
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows), dfs
 
 
 # ---------------------------------------------------------------------------
 # Cumulative ensemble
 # ---------------------------------------------------------------------------
 
+def _load_region_run_info(region_dir: Path) -> tuple[list[Path], np.ndarray] | None:
+    """Load run_dir + equal weights from a region's top_models_info.csv sibling file."""
+    path = region_dir / "top_models_info.csv"
+    if not path.exists():
+        return None
+    df = pd.read_csv(path)
+    run_dirs = [Path(d) for d in df["run_dir"].values]
+    return run_dirs, np.ones(len(run_dirs)) / len(run_dirs)
+
+
 def make_cumulative(
-    ens: pd.DataFrame,
+    ensemble_base: Path,
+    region_dfs: dict[str, pd.DataFrame],
     ref_year: int,
-    sigma_mult: float,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Compute cumulative Gt from ref_year (set to 0 there).
-    Uncertainty propagated in quadrature across years.
+    Compute cumulative Gt for HMA (r13+r14+r15) from ref_year (set to 0 there).
+
+    For each region, computes the six per-component cumulative arrays via
+    compute_cumulative_components() — using that region's own top-N models'
+    trajectories (from top_models_info.csv) for the exact structural term —
+    then quadrature-sums the three regions' components together (valid: each
+    region is its own independently-trained ensemble, so region-to-region
+    correlation is not a concern the way glacier-to-glacier or year-to-year
+    correlation within one region/model is — see CONTEXT.md). The four final
+    scenarios are re-derived from the combined components.
+
+    Returns:
+        cum_df       — year, cum_gt, cum_epistemic, cum_structural, cum_total
+                       (existing decomposition columns used by plot_cumulative,
+                       now using the persistent/exact treatment instead of the
+                       naive independent-years quadrature)
+        variants_df  — year, cum_median_gt, cum_std_total,
+                       cum_std_structural_independent, cum_std_all_correlated,
+                       cum_std_all_independent (new sensitivity table)
     """
-    mask = ens["year"] >= ref_year
-    sub  = ens[mask].copy().reset_index(drop=True)
+    per_region_components = []
+    cum_median = None
+    years_ref = None
 
-    cum_median = np.cumsum(sub["median_gt"].values)
-    cum_epi    = np.sqrt(np.cumsum(sub["epistemic_std"].values  ** 2))
-    cum_struct = np.sqrt(np.cumsum(sub["structural_std"].values ** 2))
-    cum_total  = np.sqrt(np.cumsum(sub["total_std"].values      ** 2))
+    for rgi in HMA_REGIONS:
+        df  = region_dfs[rgi]
+        sub = df[df.index >= ref_year].copy()
+        years = sub.index.values
 
-    return pd.DataFrame({
-        "year":          sub["year"].values,
-        "cum_gt":        cum_median,
-        "cum_epistemic": cum_epi,
-        "cum_structural": cum_struct,
-        "cum_total":     cum_total,
+        if years_ref is None:
+            years_ref = years
+            cum_median = np.zeros(len(years))
+        elif not np.array_equal(years, years_ref):
+            raise RuntimeError(
+                f"Year mismatch for {rgi} in make_cumulative — all three HMA "
+                "regions must share the same years >= ref_year."
+            )
+        cum_median = cum_median + np.cumsum(sub["median_gt"].values)
+
+        run_info = _load_region_run_info(ensemble_base / rgi)
+        if run_info is None:
+            warnings.warn(
+                f"  top_models_info.csv not found for {rgi} — exact structural "
+                "cumulative will fall back to the independent treatment for "
+                "this region's contribution to HMA."
+            )
+            run_dirs, weights = [], np.array([])
+        else:
+            run_dirs, weights = run_info
+
+        alea = sub["aleatoric_std"].values if "aleatoric_std" in sub.columns else np.zeros(len(sub))
+        alea = np.where(np.isnan(alea), 0.0, alea)
+
+        comp = compute_cumulative_components(
+            run_dirs=run_dirs,
+            weights=weights,
+            years=years,
+            std_structural=sub["structural_std"].values,
+            std_epistemic=sub["epistemic_std"].values,
+            std_aleatoric=alea,
+            file_name="regional_annual_gt.csv",
+            value_col="mean",
+        )
+        per_region_components.append(comp)
+
+    # Quadrature-sum each per-component cumulative array across the 3 regions
+    combined = {
+        key: np.sqrt(sum(c[key] ** 2 for c in per_region_components))
+        for key in per_region_components[0]
+    }
+    scenarios = combine_cumulative_scenarios(combined)
+
+    cum_df = pd.DataFrame({
+        "year":           years_ref,
+        "cum_gt":         cum_median,
+        "cum_epistemic":  combined["cum_epi_persist"],
+        "cum_structural": combined["cum_struct_exact"],
+        "cum_total":      scenarios["cum_std_total"],
     })
+    variants_df = pd.DataFrame({
+        "year":          years_ref,
+        "cum_median_gt": cum_median,
+        **scenarios,
+    })
+    return cum_df, variants_df
 
 
 def _interp_cum(cum_df: pd.DataFrame, frac_year: float) -> float:
@@ -380,7 +472,7 @@ def run_hma_validation(cfg: dict) -> None:
     # ------------------------------------------------------------------
     # 1. Build combined HMA ensemble
     # ------------------------------------------------------------------
-    ens = combine_hma(ensemble_base)
+    ens, region_dfs = combine_hma(ensemble_base)
     if ens is None:
         raise RuntimeError("Could not load top_models_regional_gt.csv for r13/r14/r15. "
                            "Check ensemble_base_dir.")
@@ -388,7 +480,11 @@ def run_hma_validation(cfg: dict) -> None:
           f"({int(ens['year'].min())}–{int(ens['year'].max())})")
     print(f"  Peak annual Gt: {ens['median_gt'].min():.1f} to {ens['median_gt'].max():.1f}")
 
-    cum_df = make_cumulative(ens, ref_year, sigma_mult)
+    cum_df, cum_variants_df = make_cumulative(ensemble_base, region_dfs, ref_year)
+    cum_variants_df.to_csv(output_dir / "hma_cumulative_gt.csv", index=False)
+    print(f"  Saved hma_cumulative_gt.csv")
+    plot_cumulative_sensitivity(cum_variants_df, output_dir / "hma_cumulative_gt_sensitivity.png")
+    print(f"  Saved hma_cumulative_gt_sensitivity.png")
 
     # ------------------------------------------------------------------
     # 2. Load and align satellite data
