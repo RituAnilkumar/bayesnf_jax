@@ -337,3 +337,153 @@ Flax stores parameters by the names passed to self.param(). VIDense uses:
 
 The extract_vi_params() function relies on these naming conventions.
 Do not rename these parameters without updating extract_vi_params().
+
+---
+
+## Uncertainty aggregation — spatial and temporal correlation fixes
+
+This section documents a set of fixes made to how ensemble uncertainty
+(structural, epistemic, aleatoric) is aggregated across glaciers, models, and
+years in the downstream ensemble/plotting scripts (not the training pipeline —
+no changes were made to pretrain.py, finetune.py, bnf_module.py, or predict.py's
+core prediction logic; predict.py already wrote everything these fixes need).
+
+### The core problem
+
+Structural and epistemic uncertainty both arise from a fixed, shared function
+(a trained model's weights, or a small set of trained models) evaluated at
+many different inputs (glaciers, years). A model's bias/deviation is a smooth,
+deterministic function of its inputs — not independent noise resampled per
+row — so it is strongly correlated across glaciers with similar covariates,
+and fully persistent across years for a fixed model (the same weights generate
+the whole 86-year trajectory). Treating these components as independent when
+aggregating across glaciers, models, or years (i.e. combining via quadrature,
+`sqrt(sum(sigma_i^2))`) discards positive covariance terms and understates the
+true aggregate uncertainty. Aleatoric uncertainty, by contrast, is a
+defensible independence case (it aims to capture local/point noise), so it
+keeps its quadrature (shrinking) treatment throughout.
+
+### Category 1 — glacier -> region -> global spatial aggregation (fixed)
+
+`src/plot_global_from_glaciers.py::load_glacier_gt()` used to re-derive a
+region's contribution to the global total by summing per-glacier variance
+(`groupby("year").sum()` of `(std_component * area)^2`), assuming glaciers'
+epistemic/structural deviations are independent of each other. They aren't —
+all glaciers in a region share the same trained model(s).
+
+Fix: retired that per-glacier re-derivation. `build_global()` now reads each
+region's already-correct `ensemble_regional_gt.csv` (produced by
+`ensemble_uncertainty_pretrain_year.py` / `ensemble_uncertainty.py` /
+`ensemble_ep_alea.py`, where structural/epistemic are already correctly
+propagated per-model via `predict.py::compute_regional_series`'s per-MC-draw
+area-weighted mean, before being combined across models via the exact
+law-of-total-variance formula) and sums across regions via quadrature. That
+region-to-region quadrature sum is valid — unlike glacier-to-glacier, region-
+to-region correlation is not a concern, because each region has its own
+independently-trained model ensemble (one-model-per-RGI-region design).
+`load_regional_gt()` is now the single, only aggregation path (previously it
+existed only as a "no features file" fallback for r19).
+
+`plot_global_multi_config.py` imports `load_glacier_gt`/`load_regional_gt_fallback`
+directly from `plot_global_from_glaciers.py` and inherited this fix
+automatically — no separate change was needed there (that file has since been
+moved to `tmp_cleanup/` for unrelated reasons — see the cleanup section of
+CLAUDE.md/README).
+
+### Category 2 — cumulative (year-to-year) aggregation (fixed)
+
+Every cumulative-Gt plot in the repo computed `cum_std = sqrt(cumsum(std_total**2))`
+— an independent-years quadrature sum applied to `std_total`, which bundles
+structural, epistemic, and aleatoric together. This is wrong for the
+structural/epistemic portion for the reason above. Measured on one real
+86-year regional test case (r13/combined, 2026-09), the correct treatment
+gave a cumulative uncertainty band ~6.8x wider than the naive formula (±72.5 Gt
+vs. ±495 Gt at final year, against a cumulative median of -540 Gt) — not
+enough to make the estimate meaningless, but enough that the naive band was
+substantially overconfident.
+
+Fix: `src/cumulative_uncertainty.py` (new, dependency-free module — shared by
+everything below without creating a circular import with
+`ensemble_uncertainty.py`) computes four cumulative-uncertainty scenarios per
+site:
+
+  - `cum_std_total` (recommended): structural = exact persistent (from the K
+    ensemble members' own regional Gt trajectories — cumsum each member's own
+    trajectory, then take the weighted variance across members' cumulative
+    trajectories at each year; not an approximation), epistemic = persistent
+    (linear sum of per-year epistemic std — this one IS an approximation,
+    since exact epistemic persistence would need raw per-draw MC samples,
+    which are not saved anywhere in this pipeline; epistemic is consistently
+    the smallest of the three components so this approximation has limited
+    practical effect), aleatoric = independent (quadrature sum, unchanged).
+  - `cum_std_structural_independent`: structural forced to the naive
+    independent (quadrature) treatment instead, epistemic/aleatoric as above
+    — a sensitivity check on how much the structural treatment matters.
+  - `cum_std_all_correlated`: aleatoric also forced to persistent — an upper
+    bound, everything treated as fully correlated across years.
+  - `cum_std_all_independent`: everything independent — equivalent to the old
+    pre-fix formula, kept as a direct before/after comparison, not as a
+    recommendation.
+
+The exact structural term requires the K ensemble members' source multirun
+run directories (via `run_dir` in `top_runs_info.csv`/`top_models_info.csv`)
+to still exist (e.g. on `/scratch`) so their own `regional_annual_gt.csv` can
+be re-read. If they've been cleaned up, `compute_cumulative_components()`
+falls back to the independent (naive) structural treatment with a printed
+warning — in that fallback case `cum_std_total == cum_std_structural_independent`.
+This means a past ensemble whose source run directories have since been
+deleted cannot be retroactively fixed without re-running `predict` for those
+models (not a full retrain — the trained `.pkl` weights plus predict are
+enough, since `predict.py` never needed to change).
+
+Sites updated: `ensemble_uncertainty.py`, `ensemble_ep_alea.py`,
+`ensemble_uncertainty_pretrain_year.py` (via the shared `_run_top_n_group` in
+the new `src/ensemble_common.py`), `validate_hma.py` (computes the exact
+structural term per-region for r13/r14/r15 separately, then quadrature-sums
+across regions before re-deriving the four scenarios — same region-
+independence reasoning as Category 1), `plot_model_animations.py`, and
+`plot_acceleration_analysis.py`. `plot_global_from_glaciers.py::compute_blocks`
+already did the right persistent/independent split for its 20-year block
+means and was left unchanged — it's the reference implementation the other
+sites' formulas are modeled on.
+
+`plot_model_animations.py` and `plot_acceleration_analysis.py` use the
+simpler "persistent" (not exact) treatment for structural too, rather than
+retrieving each region's own top-N model trajectories: `anim_cumulative()`'s
+uncertainty band was previously *never invoked* by `main()` despite being
+loaded (`gt_std` was computed but not passed to `anim_cumulative()` calls) —
+fixed to be substantively correct and actually wired up, but plumbing full
+per-region model provenance into a decorative racing-animation path wasn't
+judged worth the additional complexity. Both scripts save the site's usual
+output plus (where a CSV/PNG is naturally produced) the 4-scenario CSV/plot;
+the two animation-adjacent scripts skip the 4-panel sensitivity PNG since it
+doesn't fit an animation-style deliverable.
+
+Every fixed site additionally writes:
+  - a cumulative CSV with all four scenario columns (e.g.
+    `ensemble_cumulative_gt.csv`, `top_models_cumulative_gt.csv`,
+    `hma_cumulative_gt.csv`) — not just the plotted band;
+  - a 4-panel sensitivity PNG (`plot_cumulative_sensitivity()`), one subplot
+    per scenario, shared y-axis scale for direct visual comparison, for
+    every site except the two racing-animation outputs.
+
+### Per-glacier temporal aggregation (deferred, not fixed)
+
+A different, unaddressed gap: rigorously computing a per-glacier multi-year
+average with correlation-aware uncertainty (e.g. the Hugonnet-period scatter
+in `predict.py::plot_hugonnet_scatters`, which currently just averages the
+per-row epistemic `std` across the period's years per glacier) needs
+per-glacier raw MC samples across the relevant year window — a fundamentally
+different, glacier-scoped artifact from the regional per-draw samples used
+above (building the regional series already collapses/marginalizes the
+glacier axis via area-weighting, so it can't be recovered afterward).
+
+Storage checked empirically (2026-09): Hugonnet temporal-avg coverage is not
+a small subset — it covers ~88% of a region's glaciers (measured on r19:
+2,413 of 2,752 glaciers). Restricting to the Hugonnet window only (~20 years,
+not the full record) for one selected model across all 19 regions would cost
+~1.7 GB; for a full 86-year per-glacier record across the top-N ensemble,
+tens of GB. This was deferred by explicit decision (the user wants the full
+86-year capability eventually, not the cheaper 20-year-window version, and
+declined to build the cheaper partial version now) — not fixed, and not
+silently ignored: flagged inline at `plot_hugonnet_scatters` and here.
