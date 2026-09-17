@@ -7,8 +7,10 @@ model.use_time_encoding=false and model.heteroscedastic=true fixed.
 
 Reads model.pretrain_year_min from each run's .hydra/config.yaml, partitions
 all completed runs into one group per unique pretrain_year_min value, selects
-the top-N (default 5) within each group by a configurable selection metric
-(default: glambie_rmse), and writes separate ensemble outputs:
+the top-N (default 5) within each group by the WGMS reference/benchmark-glacier
+validation composite (RMSE + correlation + MedAE; falls back to a LOYO/LOGO R²
+composite for regions with no usable WGMS data — see src/ensemble_common.py
+and src/wgms_validation.py), and writes separate ensemble outputs:
 
     {output_dir}/pt1940/    — runs where model.pretrain_year_min=1940
     {output_dir}/pt1960/    — runs where model.pretrain_year_min=1960
@@ -104,30 +106,29 @@ def run_ensemble_pretrain_year(cfg: dict) -> None:
     min_runs                  = int(cfg.get("min_runs_per_region", 1))
     top_n                     = int(cfg.get("top_n", 5))
     k_per_group               = int(cfg.get("k_per_group", 2))
-    selection_metric          = str(cfg.get("selection_metric", "composite"))
     pretrain_years            = [int(y) for y in cfg.get("pretrain_years", _DEFAULT_PRETRAIN_YEARS)]
-    loyo_r2_min               = cfg.get("loyo_r2_min", 0.1)
+    loyo_r2_min               = cfg.get("loyo_r2_min", 0.0)
     logo_r2_min               = cfg.get("logo_r2_min", 0.0)
-    composite_loyo_r2_weight  = float(cfg.get("composite_loyo_r2_weight", 0.5))
+    wgms_rmse_max             = float(cfg.get("wgms_rmse_max", 1.0))
+    composite_weights = {
+        "rmse":  float(cfg.get("wgms_weight_rmse", 1 / 3)),
+        "corr":  float(cfg.get("wgms_weight_corr", 1 / 3)),
+        "medae": float(cfg.get("wgms_weight_medae", 1 / 3)),
+    }
     if loyo_r2_min is not None:
         loyo_r2_min = float(loyo_r2_min)
     if logo_r2_min is not None:
         logo_r2_min = float(logo_r2_min)
 
-    valid_metrics = {"glambie_rmse", "loyo_rmse", "loyo_r2", "composite"}
-    if selection_metric not in valid_metrics:
-        raise ValueError(f"selection_metric must be one of {valid_metrics}, got '{selection_metric}'")
-
     print(f"\n=== Ensemble split by pretrain_year_min: {multirun_root.name} ===")
     print(f"  Pretrain years  : {pretrain_years}")
     print(f"  Per-group top_n : {top_n}  |  k_per_group for combined: {k_per_group}")
-    print(f"  Selection metric: {selection_metric}"
-          + (f" over GLaMBIE test years {test_years}" if "glambie" in selection_metric else ""))
-    if selection_metric == "composite":
-        w_loyo = composite_loyo_r2_weight
-        print(f"  Composite weights: loyo_r2={w_loyo:.2f}  glambie_rmse={1-w_loyo:.2f}")
-    print(f"  LOYO R² gate    : >= {loyo_r2_min}" if loyo_r2_min is not None else "  LOYO R² gate    : disabled")
-    print(f"  LOGO R² gate    : >= {logo_r2_min}" if logo_r2_min is not None else "  LOGO R² gate    : disabled")
+    print(f"  Selection      : WGMS validation composite (RMSE+corr+MedAE, weights={composite_weights}) "
+          f"where available, else LOYO/LOGO R² composite. GLaMBIE (test years {test_years}) is "
+          f"reporting-only, never used for selection.")
+    print(f"  WGMS RMSE gate  : exclude if > {wgms_rmse_max} m w.e./yr")
+    print(f"  LOYO R² gate    : > {loyo_r2_min}" if loyo_r2_min is not None else "  LOYO R² gate    : disabled")
+    print(f"  LOGO R² gate    : > {logo_r2_min}" if logo_r2_min is not None else "  LOGO R² gate    : disabled")
 
     results_df = build_results_df(multirun_root, test_years, min_runs_per_region=1)
     print(f"  {len(results_df)} total runs loaded.")
@@ -163,8 +164,9 @@ def run_ensemble_pretrain_year(cfg: dict) -> None:
             skipped.append(label)
             continue
         ok = _run_top_n_group(
-            group, group_outdir, top_n, min_runs, selection_metric,
-            loyo_r2_min, logo_r2_min, composite_loyo_r2_weight,
+            group, group_outdir, top_n, min_runs,
+            loyo_r2_min=loyo_r2_min, logo_r2_min=logo_r2_min,
+            wgms_rmse_max=wgms_rmse_max, composite_weights=composite_weights,
         )
         if not ok:
             skipped.append(label)
@@ -188,8 +190,10 @@ def run_ensemble_pretrain_year(cfg: dict) -> None:
             output_dir / "combined",
             top_n=n_combined,        # use all pooled models, no further filtering
             min_runs=min_runs,
-            selection_metric=selection_metric,
             loyo_r2_min=None,        # already gated above; don't double-filter
+            logo_r2_min=None,        # already gated above; don't double-filter
+            wgms_rmse_max=wgms_rmse_max,
+            composite_weights=composite_weights,
         )
     else:
         print(f"\n  WARNING: combined ensemble skipped — only {len(combined_parts)} group(s) "
@@ -213,11 +217,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--top_n", type=int, default=None,
                         help="Override top_n from config (default 5).")
     parser.add_argument("--loyo_r2_min", type=float, default=None,
-                        help="Minimum LOYO R² a run must achieve to be eligible for the "
-                             "ensemble (default 0.1). Pass --loyo_r2_min=-inf to disable.")
+                        help="LOYO R² a run must exceed (strictly) to be eligible for the "
+                             "ensemble (default 0.0). Pass --loyo_r2_min=-inf to disable.")
     parser.add_argument("--logo_r2_min", type=float, default=None,
-                        help="Minimum LOGO R² a run must achieve (spatial generalisation gate, "
+                        help="LOGO R² a run must exceed (strictly, spatial generalisation gate, "
                              "default 0.0). Pass --logo_r2_min=-inf to disable.")
+    parser.add_argument("--wgms_rmse_max", type=float, default=None,
+                        help="Exclude runs with WGMS validation RMSE above this (m w.e./yr, "
+                             "default 1.0 = 1000 mm w.e.).")
     parser.add_argument("--k_per_group", type=int, default=None,
                         help="Runs taken from each pretrain year group for the "
                              "combined ensemble (default 2; total = k_per_group × n_groups).")
@@ -247,6 +254,8 @@ def main() -> None:
         cfg["loyo_r2_min"] = args.loyo_r2_min
     if args.logo_r2_min is not None:
         cfg["logo_r2_min"] = args.logo_r2_min
+    if args.wgms_rmse_max is not None:
+        cfg["wgms_rmse_max"] = args.wgms_rmse_max
     if args.k_per_group is not None:
         cfg["k_per_group"] = args.k_per_group
     if args.pretrain_years is not None:

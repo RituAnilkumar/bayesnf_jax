@@ -31,9 +31,21 @@ explain:
   #   ensemble_dir   Point at a region multirun folder (e.g. multirun/r01_3977063/).
   #                  Scans all numbered subdirectories (0/, 1/, …), loads every
   #                  finetuned_params.pkl found, and reads architecture + data config
-  #                  from the first subdir's .hydra/config.yaml.
+  #                  from the first subdir's .hydra/config.yaml. Independently re-picks
+  #                  its own top_k_models by the composite score below — this does NOT
+  #                  reuse whatever ensemble_uncertainty_pretrain_year.py / ensemble_ep_alea.py
+  #                  already selected. Prefer selection_csv (below) if you want to explain
+  #                  exactly the already-selected ensemble.
   #                  Captures both VI uncertainty (n_mc_per_model draws per run)
   #                  and structural uncertainty (variation across the ensemble).
+  #
+  #   selection_csv  Path to a top_runs_info.csv (ensemble_uncertainty_pretrain_year.py)
+  #                  or top_models_info.csv (ensemble_ep_alea.py) from an already-selected
+  #                  ensemble. Explains exactly those pre-selected run_dirs, in the order
+  #                  the file lists them (already best-first) — no independent re-selection.
+  #                  If the file has a `_composite` column, weighting: performance uses it
+  #                  directly (same WGMS/LOYO-LOGO criteria the selection used) instead of
+  #                  recomputing the older glambie/loyo composite from hyperparam_tuning.py.
   #
   #   run_dir        Point at a single run directory (e.g. multirun/r01_3977063/0/).
   #                  Reads .hydra/config.yaml for architecture + data paths.
@@ -43,6 +55,7 @@ explain:
   #                  Requires model=bnf_regional_seasonal/r01 for architecture.
   # ---------------------------------------------------------------------------
   ensemble_dir: null   # e.g. /scratch/.../multirun/r01_3977063
+  selection_csv: null  # e.g. outputs/ensemble_pretrain_year/r01/pt2000/top_runs_info.csv
   run_dir: null        # e.g. /scratch/.../multirun/r01_3977063/0
   params_path: null    # e.g. /scratch/.../finetuned_params.pkl  (+ model= required)
 
@@ -71,10 +84,13 @@ explain:
   importance_top_k: null   # show all features; set e.g. 10 to limit
   dependence_top_k: 5      # top-k features for which dependence plots are saved
 
-  # --- Ensemble model weighting (only used in ensemble_dir mode) ---
-  # 'equal' gives every model the same weight (default, always works).
-  # 'performance' uses softmax over the composite score from hyperparam_tuning.py
-  # (requires metrics_glambie_test.csv / ._cv/metrics_oos.csv in each run subdir).
+  # --- Ensemble model weighting (only used in ensemble_dir / selection_csv mode) ---
+  # 'equal' gives every model the same weight.
+  # 'performance' uses softmax over a composite score: in selection_csv mode this
+  # is that file's own `_composite` column (same WGMS/LOYO-LOGO criteria used to
+  # select it); in ensemble_dir mode it's the older glambie/loyo composite from
+  # hyperparam_tuning.py (requires metrics_glambie_test.csv / ._cv/metrics_oos.csv
+  # in each run subdir).
   weighting: performance               # 'equal' or 'performance'
   softmax_temperature: 0.1       # lower = sharper weighting
   loyo_weight: 0.0               # weight on LOYO RMSE in composite score

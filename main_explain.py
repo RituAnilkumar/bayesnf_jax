@@ -1,7 +1,7 @@
 """
 Explainability entry point — Integrated Gradients attributions for one region.
 
-Three input modes (highest priority first):
+Four input modes (highest priority first):
 
   ensemble_dir   Region multirun folder containing numbered subdirectories (0/, 1/, …).
                  Each subdir must contain finetuned_params.pkl (or pretrained_params.pkl)
@@ -9,7 +9,16 @@ Three input modes (highest priority first):
                  the first valid subdir's Hydra config — no model= override needed.
                  Attributions are computed across all ensemble members, capturing both
                  VI uncertainty (n_mc_per_model draws per run) and structural uncertainty
-                 (variation across the ensemble).
+                 (variation across the ensemble). Independently re-selects its own top-k
+                 by composite score (see explain.weighting) — does NOT reuse whatever
+                 ensemble_uncertainty_pretrain_year.py / ensemble_ep_alea.py already
+                 selected. Use selection_csv instead if you want that.
+
+  selection_csv  Path to a top_runs_info.csv (from ensemble_uncertainty_pretrain_year.py)
+                 or top_models_info.csv (from ensemble_ep_alea.py) — explains exactly the
+                 already-selected ensemble those scripts wrote, in the order listed
+                 (already best-first), with no independent re-selection. If the file has
+                 a `_composite` column, explain.weighting=performance uses it directly.
 
   run_dir        Single run directory (e.g. multirun/r01_3977063/0/).
                  Reads .hydra/config.yaml for architecture + data paths automatically.
@@ -19,6 +28,9 @@ Three input modes (highest priority first):
                  Requires model=bnf_regional_seasonal/r01 for architecture config.
 
 Usage:
+    # Explain an already-selected ensemble (recommended — matches ensemble_selection):
+    python main_explain.py explain.selection_csv=outputs/ensemble_pretrain_year/r01/pt2000/top_runs_info.csv
+
     # Ensemble mode — full structural + VI uncertainty, no model= needed:
     python main_explain.py explain.ensemble_dir=/path/to/multirun/r01_3977063
 
@@ -251,6 +263,57 @@ def _compute_ensemble_weights(
 # Ensemble directory scanning
 # ---------------------------------------------------------------------------
 
+def _load_selection_csv(selection_csv: str) -> list[str]:
+    """
+    Return the run_dir list from an already-selected ensemble's info CSV
+    (top_runs_info.csv from ensemble_uncertainty_pretrain_year.py, or
+    top_models_info.csv from ensemble_ep_alea.py), in the file's row order
+    (both scripts write these already sorted best-first by composite score).
+    """
+    df = pd.read_csv(selection_csv)
+    if "run_dir" not in df.columns:
+        raise ValueError(f"{selection_csv} has no 'run_dir' column.")
+    run_dirs = df["run_dir"].astype(str).tolist()
+    if not run_dirs:
+        raise ValueError(f"{selection_csv} has no rows.")
+    return run_dirs
+
+
+def _weights_from_selection_csv(
+    selection_csv: str, run_dirs: list[str], weighting: str, temperature: float,
+) -> "np.ndarray | None":
+    """
+    Derive model weights from the selection CSV's own `_composite` column
+    (the same WGMS/LOYO-LOGO criteria used to select these runs — see
+    src/wgms_validation.py::select_top_n_runs) rather than recomputing the
+    older glambie/loyo composite from hyperparam_tuning.py.
+
+    Returns None if weighting=='equal', the column is absent, or nothing matches.
+    """
+    if weighting == "equal":
+        return None
+    df = pd.read_csv(selection_csv)
+    if "_composite" not in df.columns or "run_dir" not in df.columns:
+        warnings.warn(
+            f"[explain] {selection_csv} has no '_composite' column — using equal weights."
+        )
+        return None
+    dir_to_composite = dict(zip(df["run_dir"].astype(str), df["_composite"].values))
+    composites = np.array([dir_to_composite.get(d, float("nan")) for d in run_dirs])
+    if np.all(np.isnan(composites)):
+        warnings.warn("[explain] No matching run_dir found in selection_csv — using equal weights.")
+        return None
+    missing = int(np.sum(np.isnan(composites)))
+    if missing:
+        worst = np.nanmax(composites)
+        composites = np.where(np.isnan(composites), worst, composites)
+        warnings.warn(f"[explain] {missing}/{len(run_dirs)} members missing from selection_csv "
+                      "composite — assigned worst score.")
+
+    from src.ensemble_uncertainty import compute_weights
+    return compute_weights(composites, weighting, temperature)
+
+
 def _find_run_subdirs(ensemble_dir: str, stage: str) -> list[str]:
     """
     Return sorted list of run subdirs under ensemble_dir that contain a pkl.
@@ -332,9 +395,10 @@ def main(cfg: DictConfig) -> None:
     def _abs(p):
         return p if (p and os.path.isabs(p)) else (os.path.join(orig, p) if p else None)
 
-    ensemble_dir = _abs(ex.get("ensemble_dir"))
-    run_dir      = _abs(ex.get("run_dir"))
-    params_path  = _abs(ex.get("params_path"))
+    ensemble_dir  = _abs(ex.get("ensemble_dir"))
+    selection_csv = _abs(ex.get("selection_csv"))
+    run_dir       = _abs(ex.get("run_dir"))
+    params_path   = _abs(ex.get("params_path"))
 
     # ------------------------------------------------------------------
     # Auto-detect: if run_dir has no .hydra/config.yaml but contains
@@ -362,6 +426,8 @@ def main(cfg: DictConfig) -> None:
     # ------------------------------------------------------------------
     if ensemble_dir:
         region_tag = os.path.basename(ensemble_dir.rstrip("/"))
+    elif selection_csv:
+        region_tag = os.path.basename(os.path.dirname(selection_csv.rstrip("/")))
     elif run_dir:
         # run_dir is e.g. .../r01_3977063/0 — use the parent folder name
         region_tag = os.path.basename(os.path.dirname(run_dir.rstrip("/")))
@@ -376,11 +442,16 @@ def main(cfg: DictConfig) -> None:
     print(f"[explain] Output dir: {os.path.abspath(out_dir)}")
 
     # ------------------------------------------------------------------
-    # Mode 1: ensemble_dir — scan all numbered subdirs
+    # Mode 1: ensemble_dir (re-selects its own top-k) or selection_csv
+    # (explains an already-selected ensemble, in file order)
     # ------------------------------------------------------------------
-    if ensemble_dir:
-        print(f"[explain] Mode: ensemble  ({ensemble_dir})")
-        run_subdirs = _find_run_subdirs(ensemble_dir, stage)
+    if ensemble_dir or selection_csv:
+        if selection_csv:
+            print(f"[explain] Mode: selection_csv  ({selection_csv})")
+            run_subdirs = _load_selection_csv(selection_csv)
+        else:
+            print(f"[explain] Mode: ensemble  ({ensemble_dir})")
+            run_subdirs = _find_run_subdirs(ensemble_dir, stage)
         print(f"[explain] Found {len(run_subdirs)} ensemble members")
 
         # Architecture + data config from the first subdir
@@ -447,17 +518,24 @@ def main(cfg: DictConfig) -> None:
         # ------------------------------------------------------------------
         weighting      = str(ex.get("weighting", "equal"))
         temperature    = float(ex.get("softmax_temperature", 0.1))
-        loyo_w         = float(ex.get("loyo_weight", 0.0))
-        glambie_w_cfg  = float(ex.get("glambie_weight", 1.0))
-        test_years_cfg = list(ex.get("glambie_test_years") or [2021, 2022, 2023])
-        min_runs_cfg   = int(ex.get("min_runs", 5))
         top_k_models   = ex.get("top_k_models")
         top_k_models   = int(top_k_models) if top_k_models else None
 
-        ensemble_weights = _compute_ensemble_weights(
-            compatible_dirs, weighting, temperature,
-            loyo_w, glambie_w_cfg, test_years_cfg, min_runs_cfg,
-        )
+        if selection_csv:
+            # Use the selection's own composite (WGMS/LOYO-LOGO criteria) —
+            # do NOT recompute the older glambie/loyo composite here.
+            ensemble_weights = _weights_from_selection_csv(
+                selection_csv, compatible_dirs, weighting, temperature,
+            )
+        else:
+            loyo_w         = float(ex.get("loyo_weight", 0.0))
+            glambie_w_cfg  = float(ex.get("glambie_weight", 1.0))
+            test_years_cfg = list(ex.get("glambie_test_years") or [2021, 2022, 2023])
+            min_runs_cfg   = int(ex.get("min_runs", 5))
+            ensemble_weights = _compute_ensemble_weights(
+                compatible_dirs, weighting, temperature,
+                loyo_w, glambie_w_cfg, test_years_cfg, min_runs_cfg,
+            )
 
         if ensemble_weights is not None:
             print(f"[explain] Weighting='{weighting}', temperature={temperature}")

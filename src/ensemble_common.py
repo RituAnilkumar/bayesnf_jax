@@ -23,6 +23,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from src.wgms_validation import select_top_n_runs
 from src.ensemble_uncertainty import (
     _read_run_model_cfg,
     _load_glacier_preds,
@@ -45,19 +46,12 @@ from src import area_rates
 
 
 # ---------------------------------------------------------------------------
-# Small utility
-# ---------------------------------------------------------------------------
-
-def _minmax_norm_series(s: pd.Series) -> pd.Series:
-    """Min-max normalise to [0, 1]. Returns zeros if all values are equal."""
-    lo, hi = s.min(), s.max()
-    if hi == lo:
-        return pd.Series(np.zeros(len(s)), index=s.index, dtype=float)
-    return (s - lo) / (hi - lo)
-
-
-# ---------------------------------------------------------------------------
 # Top-N ensemble runner for a single group
+#
+# select_top_n_runs() (the gating/ranking logic) lives in src/wgms_validation.py,
+# not here, to avoid a circular import — this module already imports helpers
+# from ensemble_uncertainty.py, and ensemble_uncertainty.py also needs
+# select_top_n_runs() for its own softmax-weighted ensemble.
 # ---------------------------------------------------------------------------
 
 def _run_top_n_group(
@@ -65,103 +59,39 @@ def _run_top_n_group(
     output_dir: Path,
     top_n: int,
     min_runs: int,
-    selection_metric: str = "glambie_rmse",
-    loyo_r2_min: float | None = 0.1,
+    loyo_r2_min: float | None = 0.0,
     logo_r2_min: float | None = 0.0,
-    composite_loyo_r2_weight: float = 0.5,
+    wgms_rmse_max: float = 1.0,
+    composite_weights: dict | None = None,
 ) -> bool:
     """
-    Run the full ensemble pipeline for one group.
-
-    Selects top_n runs by selection_metric, uses equal weights.
-    All runs are expected to be heteroscedastic=true; raises if aleatoric_std
-    is missing from any preds_full.csv.
-
-    Args:
-        group_df:                 Subset of the results DataFrame for this group.
-        output_dir:               Where to write this group's outputs.
-        top_n:                    Number of top runs to include in ensemble.
-        min_runs:                 Minimum runs required after gating to proceed.
-        selection_metric:         Ranking criterion. One of:
-                                    "glambie_rmse" — GLaMBIE RMSE (lower=better)
-                                    "loyo_rmse"    — pretrain LOYO RMSE (lower=better)
-                                    "loyo_r2"      — pretrain LOYO R² (higher=better)
-                                    "composite"    — weighted combination of normalised
-                                                     glambie_rmse and loyo_r2 (lower=better).
-                                                     Weights: composite_loyo_r2_weight for
-                                                     loyo_r2, remainder for glambie_rmse.
-        loyo_r2_min:              Hard gate: minimum LOYO R² to be eligible. None = disabled.
-        logo_r2_min:              Hard gate: minimum LOGO R² to be eligible. None = disabled.
-        composite_loyo_r2_weight: Weight on loyo_r2 in the composite score (0–1).
-                                  glambie_rmse weight = 1 - this. Only used when
-                                  selection_metric="composite".
+    Run the full ensemble pipeline for one group: select_top_n_runs() to pick
+    the runs, then combine their predictions into ensemble_glacier.csv /
+    ensemble_regional_*.csv with full uncertainty decomposition.
 
     Returns:
         True if the group was processed successfully, False if skipped.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Start with runs that have a valid glambie_rmse (always needed for print summary)
-    valid = group_df.dropna(subset=["glambie_rmse"]).copy().reset_index(drop=True)
-
-    # --- Hard gate: LOYO R² ---
-    if loyo_r2_min is not None and "loyo_r2" in valid.columns:
-        n_before = len(valid)
-        valid = valid[valid["loyo_r2"] >= loyo_r2_min].reset_index(drop=True)
-        n_rejected = n_before - len(valid)
-        if n_rejected:
-            print(f"  [loyo_r2 gate] Rejected {n_rejected}/{n_before} runs with "
-                  f"loyo_r2 < {loyo_r2_min}")
-
-    # --- Hard gate: LOGO R² ---
-    if logo_r2_min is not None and "logo_r2" in valid.columns:
-        n_before = len(valid)
-        valid = valid[valid["logo_r2"] >= logo_r2_min].reset_index(drop=True)
-        n_rejected = n_before - len(valid)
-        if n_rejected:
-            print(f"  [logo_r2 gate] Rejected {n_rejected}/{n_before} runs with "
-                  f"logo_r2 < {logo_r2_min}")
-
-    n_valid = len(valid)
-    if n_valid < min_runs:
-        gates = []
-        if loyo_r2_min is not None:
-            gates.append(f"loyo_r2 >= {loyo_r2_min}")
-        if logo_r2_min is not None:
-            gates.append(f"logo_r2 >= {logo_r2_min}")
-        gate_str = " and ".join(gates) if gates else "no gate"
-        print(f"  SKIPPED: only {n_valid} run(s) pass gates ({gate_str}) "
-              f"(need {min_runs}). Adjust thresholds or lower --min_runs.")
+    top, rank_label = select_top_n_runs(
+        group_df, top_n, min_runs, loyo_r2_min, logo_r2_min, wgms_rmse_max, composite_weights,
+    )
+    if top is None:
+        print(f"  SKIPPED: {rank_label}. Adjust thresholds or lower --min_runs.")
         return False
 
-    # --- Rank by selection_metric ---
-    if selection_metric == "composite":
-        w_loyo    = float(composite_loyo_r2_weight)
-        w_glambie = 1.0 - w_loyo
-        norm_glambie = _minmax_norm_series(valid["glambie_rmse"])
-        norm_neg_r2  = 1.0 - _minmax_norm_series(valid["loyo_r2"])
-        valid = valid.copy()
-        valid["_composite"] = w_glambie * norm_glambie + w_loyo * norm_neg_r2
-        valid = valid.sort_values("_composite", ascending=True).reset_index(drop=True)
-        rank_label = f"composite (loyo_r2 w={w_loyo:.2f}, glambie_rmse w={w_glambie:.2f}) ↓ lower better"
-    elif selection_metric == "loyo_r2":
-        valid = valid.sort_values("loyo_r2", ascending=False).reset_index(drop=True)
-        rank_label = "loyo_r2 ↑ higher better"
-    else:
-        valid = valid.sort_values(selection_metric, ascending=True).reset_index(drop=True)
-        rank_label = f"{selection_metric} ↓ lower better"
-
-    top = valid.head(top_n).reset_index(drop=True)
     if len(top) < top_n:
         print(f"  WARNING: only {len(top)} qualifying runs available (requested top {top_n}).")
     print(f"  Top {len(top)} runs by {rank_label}:")
     for _, row in top.iterrows():
-        composite_str = (f"  composite={row['_composite']:.4f}" if "_composite" in row.index else "")
-        print(f"    {row['run_id']}{composite_str}  "
-              f"glambie_rmse={row.get('glambie_rmse', float('nan')):.4f}  "
+        print(f"    {row['run_id']}  composite={row.get('_composite', float('nan')):.4f}  "
+              f"wgms_val_rmse={row.get('wgms_val_rmse', float('nan')):.4f}  "
+              f"wgms_val_corr={row.get('wgms_val_corr', float('nan')):.4f}  "
+              f"wgms_val_medae={row.get('wgms_val_medae', float('nan')):.4f}  "
               f"loyo_r2={row.get('loyo_r2', float('nan')):.4f}  "
               f"logo_r2={row.get('logo_r2', float('nan')):.4f}  "
-              f"loyo_rmse={row.get('loyo_rmse', float('nan')):.4f}")
+              f"glambie_rmse(test)={row.get('glambie_rmse', float('nan')):.4f}")
 
     top.to_csv(output_dir / "top_runs_info.csv", index=False)
 

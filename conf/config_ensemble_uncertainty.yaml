@@ -14,16 +14,11 @@ multirun_root: /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r06_3645680
 output_dir: outputs/ensemble_uncertainty
 
 # Weighting scheme: 'performance' or 'equal'
-#   performance: softmax over negative composite scores (lower composite = higher weight)
-#   equal:       uniform weights across all valid runs
+#   performance: softmax over the selection composite below (lower = higher weight)
+#   equal:       uniform weights across all runs that pass the gates
 weighting: performance
 
-# Composite score weights (only used when weighting: performance).
-# Must match the weights used in config_hyperparam_tuning.yaml for consistency.
-loyo_weight: 1.0
-glambie_weight: 0.0
-
-# GLaMBIE years held out for test RMSE. Must match config_hyperparam_tuning.yaml.
+# GLaMBIE years held out for test RMSE (reporting-only — see selection block below).
 # glambie_test_years: [2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023]
 glambie_test_years: [2000, 2001, 2020, 2021, 2022, 2023]
 # Softmax temperature for performance-based weights.
@@ -34,15 +29,27 @@ softmax_temperature: 0.1
 # Skip ensemble if fewer than this many runs have complete metrics.
 min_runs_per_region: 3
 
-# Metric used to rank and select the top-N runs per group
-# (only used by ensemble_uncertainty_pretrain_year.py, via src/ensemble_common.py,
-# and ensemble_ep_alea.py).
-#   glambie_rmse  — GLaMBIE held-out test RMSE (lower is better) [default]
-#   loyo_rmse     — pretrain leave-one-year-out RMSE (lower is better)
-#   loyo_r2       — pretrain leave-one-year-out R² (higher is better)
-# NOTE: loyo_r2 requires pipeline.stages to include pretrain_cv so that
-# ._cv/metrics_oos.csv exists. Check this before switching.
-selection_metric: loyo_r2
+# --- Selection gates + composite (shared by ensemble_uncertainty.py,
+# ensemble_uncertainty_pretrain_year.py, and ensemble_ep_alea.py — see
+# src/wgms_validation.py::select_top_n_runs) ---
+#
+# Ranking: an equally-weighted composite of normalised WGMS reference/
+# benchmark-glacier validation RMSE, correlation, and MedAE (see
+# validation_data/per_gla/reference_benchmark_mb_timeseries.csv and
+# src/wgms_validation.py). Regions with no usable WGMS data (tier 3, e.g.
+# r04/r09 — see reference_benchmark_region_summary.csv) fall back to a
+# LOYO/LOGO R² composite instead. GLaMBIE is never used for selection —
+# it is reporting/testing-only (see wgms_test_*/glambie_rmse columns).
+#
+# Hard gates (always applied): loyo_r2 > loyo_r2_min, logo_r2 > logo_r2_min
+# (both strict; requires pipeline.stages to include pretrain_cv so that
+# ._cv/metrics_oos.csv exists), and wgms_val_rmse <= wgms_rmse_max.
+loyo_r2_min: 0.0
+logo_r2_min: 0.0
+wgms_rmse_max: 1.0     # m w.e./yr (= 1000 mm w.e.)
+wgms_weight_rmse: 0.3333
+wgms_weight_corr: 0.3333
+wgms_weight_medae: 0.3334
 
 # Note: glambie_path, inp_dir and reg_subdir are read automatically from
 # .hydra/config.yaml inside the first valid run directory — no need to

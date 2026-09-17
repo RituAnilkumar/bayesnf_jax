@@ -15,7 +15,10 @@ Uncertainty decomposition (law of total variance across top-N models):
     std_total      = sqrt( std_epistemic² + std_aleatoric² + std_structural² )
 
 Only heteroscedastic runs (model.heteroscedastic=true) are considered.
-Model selection criterion: lowest glambie_rmse over test_years (default 2020-2024).
+Model selection: same criteria as ensemble_uncertainty_pretrain_year.py — see
+src/ensemble_common.py::select_top_n_runs (LOYO/LOGO R² gates, WGMS validation
+RMSE exclusion gate, WGMS composite ranking with LOYO/LOGO-only fallback).
+GLaMBIE test RMSE is reporting-only, not part of selection.
 Equal weights are used across the top-N models.
 
 Inputs (read from each selected run directory):
@@ -58,6 +61,7 @@ import pandas as pd
 import yaml
 
 from src.hyperparam_tuning import build_results_df
+from src.wgms_validation import select_top_n_runs
 from src.ensemble_uncertainty import (
     _read_run_model_cfg,
     _load_glacier_preds,
@@ -85,14 +89,23 @@ def pick_top_runs(
     test_years: list[int],
     min_runs: int,
     top_n: int = 5,
+    loyo_r2_min: float | None = 0.0,
+    logo_r2_min: float | None = 0.0,
+    wgms_rmse_max: float = 1.0,
+    composite_weights: dict | None = None,
 ) -> pd.DataFrame:
     """
-    Return the top-N heteroscedastic runs sorted by lowest GLaMBIE test RMSE.
+    Return the top-N heteroscedastic runs, using the same selection criteria
+    as ensemble_uncertainty_pretrain_year.py (see
+    src/ensemble_common.py::select_top_n_runs for the full rules: LOYO/LOGO
+    R² gates, WGMS validation RMSE exclusion gate, WGMS composite ranking
+    with a LOYO/LOGO-only fallback for regions with no usable WGMS data, and
+    a point-wise -> period-mean fallback when too few runs pass).
 
-    Selection criterion: glambie_rmse over test_years (default 2020-2024).
-    Only runs with heteroscedastic=True in their Hydra overrides are considered.
-    Raises if no such runs are found or none have a valid glambie_rmse.
-    Returns a DataFrame of up to top_n rows sorted ascending by glambie_rmse.
+    Only runs with heteroscedastic=True in their Hydra overrides are
+    considered (required for the epistemic/aleatoric decomposition this
+    script performs). Raises if no such runs are found or none pass the
+    selection gates.
     """
     results_df = build_results_df(multirun_root, test_years, min_runs_per_region=min_runs)
 
@@ -114,21 +127,24 @@ def pick_top_runs(
         print("  WARNING: 'heteroscedastic' column not found in overrides — "
               "cannot pre-filter. Will validate after loading preds_full.csv.")
 
-    valid = results_df.dropna(subset=["glambie_rmse"]).sort_values("glambie_rmse").reset_index(drop=True)
-    if valid.empty:
+    top, rank_label = select_top_n_runs(
+        results_df, top_n, min_runs, loyo_r2_min, logo_r2_min, wgms_rmse_max, composite_weights,
+    )
+    if top is None:
         raise RuntimeError(
-            "No heteroscedastic runs have a valid GLaMBIE test RMSE. "
-            "Check that finetune completed without NaN loss and that "
-            "metrics_glambie_test.csv exists in each run directory."
+            f"No heteroscedastic runs passed selection ({rank_label}). "
+            "Check that finetune/pretrain_cv completed without NaN loss."
         )
 
-    top = valid.head(top_n).reset_index(drop=True)
     if len(top) < top_n:
         print(f"  WARNING: only {len(top)} valid runs available (requested top {top_n}).")
-    print(f"  Top {len(top)} runs by GLaMBIE RMSE:")
+    print(f"  Top {len(top)} runs by {rank_label}:")
     for _, row in top.iterrows():
-        print(f"    {row['run_id']}  glambie_rmse={row['glambie_rmse']:.4f}  "
-              f"loyo_rmse={row.get('loyo_rmse', float('nan')):.4f}")
+        print(f"    {row['run_id']}  composite={row.get('_composite', float('nan')):.4f}  "
+              f"wgms_val_rmse={row.get('wgms_val_rmse', float('nan')):.4f}  "
+              f"loyo_r2={row.get('loyo_r2', float('nan')):.4f}  "
+              f"logo_r2={row.get('logo_r2', float('nan')):.4f}  "
+              f"glambie_rmse(test)={row.get('glambie_rmse', float('nan')):.4f}")
     return top
 
 
@@ -476,14 +492,29 @@ def run_ep_alea(cfg: dict) -> None:
     test_years = list(cfg.get("glambie_test_years", [2020, 2021, 2022, 2023, 2024]))
     min_runs   = int(cfg.get("min_runs_per_region", 1))
     top_n      = int(cfg.get("top_n", 5))
+    loyo_r2_min   = cfg.get("loyo_r2_min", 0.0)
+    logo_r2_min   = cfg.get("logo_r2_min", 0.0)
+    wgms_rmse_max = float(cfg.get("wgms_rmse_max", 1.0))
+    composite_weights = {
+        "rmse":  float(cfg.get("wgms_weight_rmse", 1 / 3)),
+        "corr":  float(cfg.get("wgms_weight_corr", 1 / 3)),
+        "medae": float(cfg.get("wgms_weight_medae", 1 / 3)),
+    }
+    loyo_r2_min = float(loyo_r2_min) if loyo_r2_min is not None else None
+    logo_r2_min = float(logo_r2_min) if logo_r2_min is not None else None
 
     print(f"\n=== Top-{top_n} ensemble (epistemic + aleatoric + structural): {multirun_root.name} ===")
-    print(f"  Selecting top {top_n} runs by GLaMBIE test RMSE over years {test_years}")
+    print(f"  Selection: WGMS validation composite where available, else LOYO/LOGO R² composite "
+          f"(GLaMBIE test years {test_years} are reporting-only)")
 
     # ------------------------------------------------------------------
     # 1. Select top-N runs
     # ------------------------------------------------------------------
-    top_runs = pick_top_runs(multirun_root, test_years, min_runs, top_n=top_n)
+    top_runs = pick_top_runs(
+        multirun_root, test_years, min_runs, top_n=top_n,
+        loyo_r2_min=loyo_r2_min, logo_r2_min=logo_r2_min,
+        wgms_rmse_max=wgms_rmse_max, composite_weights=composite_weights,
+    )
     run_dirs = [Path(r["run_dir"]) for _, r in top_runs.iterrows()]
 
     top_runs.to_csv(output_dir / "top_models_info.csv", index=False)

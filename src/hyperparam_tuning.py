@@ -48,6 +48,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from src.wgms_validation import compute_wgms_metrics
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -257,6 +259,12 @@ def _region_from_dir_name(dir_name: str) -> str:
     return m.group(1) if m else dir_name
 
 
+def _region_num(region_label: str) -> int | None:
+    """'r06' -> 6. Returns None if unparseable."""
+    m = re.match(r"r(\d+)$", str(region_label))
+    return int(m.group(1)) if m else None
+
+
 def build_results_df(
     multirun_root: Path,
     test_years: list[int],
@@ -265,16 +273,22 @@ def build_results_df(
     """Load metrics for every discovered run and return a combined DataFrame.
 
     Columns: region, run_id, run_dir, nlayers, nhidden, heteroscedastic,
-             glambie_weight, beta_anneal_epochs, loyo_rmse, loyo_r2, logo_r2, glambie_rmse
+             glambie_weight, beta_anneal_epochs, loyo_rmse, loyo_r2, logo_r2,
+             glambie_rmse (test-only, not used for selection — see
+             src/ensemble_common.py), wgms_val_* / wgms_test_* (per-glacier
+             WGMS reference/benchmark metrics — wgms_val_* drives selection,
+             wgms_test_* is held out for reporting only), wgms_tier.
     """
     run_dirs = discover_runs(multirun_root)
     # Region is derived from the multirun_root dir name (e.g. r06_3645680 → r06)
     region = _region_from_dir_name(multirun_root.name)
+    region_num = _region_num(region)
 
     rows = []
     missing_glambie = 0
     missing_loyo = 0
     missing_logo = 0
+    missing_wgms_val = 0
 
     for run_dir in run_dirs:
         params = _parse_overrides(run_dir / ".hydra" / "overrides.yaml")
@@ -286,12 +300,17 @@ def build_results_df(
         loyo_r2      = _load_loyo_r2(run_dir)
         logo_r2      = _load_logo_r2(run_dir)
 
+        wgms_val = compute_wgms_metrics(run_dir, region_num, split="validation", period_mean=False)
+        wgms_test = compute_wgms_metrics(run_dir, region_num, split="testing", period_mean=False)
+
         if np.isnan(glambie_rmse):
             missing_glambie += 1
         if np.isnan(loyo_rmse):
             missing_loyo += 1
         if np.isnan(logo_r2):
             missing_logo += 1
+        if not wgms_val["available"]:
+            missing_wgms_val += 1
 
         rows.append({
             "region":  params.get("region") or region,
@@ -303,6 +322,18 @@ def build_results_df(
             "loyo_r2":      loyo_r2,
             "logo_r2":      logo_r2,
             "glambie_rmse": glambie_rmse,
+            "wgms_val_available": wgms_val["available"],
+            "wgms_val_rmse":      wgms_val["rmse"],
+            "wgms_val_corr":      wgms_val["corr"],
+            "wgms_val_medae":     wgms_val["medae"],
+            "wgms_val_n_points":  wgms_val["n_points"],
+            "wgms_val_n_glaciers": wgms_val["n_glaciers"],
+            "wgms_test_available": wgms_test["available"],
+            "wgms_test_rmse":      wgms_test["rmse"],
+            "wgms_test_corr":      wgms_test["corr"],
+            "wgms_test_medae":     wgms_test["medae"],
+            "wgms_test_n_points":  wgms_test["n_points"],
+            "wgms_tier": wgms_val["tier_used"],
         })
 
     df = pd.DataFrame(rows)
@@ -313,6 +344,12 @@ def build_results_df(
         print(f"  WARNING: {missing_loyo} runs missing LOYO metrics")
     if missing_logo:
         print(f"  WARNING: {missing_logo} runs missing LOGO metrics")
+    if run_dirs and region_num is not None and compute_wgms_metrics(run_dirs[0], region_num).get("tier_used") == 3:
+        print(f"  NOTE: region {region} has no usable WGMS reference/benchmark data "
+              "(tier 3) — selection will fall back to LOYO/LOGO R² only.")
+    elif missing_wgms_val:
+        print(f"  WARNING: {missing_wgms_val} runs missing WGMS validation metrics "
+              "(preds_full.csv absent or grid mismatch)")
 
     n_complete = df.dropna(subset=["loyo_rmse", "glambie_rmse"]).shape[0]
     if n_complete < min_runs_per_region:

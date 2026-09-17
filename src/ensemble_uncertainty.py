@@ -21,8 +21,13 @@ where:
   - mu_ensemble     is the weighted ensemble mean prediction
   - w_k             are model weights (performance-based softmax or equal)
 
-Model weights come from the composite score computed by hyperparam_tuning.py
-(lower composite = better generalisation = higher weight).
+Model weights come from the composite score computed by
+src/wgms_validation.py::select_top_n_runs — the same LOYO/LOGO-gated, WGMS
+validation-ranked (or LOYO/LOGO-ranked, for regions with no usable WGMS data)
+composite used by ensemble_uncertainty_pretrain_year.py and ensemble_ep_alea.py.
+Every run that survives the hard gates gets a continuous softmax weight here
+instead of a hard top-N cutoff (lower composite = better generalisation =
+higher weight).
 
 Inputs per run directory:
   preds_full.csv             — rgi_id, year, p2_5, p50, p97_5, mean, std
@@ -69,10 +74,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from src.hyperparam_tuning import (
-    build_results_df,
-    add_composite_score,
-)
+from src.hyperparam_tuning import build_results_df
+from src.wgms_validation import select_top_n_runs
 from src.cumulative_uncertainty import (
     compute_cumulative_gt_variants,
     plot_cumulative_sensitivity,
@@ -525,28 +528,45 @@ def run_ensemble_uncertainty(cfg: dict) -> None:
 
     weighting    = cfg.get("weighting", "performance")
     temperature  = float(cfg.get("softmax_temperature", 0.1))
-    loyo_w       = float(cfg.get("loyo_weight", 0.0))
-    glambie_w    = float(cfg.get("glambie_weight", 1.0))
     test_years   = list(cfg.get("glambie_test_years", [2021, 2022, 2023]))
     min_runs     = int(cfg.get("min_runs_per_region", 5))
+    loyo_r2_min   = cfg.get("loyo_r2_min", 0.0)
+    logo_r2_min   = cfg.get("logo_r2_min", 0.0)
+    wgms_rmse_max = float(cfg.get("wgms_rmse_max", 1.0))
+    composite_weights = {
+        "rmse":  float(cfg.get("wgms_weight_rmse", 1 / 3)),
+        "corr":  float(cfg.get("wgms_weight_corr", 1 / 3)),
+        "medae": float(cfg.get("wgms_weight_medae", 1 / 3)),
+    }
+    loyo_r2_min = float(loyo_r2_min) if loyo_r2_min is not None else None
+    logo_r2_min = float(logo_r2_min) if logo_r2_min is not None else None
 
     # ------------------------------------------------------------------
-    # 1. Load metrics and compute model weights
+    # 1. Load metrics, apply selection gates, and compute model weights
     # ------------------------------------------------------------------
     print(f"\n=== Ensemble uncertainty: {multirun_root.name} ===")
     results_df = build_results_df(multirun_root, test_years, min_runs_per_region=min_runs)
-    results_df = add_composite_score(results_df, loyo_weight=loyo_w, glambie_weight=glambie_w)
 
-    valid = results_df.dropna(subset=["composite"]).copy().reset_index(drop=True)
-    if len(valid) < min_runs:
+    # Same gates/composite as ensemble_uncertainty_pretrain_year.py and
+    # ensemble_ep_alea.py (see src/wgms_validation.py::select_top_n_runs),
+    # but every run that survives gating gets a continuous softmax weight
+    # here instead of a hard top-N cutoff.
+    valid, rank_label = select_top_n_runs(
+        results_df, top_n=len(results_df), min_runs=min_runs,
+        loyo_r2_min=loyo_r2_min, logo_r2_min=logo_r2_min,
+        wgms_rmse_max=wgms_rmse_max, composite_weights=composite_weights,
+    )
+    if valid is None:
         raise RuntimeError(
-            f"Only {len(valid)} runs with complete metrics (threshold={min_runs}). "
-            "Lower min_runs_per_region or check that runs completed successfully."
+            f"{rank_label}. Lower min_runs_per_region, relax the gates, or check "
+            "that runs completed successfully."
         )
+    print(f"  Selection: {rank_label}")
 
-    weights = compute_weights(valid["composite"].values, weighting, temperature)
+    weights = compute_weights(valid["_composite"].values, weighting, temperature)
     valid["weight"] = weights
-    valid[["run_id", "composite", "weight"]].to_csv(output_dir / "model_weights.csv", index=False)
+    valid[["run_id", "_composite", "weight"]].rename(columns={"_composite": "composite"}) \
+        .to_csv(output_dir / "model_weights.csv", index=False)
     print(f"  {len(valid)} valid runs, weighting='{weighting}'")
     print(f"  Weight range: [{weights.min():.4f}, {weights.max():.4f}]")
 
