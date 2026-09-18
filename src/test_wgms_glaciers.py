@@ -25,7 +25,7 @@ Assumptions (see conversation trail — flag if any of these are wrong):
   - Model source: outputs/ensemble_pretrain_year/r{NN}/combined/ensemble_glacier.csv
     (the pooled ensemble across all pretrain-year groups), keyed by (rgi_id, year).
   - The FULL WGMS record for plotting is re-read fresh from
-    validation_data/per_gla/mass_balance.csv (annual_balance, mm w.e. -> MWE/yr)
+    validation_data/per_gla/mass_balance.csv (annual_balance is already m w.e., no conversion)
     for exactly the glacier_ids in the "testing" split — this file is NOT the
     same one used for metrics (reference_benchmark_mb_timeseries.csv only
     contains the tier-filtered, metrics-eligible years). This means
@@ -67,7 +67,6 @@ import pandas as pd
 GLACIERS_CSV     = Path("validation_data/per_gla/reference_benchmark_glaciers.csv")
 TIMESERIES_CSV   = Path("validation_data/per_gla/reference_benchmark_mb_timeseries.csv")
 MASS_BALANCE_CSV = Path("validation_data/per_gla/mass_balance.csv")
-MM_TO_MWE = 1e-3
 TRAIN_YEAR_MIN, TRAIN_YEAR_MAX = 2000, 2020
 
 
@@ -86,11 +85,17 @@ def load_test_glaciers() -> pd.DataFrame:
 
 
 def load_full_wgms_series(glacier_ids: list[int]) -> pd.DataFrame:
-    """Full (unfiltered by year) WGMS annual_balance series for the given glacier_ids."""
+    """Full (unfiltered by year) WGMS annual_balance series for the given glacier_ids.
+
+    mass_balance.csv's annual_balance is already in m w.e. — no conversion
+    needed (confirmed by cross-checking against ref_mb_timeseries.csv, an
+    official WGMS export whose ANNUAL_BALANCE is mm w.e. and exactly 1000x
+    this file's annual_balance for the same glacier/year — see the same note
+    in build_reference_timeseries.py::load_obs)."""
     mb = pd.read_csv(MASS_BALANCE_CSV, low_memory=False)
     sub = mb[mb["glacier_id"].isin(glacier_ids)].dropna(subset=["annual_balance"])
     sub = sub[["glacier_id", "year", "annual_balance"]].rename(columns={"year": "YEAR"})
-    sub["obs_mwe"] = sub["annual_balance"] * MM_TO_MWE
+    sub["obs_mwe"] = sub["annual_balance"]
     return sub[["glacier_id", "YEAR", "obs_mwe"]]
 
 

@@ -42,7 +42,6 @@ MASS_BALANCE_CSV = Path("validation_data/per_gla/mass_balance.csv")
 TIMESERIES_OUT   = Path("validation_data/per_gla/reference_benchmark_mb_timeseries.csv")
 SUMMARY_OUT      = Path("validation_data/per_gla/reference_benchmark_region_summary.csv")
 
-MM_TO_MWE   = 1e-3
 TRAIN_YEAR_MIN = 2000
 TRAIN_YEAR_MAX = 2020
 SPLIT_SEED = 42
@@ -54,12 +53,19 @@ def _tier1_mask(year: pd.Series) -> pd.Series:
 
 def load_obs(kept: pd.DataFrame, mb: pd.DataFrame) -> pd.DataFrame:
     """Return long-format obs for all kept glaciers: one row per
-    (glacier_id, year) with a valid annual_balance."""
+    (glacier_id, year) with a valid annual_balance.
+
+    mass_balance.csv's annual_balance is already in m w.e. — confirmed by
+    cross-checking against ref_mb_timeseries.csv (an official WGMS export
+    whose ANNUAL_BALANCE column is documented as mm w.e.): e.g. PEYTO/
+    HINTEREIS F. values there are exactly 1000x this file's annual_balance
+    for the same glacier/year. No unit conversion needed (unlike
+    ref_mb_timeseries.csv's ANNUAL_BALANCE, or OGGM's mm/yr output)."""
     ids = kept["glacier_id"].astype(int).tolist()
     sub = mb[mb["glacier_id"].isin(ids)].copy()
     sub = sub.dropna(subset=["annual_balance"])
     sub = sub[["glacier_id", "year", "annual_balance"]].rename(columns={"year": "YEAR"})
-    sub["obs_mwe"] = sub["annual_balance"] * MM_TO_MWE
+    sub["obs_mwe"] = sub["annual_balance"]
     sub["glacier_id"] = sub["glacier_id"].astype(int)
     sub["is_tier1"] = _tier1_mask(sub["YEAR"])
     sub["in_training_window"] = ~sub["is_tier1"]
