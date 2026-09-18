@@ -21,10 +21,11 @@ years rather than averaging out. Treating them as independent understates the
 true cumulative uncertainty, sometimes by several-fold over a multi-decade record
 (empirically ~6-7x for one 86-year regional test case — see CONTEXT.md).
 
-compute_cumulative_gt_variants() computes four scenarios so the difference is
+compute_cumulative_gt_variants() computes five scenarios so the difference is
 visible and auditable rather than silently assumed:
 
-  cum_std_total                   (recommended) structural=exact persistent,
+  cum_std_total                   (audited default, shown in the sensitivity
+                                   comparison) structural=exact persistent,
                                    epistemic=persistent (approx.), aleatoric=independent
   cum_std_structural_independent  structural=independent (naive), epistemic=persistent,
                                    aleatoric=independent
@@ -33,6 +34,17 @@ visible and auditable rather than silently assumed:
   cum_std_all_independent         structural=independent, epistemic=independent,
                                    aleatoric=independent (equivalent to the old,
                                    pre-fix formula — kept for direct comparison)
+  cum_std_structural_indep_epi_alea_persist
+                                   (chosen treatment for the operational
+                                   ensemble_cumulative_gt_*.png outputs — a
+                                   deliberate, different choice from the
+                                   audited default above) structural=independent,
+                                   epistemic=persistent, aleatoric=persistent.
+                                   See compute_preferred_cumulative_gt() below,
+                                   which recomputes this same formula over an
+                                   arbitrary re-zeroed year window (e.g. from
+                                   the GLaMBIE start year) rather than only the
+                                   single full-record window this function uses.
 
 "structural=exact persistent" is computed from the K ensemble members' own
 regional Gt trajectories (each read from run_dir/regional_annual_gt.csv), not
@@ -243,12 +255,77 @@ def combine_cumulative_scenarios(comp: dict) -> dict:
     cum_std_all_independent = np.sqrt(
         comp["cum_struct_indep"] ** 2 + comp["cum_epi_indep"] ** 2 + comp["cum_alea_indep"] ** 2
     )
+    # Chosen treatment for the operational ensemble_cumulative_gt_*.png plots
+    # (see module docstring) — structural independent, epistemic+aleatoric persistent.
+    cum_std_structural_indep_epi_alea_persist = np.sqrt(
+        comp["cum_struct_indep"] ** 2 + comp["cum_epi_persist"] ** 2 + comp["cum_alea_persist"] ** 2
+    )
     return {
         "cum_std_total":                  cum_std_total,
         "cum_std_structural_independent": cum_std_structural_independent,
         "cum_std_all_correlated":         cum_std_all_correlated,
         "cum_std_all_independent":        cum_std_all_independent,
+        "cum_std_structural_indep_epi_alea_persist": cum_std_structural_indep_epi_alea_persist,
     }
+
+
+def compute_preferred_cumulative_gt(
+    years: np.ndarray,
+    median_gt: np.ndarray,
+    std_structural: np.ndarray,
+    std_epistemic: np.ndarray,
+    std_aleatoric: np.ndarray,
+    start_year: int | None = None,
+) -> pd.DataFrame:
+    """
+    Cumulative Gt using the chosen treatment for the operational
+    ensemble_cumulative_gt_*.png outputs: structural=independent,
+    epistemic=persistent, aleatoric=persistent (see module docstring — this
+    is a deliberate choice, different from cum_std_total in
+    compute_cumulative_gt_variants(), which is kept as the audited default
+    shown in the sensitivity comparison).
+
+    Cheap and self-contained: unlike compute_cumulative_gt_variants(), this
+    never needs each ensemble member's own run_dir/regional_annual_gt.csv,
+    because structural is treated as independent here, not exact-persistent.
+
+    If start_year is given, all arrays are first restricted to years >=
+    start_year and the cumulative sum restarts (re-zeros) from there — e.g.
+    for a plot aligned to the first year GLaMBIE data is available, rather
+    than the full model record.
+
+    Returns a DataFrame with columns:
+        year, cum_median_gt, cum_std_gt (total),
+        cum_std_structural (independent), cum_std_epistemic (persistent)
+    — the last two are exposed for plots that show per-component bands
+    (e.g. ensemble_ep_alea.py's epistemic/structural/total overlay).
+    """
+    years          = np.asarray(years)
+    median_gt      = np.asarray(median_gt, dtype=float)
+    std_structural = np.nan_to_num(np.asarray(std_structural, dtype=float))
+    std_epistemic  = np.nan_to_num(np.asarray(std_epistemic, dtype=float))
+    std_aleatoric  = np.nan_to_num(np.asarray(std_aleatoric, dtype=float))
+
+    if start_year is not None:
+        mask = years >= start_year
+        years, median_gt = years[mask], median_gt[mask]
+        std_structural, std_epistemic, std_aleatoric = (
+            std_structural[mask], std_epistemic[mask], std_aleatoric[mask]
+        )
+
+    cum_median       = np.cumsum(median_gt)
+    cum_struct_indep = np.sqrt(np.cumsum(std_structural ** 2))
+    cum_epi_persist  = np.cumsum(std_epistemic)
+    cum_alea_persist = np.cumsum(std_aleatoric)
+    cum_std = np.sqrt(cum_struct_indep ** 2 + cum_epi_persist ** 2 + cum_alea_persist ** 2)
+
+    return pd.DataFrame({
+        "year": years,
+        "cum_median_gt": cum_median,
+        "cum_std_gt": cum_std,
+        "cum_std_structural": cum_struct_indep,
+        "cum_std_epistemic": cum_epi_persist,
+    })
 
 
 def plot_cumulative_sensitivity(

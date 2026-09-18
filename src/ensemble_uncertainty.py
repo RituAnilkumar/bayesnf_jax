@@ -79,6 +79,7 @@ from src.wgms_validation import select_top_n_runs
 from src.cumulative_uncertainty import (
     compute_cumulative_gt_variants,
     plot_cumulative_sensitivity,
+    compute_preferred_cumulative_gt,
 )
 from src import area_rates
 
@@ -463,30 +464,18 @@ def plot_ensemble_mwe(
     _savefig(fig, output_dir / "ensemble_regional_mwe.png")
 
 
-def plot_ensemble_cumulative_gt(
-    ensemble_gt: pd.DataFrame,
-    glambie_wide_df,
+def _draw_cumulative_gt(
+    cum_df: pd.DataFrame,
+    gb_combined: pd.DataFrame,
     oggm_df: pd.DataFrame,
-    total_area_km2: np.ndarray,
-    output_dir: Path,
+    start_year: int,
+    title: str,
+    output_path: Path,
 ) -> None:
-    """
-    Cumulative Gt from the first year GLaMBIE combined data is available
-    (or the first prediction year if GLaMBIE is absent).
-
-    Ensemble cumulative uncertainty propagated in quadrature assuming
-    year-to-year independence: cum_std_t = sqrt(Σ_{s≤t} std_total_s²).
-    """
-    total_area_mean = float(total_area_km2.mean())
-    gb_combined = _glambie_combined_gt(glambie_wide_df, total_area_mean)
-
-    start_year = int(gb_combined["year"].min()) if not gb_combined.empty \
-        else int(ensemble_gt["year"].min())
-
-    mask       = ensemble_gt["year"].values >= start_year
-    years      = ensemble_gt["year"].values[mask]
-    cum_median = np.cumsum(ensemble_gt["median_gt"].values[mask])
-    cum_std    = np.sqrt(np.cumsum(ensemble_gt["std_total"].values[mask] ** 2))
+    """Shared drawing code for one cumulative-Gt window (see plot_ensemble_cumulative_gt)."""
+    years      = cum_df["year"].values
+    cum_median = cum_df["cum_median_gt"].values
+    cum_std    = cum_df["cum_std_gt"].values
 
     fig, ax = plt.subplots(figsize=(12, 5))
 
@@ -512,9 +501,55 @@ def plot_ensemble_cumulative_gt(
 
     ax.axhline(0, color="black", lw=0.6, ls="--")
     ax.set_xlabel("Year"); ax.set_ylabel("Cumulative mass balance (Gt)")
-    ax.set_title(f"Cumulative regional mass balance from {start_year} — ensemble")
+    ax.set_title(title)
     ax.legend(fontsize=8); fig.tight_layout()
-    _savefig(fig, output_dir / "ensemble_cumulative_gt.png")
+    _savefig(fig, output_path)
+
+
+def plot_ensemble_cumulative_gt(
+    ensemble_gt: pd.DataFrame,
+    glambie_wide_df,
+    oggm_df: pd.DataFrame,
+    total_area_km2: np.ndarray,
+    output_dir: Path,
+) -> None:
+    """
+    Two cumulative-Gt plots, both using the chosen operational treatment —
+    structural=independent, epistemic=persistent, aleatoric=persistent (see
+    src/cumulative_uncertainty.py::compute_preferred_cumulative_gt — a
+    deliberate choice, different from the cum_std_total "audited default"
+    shown in ensemble_cumulative_gt_sensitivity.png):
+
+      ensemble_cumulative_gt_vs_glambie.png — cumulative sum re-zeroed at the
+          first year GLaMBIE combined data is available (or the first
+          prediction year if GLaMBIE is absent), for direct comparison
+          against GLaMBIE's/OGGM's own cumulative curves over that window.
+
+      ensemble_cumulative_gt_full_range.png — cumulative sum re-zeroed at the
+          first prediction year (the full model record), with GLaMBIE/OGGM
+          overlaid wherever they have coverage.
+    """
+    total_area_mean = float(total_area_km2.mean())
+    gb_combined = _glambie_combined_gt(glambie_wide_df, total_area_mean)
+
+    years_all          = ensemble_gt["year"].values
+    full_start_year    = int(years_all.min())
+    glambie_start_year = int(gb_combined["year"].min()) if not gb_combined.empty else full_start_year
+
+    variants = [
+        ("ensemble_cumulative_gt_vs_glambie.png", glambie_start_year,
+         f"Cumulative regional mass balance from {glambie_start_year} — ensemble (vs. GLaMBIE)"),
+        ("ensemble_cumulative_gt_full_range.png", full_start_year,
+         f"Cumulative regional mass balance from {full_start_year} — ensemble (full range)"),
+    ]
+
+    for fname, start_year, title in variants:
+        cum_df = compute_preferred_cumulative_gt(
+            years_all, ensemble_gt["median_gt"].values,
+            ensemble_gt["std_structural"].values, ensemble_gt["std_epistemic"].values,
+            ensemble_gt["std_aleatoric"].values, start_year=start_year,
+        )
+        _draw_cumulative_gt(cum_df, gb_combined, oggm_df, start_year, title, output_dir / fname)
 
 
 # ---------------------------------------------------------------------------

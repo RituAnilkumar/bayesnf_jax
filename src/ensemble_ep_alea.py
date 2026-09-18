@@ -77,6 +77,7 @@ from src.ensemble_uncertainty import (
 from src.cumulative_uncertainty import (
     compute_cumulative_gt_variants,
     plot_cumulative_sensitivity,
+    compute_preferred_cumulative_gt,
 )
 from src import area_rates
 
@@ -421,32 +422,20 @@ def plot_top_models_mwe(
     _savefig(fig, output_dir / "top_models_regional_mwe.png")
 
 
-def plot_top_models_cumulative_gt(
-    regional_gt: pd.DataFrame,
-    glambie_wide_df,
+def _draw_top_models_cumulative_gt(
+    cum_df: pd.DataFrame,
+    gb_combined: pd.DataFrame,
     oggm_df: pd.DataFrame,
-    total_area_km2: np.ndarray,
-    output_dir: Path,
+    start_year: int,
+    title: str,
+    output_path: Path,
 ) -> None:
-    """
-    Cumulative Gt with epistemic, structural, and total uncertainty bands.
-
-    Cumulative sigma propagated in quadrature (year-to-year independence):
-        cum_sigma_t = sqrt( Σ_{s≤t} sigma_s² )
-    """
-    total_area_mean = float(total_area_km2.mean())
-    gb_combined = _glambie_combined_gt(glambie_wide_df, total_area_mean)
-
-    start_year = int(gb_combined["year"].min()) if not gb_combined.empty \
-        else int(regional_gt["year"].min())
-
-    mask   = regional_gt["year"].values >= start_year
-    years  = regional_gt["year"].values[mask]
-    cum_mu = np.cumsum(regional_gt["median_gt"].values[mask])
-
-    cum_epi    = np.sqrt(np.cumsum(regional_gt["epistemic_std"].values[mask]  ** 2))
-    cum_struct = np.sqrt(np.cumsum(regional_gt["structural_std"].values[mask] ** 2))
-    cum_tot    = np.sqrt(np.cumsum(regional_gt["total_std"].values[mask]      ** 2))
+    """Shared drawing code for one cumulative-Gt window (see plot_top_models_cumulative_gt)."""
+    years      = cum_df["year"].values
+    cum_mu     = cum_df["cum_median_gt"].values
+    cum_tot    = cum_df["cum_std_gt"].values
+    cum_struct = cum_df["cum_std_structural"].values
+    cum_epi    = cum_df["cum_std_epistemic"].values
 
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.fill_between(years, cum_mu - 2 * cum_tot,    cum_mu + 2 * cum_tot,
@@ -475,10 +464,57 @@ def plot_top_models_cumulative_gt(
 
     ax.axhline(0, color="black", lw=0.6, ls="--")
     ax.set_xlabel("Year"); ax.set_ylabel("Cumulative mass balance (Gt)")
-    ax.set_title(f"Cumulative regional mass balance from {start_year} — top-N ensemble\n"
-                 "Orange: epistemic  Purple: structural  Blue: total")
+    ax.set_title(title + "\nOrange: epistemic  Purple: structural  Blue: total")
     ax.legend(fontsize=8); fig.tight_layout()
-    _savefig(fig, output_dir / "top_models_cumulative_gt.png")
+    _savefig(fig, output_path)
+
+
+def plot_top_models_cumulative_gt(
+    regional_gt: pd.DataFrame,
+    glambie_wide_df,
+    oggm_df: pd.DataFrame,
+    total_area_km2: np.ndarray,
+    output_dir: Path,
+) -> None:
+    """
+    Two cumulative-Gt plots with epistemic, structural, and total uncertainty
+    bands, both using the chosen operational treatment — structural=
+    independent, epistemic=persistent, aleatoric=persistent (see
+    src/cumulative_uncertainty.py::compute_preferred_cumulative_gt — a
+    deliberate choice, different from the cum_std_total "audited default"
+    shown in top_models_cumulative_gt_sensitivity.png):
+
+      top_models_cumulative_gt_vs_glambie.png — cumulative sum re-zeroed at
+          the first year GLaMBIE combined data is available (or the first
+          prediction year if GLaMBIE is absent).
+
+      top_models_cumulative_gt_full_range.png — cumulative sum re-zeroed at
+          the first prediction year (the full model record).
+    """
+    total_area_mean = float(total_area_km2.mean())
+    gb_combined = _glambie_combined_gt(glambie_wide_df, total_area_mean)
+
+    years_all          = regional_gt["year"].values
+    full_start_year    = int(years_all.min())
+    glambie_start_year = int(gb_combined["year"].min()) if not gb_combined.empty else full_start_year
+
+    alea = np.where(np.isnan(regional_gt["aleatoric_std"].values), 0.0,
+                     regional_gt["aleatoric_std"].values)
+
+    variants = [
+        ("top_models_cumulative_gt_vs_glambie.png", glambie_start_year,
+         f"Cumulative regional mass balance from {glambie_start_year} — top-N ensemble (vs. GLaMBIE)"),
+        ("top_models_cumulative_gt_full_range.png", full_start_year,
+         f"Cumulative regional mass balance from {full_start_year} — top-N ensemble (full range)"),
+    ]
+
+    for fname, start_year, title in variants:
+        cum_df = compute_preferred_cumulative_gt(
+            years_all, regional_gt["median_gt"].values,
+            regional_gt["structural_std"].values, regional_gt["epistemic_std"].values,
+            alea, start_year=start_year,
+        )
+        _draw_top_models_cumulative_gt(cum_df, gb_combined, oggm_df, start_year, title, output_dir / fname)
 
 
 # ---------------------------------------------------------------------------

@@ -185,14 +185,22 @@ def make_cumulative(
     correlation within one region/model is — see CONTEXT.md). The four final
     scenarios are re-derived from the combined components.
 
+    cum_df's cum_structural/cum_epistemic/cum_total use the chosen operational
+    treatment (see src/cumulative_uncertainty.py module docstring, and
+    src/ensemble_uncertainty.py::plot_ensemble_cumulative_gt for the same
+    choice applied per-region): structural=independent, epistemic=persistent,
+    aleatoric=persistent — a deliberate choice, different from the
+    cum_std_total "audited default" still present in variants_df for
+    comparison.
+
     Returns:
         cum_df       — year, cum_gt, cum_epistemic, cum_structural, cum_total
-                       (existing decomposition columns used by plot_cumulative,
-                       now using the persistent/exact treatment instead of the
-                       naive independent-years quadrature)
+                       (decomposition columns used by plot_cumulative)
         variants_df  — year, cum_median_gt, cum_std_total,
                        cum_std_structural_independent, cum_std_all_correlated,
-                       cum_std_all_independent (new sensitivity table)
+                       cum_std_all_independent,
+                       cum_std_structural_indep_epi_alea_persist (= cum_total
+                       above) — full sensitivity table for comparison/audit
     """
     per_region_components = []
     cum_median = None
@@ -250,8 +258,8 @@ def make_cumulative(
         "year":           years_ref,
         "cum_gt":         cum_median,
         "cum_epistemic":  combined["cum_epi_persist"],
-        "cum_structural": combined["cum_struct_exact"],
-        "cum_total":      scenarios["cum_std_total"],
+        "cum_structural": combined["cum_struct_indep"],
+        "cum_total":      scenarios["cum_std_structural_indep_epi_alea_persist"],
     })
     variants_df = pd.DataFrame({
         "year":          years_ref,

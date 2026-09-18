@@ -143,9 +143,9 @@ def load_global_gt_uncertainty(
     Sum regional median + quadrature-summed std (total and per-component) →
     global series. Per-component columns (std_structural/std_epistemic/
     std_aleatoric) are kept, not just std_total, so downstream cumulative/
-    block-mean uncertainty can treat structural+epistemic as persistent across
-    years and aleatoric as independent, rather than lumping everything into
-    one independent-years quadrature sum — see plot_20yr_blocks().
+    block-mean uncertainty can treat structural as independent across years
+    and epistemic+aleatoric as persistent, rather than lumping everything
+    into one independent-years quadrature sum — see plot_20yr_blocks().
 
     Pass filename="ensemble_regional_gt_variable_area.csv" for the
     variable-area version (src/area_rates.py).
@@ -405,13 +405,15 @@ def plot_20yr_blocks(
              uncertainty (±1σ block-mean std) shaded per block.
       Bottom — bar chart of block means for direct comparison.
 
-    Block-mean uncertainty treatment: structural and epistemic are persistent
-    across years (a fixed trained model's bias doesn't average out — no
-    shrink), aleatoric is independent (shrinks as 1/sqrt(T)). Naively shrinking
-    std_total as a whole (the previous behaviour here) incorrectly shrinks the
-    structural/epistemic contribution too — see compute_blocks() in
-    plot_global_from_glaciers.py for the reference implementation of this same
-    split, and CONTEXT.md for the full reasoning.
+    Block-mean uncertainty treatment: structural is independent across years
+    (shrinks as 1/sqrt(T)), epistemic and aleatoric are persistent (a fixed
+    trained model's bias, and the shared-bias component of aleatoric noise
+    considered here, don't average out — no shrink). Naively shrinking
+    std_total as a whole (the original pre-fix behaviour here) incorrectly
+    shrinks all three components uniformly — see compute_blocks() in
+    plot_global_from_glaciers.py for the reference implementation of this
+    same "structural independent, epistemic+aleatoric persistent" split, and
+    src/cumulative_uncertainty.py for the full reasoning trail.
     """
     years = global_df.index.values
     med   = global_df["median_gt"].values
@@ -431,11 +433,11 @@ def plot_20yr_blocks(
             continue
         block_med = med[mask].mean()
         T = mask.sum()
-        # Structural + epistemic: persistent across years -> mean sigma, no shrink
-        block_struct_epi = np.sqrt(std_struct[mask] ** 2 + std_epi[mask] ** 2).mean()
-        # Aleatoric: independent across years -> shrinks with sqrt(T)
-        block_alea = np.sqrt((std_alea[mask] ** 2).mean() / T)
-        block_std  = np.sqrt(block_struct_epi ** 2 + block_alea ** 2)
+        # Structural: independent across years -> shrinks with sqrt(T)
+        block_struct = np.sqrt((std_struct[mask] ** 2).mean() / T)
+        # Epistemic + aleatoric: persistent across years -> mean sigma, no shrink
+        block_epi_alea = np.sqrt(std_epi[mask] ** 2 + std_alea[mask] ** 2).mean()
+        block_std  = np.sqrt(block_struct ** 2 + block_epi_alea ** 2)
         blocks.append({
             "label":  f"{y_start}–{y_end - 1}",
             "y0":     y_start,
