@@ -573,11 +573,16 @@ regional product.
 **Data needed** (all gitignored — rsync separately, not covered by `git pull`):
 - `validation_data/per_gla/reference_benchmark_mb_timeseries.csv` and
   `reference_benchmark_region_summary.csv` — same two files Step 2 (ensembling) needs.
-- `validation_data/per_gla/mass_balance.csv` — **additionally** required by
-  `test_wgms_glaciers.py` (it re-reads each test glacier's full observed record,
-  including the 2000–2020 years the timeseries CSV above deliberately excludes).
+- `validation_data/per_gla/reference_benchmark_glaciers.csv` and
+  `validation_data/per_gla/mass_balance.csv` — **additionally** required by
+  `test_wgms_glaciers.py` specifically (not needed for ensembling): the glaciers CSV
+  for glacier name/RGI-ID/region metadata, and mass_balance.csv because it re-reads
+  each test glacier's full observed record, including the 2000–2020 years the
+  timeseries CSV above deliberately excludes.
 - `validation_data/regional_wgms_duss/{CODE}.csv` (one per RGI region, WGMS-style
   abbreviation, e.g. `ISL.csv` for Iceland) — required by `test_regional_duss.py`.
+- `validation_data/per_gla/glacier.csv` — also required by `test_regional_duss.py`
+  (its glacier-count overlay joins mass_balance.csv to glacier.csv via `gtng_region`).
 
 ```bash
 # 1. GLaMBIE combined, 2020-2024, regional — two scatter plots (by region, by year)
