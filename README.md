@@ -408,23 +408,43 @@ done
 
 ### Step 2 — Ensemble uncertainty
 
-Selects the top 5 runs per pretrain-year group ranked by a composite of LOYO R² and
-GLaMBIE RMSE (equal weight by default), gated at LOYO R² ≥ 0.4 and LOGO R² ≥ 0.0.
-Pools the top 2 from each group into a single `combined/` ensemble whose structural
-uncertainty spans both nhidden and pretraining period. Console log saved at
+**Selection criteria (current — see `src/wgms_validation.py::select_top_n_runs` for the
+full logic):**
+- Hard gates, always applied: `loyo_r2 > 0` and `logo_r2 > 0` (strict), plus
+  `wgms_val_rmse <= 10` m w.e./yr (a loose sanity backstop, not a ranking input).
+- Ranking: WGMS reference/benchmark-glacier validation **correlation (r)**, descending —
+  deliberately *not* RMSE/MAE, since WGMS glaciological series are often themselves
+  bias-corrected against geodetic data (the same signal GLaMBIE/Hugonnet contribute at
+  finetune time), so an absolute-error metric risks rewarding a model for matching a bias
+  it may have partly learned from training data. Correlation is far less sensitive to that.
+- Regions with no usable WGMS reference/benchmark glaciers (tier 3 — currently r04, r09;
+  see `validation_data/per_gla/reference_benchmark_region_summary.csv`) fall back to a
+  LOYO/LOGO R² composite instead.
+- GLaMBIE is **never** used for selection at any tier — it's held out for testing only
+  (see Step 6 below).
+- Requires `validation_data/per_gla/reference_benchmark_mb_timeseries.csv` and
+  `reference_benchmark_region_summary.csv` to be present at runtime (relative to CWD) —
+  rsync these over separately, they're gitignored. If you see
+  `"region rXX has no usable WGMS reference/benchmark data (tier 3)"` printed for a
+  region that should have coverage, that path is wrong, not the region.
+
+Pools the top 2 from each pretrain-year group into a single `combined/` ensemble whose
+structural uncertainty spans both nhidden and pretraining period. Console log saved at
 `outputs/ensemble_pretrain_year/r{nn}/run.log`.
 
 ```bash
 for i in $(seq -w 1 19); do
   python src/ensemble_uncertainty_pretrain_year.py \
     --multirun_root /scratch/b5at/ranil.b5at/bayesnf_jax/multirun/r${i}_582*/ \
-    --output_dir outputs/ensemble_pretrain_year_r2loyologo/r${i} \
+    --output_dir outputs/ensemble_pretrain_year/r${i} \
     --top_n 5 \
-    --k_per_group 2 \
-    --loyo_r2_min 0.2 \
-    --logo_r2_min 0.1
+    --k_per_group 2
 done
 ```
+
+`--loyo_r2_min`/`--logo_r2_min`/`--wgms_rmse_max` all have sensible defaults (0.0 strict,
+0.0 strict, 10.0) and don't normally need overriding — pass them only to deviate from the
+defaults above.
 
 **Outputs per region** (`r{nn}/`):
 - `pt1940/`, `pt1960/`, `pt1980/`, `pt2000/` — per-pretrain-year top-5 ensembles
@@ -432,7 +452,18 @@ done
 
 Each subdirectory contains:
 `ensemble_glacier.csv`, `ensemble_regional_mwe.csv`, `ensemble_regional_gt.csv`,
-and plots (`ensemble_regional_gt.png`, `ensemble_cumulative_gt.png`).
+`top_runs_info.csv` (the selected runs, ranked, with `_composite`/`wgms_val_*`/`loyo_r2`/
+`logo_r2`/`glambie_rmse` columns for audit), and plots:
+- `ensemble_regional_gt.png`, `ensemble_regional_mwe.png`
+- `ensemble_cumulative_gt_vs_glambie.png` — cumulative Gt re-zeroed at GLaMBIE's first
+  year, for direct comparison against GLaMBIE's/OGGM's own cumulative curves
+- `ensemble_cumulative_gt_full_range.png` — cumulative Gt re-zeroed at the first
+  prediction year (full 1940s–2025 record)
+- `ensemble_cumulative_gt_sensitivity.png` — 4-panel comparison of correlation-assumption
+  scenarios (structural/epistemic/aleatoric independent vs. persistent); the two plots
+  above use structural=independent, epistemic+aleatoric=persistent, which is *not* the
+  same as the "recommended" panel in this sensitivity plot — see
+  `src/cumulative_uncertainty.py` module docstring for the full reasoning trail.
 
 ---
 
@@ -441,8 +472,15 @@ and plots (`ensemble_regional_gt.png`, `ensemble_cumulative_gt.png`).
 Validates all 5 groups against WGMS/Dussaillant (regional) and WGMS in-situ
 (per-glacier). Console log saved in each output directory as `run.log`.
 
+> **Note:** `validate_per_glacier_pretrain_year.py` here still uses the original
+> 6-glacier `validation_data/per_gla/ref_mb_timeseries.csv` as a quick, broad sanity
+> check. It has since been superseded for anything rigorous by the larger,
+> region-representative reference/benchmark glacier set with an explicit
+> validation/testing split (see **Step 6 — Testing** below) — that testing-split
+> comparison, not this one, is what now actually held out data from selection.
+
 ```bash
-for group in pt1940 pt1960 pt1980 pt2000 combined; do   python src/validate_regional_pretrain_year.py     --config conf/config_validate_regional.yaml     --pretrain_year_group ${group}     --ensemble_base_dir outputs/ensemble_pretrain_year_r2loyologo     --output_dir outputs/validation_regional_r2loyologo_${group};    python src/validate_per_glacier_pretrain_year.py     --pretrain_year_group ${group}     --ensemble_base_dir outputs/ensemble_pretrain_year_r2loyologo     --output_dir outputs/validation_pergla_r2loyologo_${group}; done
+for group in pt1940 pt1960 pt1980 pt2000 combined; do   python src/validate_regional_pretrain_year.py     --config conf/config_validate_regional.yaml     --pretrain_year_group ${group}     --ensemble_base_dir outputs/ensemble_pretrain_year     --output_dir outputs/validation_regional_${group};    python src/validate_per_glacier_pretrain_year.py     --pretrain_year_group ${group}     --ensemble_base_dir outputs/ensemble_pretrain_year     --output_dir outputs/validation_pergla_${group}; done
 ```
 
 **What to look at:**
@@ -462,10 +500,10 @@ systematically better or worse across regions.
 ```bash
 for group in pt1940 pt1960 pt1980 pt2000 combined; do
   python src/plot_global_from_glaciers.py \
-    --ensemble_root outputs/ensemble_pretrain_year_r2loyologo \
+    --ensemble_root outputs/ensemble_pretrain_year \
     --data_root data_for_model \
     --group ${group} \
-    --output_dir outputs/global_pretrain_year_r2loyologo/${group}
+    --output_dir outputs/global_pretrain_year/${group}
 done
 ```
 
@@ -480,7 +518,11 @@ done
 `main_explain_pretrain_year.py` mirrors `main_explain_te.py` exactly: it reads
 `top_runs_info.csv` from `outputs/ensemble_pretrain_year/r{nn}/{group}/` to
 locate the original multirun pkl files, then runs Integrated Gradients across
-the ensemble and writes attribution CSVs + plots.
+the ensemble and writes attribution CSVs + plots. Since it reads `run_dirs`
+straight from `top_runs_info.csv`, it automatically picks up whichever models
+the current WGMS-correlation selection criteria chose — no separate re-selection
+happens here. Leave `explain.weighting: equal` (the default) unless you have a
+specific reason to reweight the already-selected 5 models unevenly.
 
 Run per region × group. The `combined` group is the primary target; the per-year
 groups let you check whether feature importance shifts with the pretraining window.
@@ -489,11 +531,20 @@ groups let you check whether feature importance shifts with the pretraining wind
 for i in $(seq -w 1 19); do
   for group in pt1940 pt1960 pt1980 pt2000 combined; do
     python main_explain_pretrain_year.py \
-      explain.ensemble_dir=outputs/ensemble_pretrain_year_r2loyologo/r${i} \
+      explain.ensemble_dir=outputs/ensemble_pretrain_year/r${i} \
       explain.pretrain_year_group=${group} \
       explain.explain_year_max=2025
   done
 done
+```
+
+**Alternative:** `main_explain.py` (the more general script from Step 5 near the top
+of this README) now also has an `explain.selection_csv=...` mode that does the same
+thing given any `top_runs_info.csv` / `top_models_info.csv` directly, without needing
+the `ensemble_dir` + `pretrain_year_group` pair — e.g. for an `ensemble_ep_alea.py`
+output instead of a pretrain-year-split one:
+```bash
+python main_explain.py explain.selection_csv=outputs/ensemble_pretrain_year/r06/combined/top_runs_info.csv
 ```
 
 Outputs land in `outputs/explain_pretrain_year/r{nn}/{group}/`:
@@ -508,3 +559,61 @@ Outputs land in `outputs/explain_pretrain_year/r{nn}/{group}/`:
 - `importance_bar_*_masked.png` — same but with year/lat/lon removed so climate signal is visible
 - Compare `temporal_importance_*.png` across `pt1940` vs `pt2000` — does early vs late pretraining shift which features matter most?
 - `beeswarm_*_masked.png` — direction of each feature's effect on predicted mass balance
+
+---
+
+### Step 6 — Testing
+
+Three scripts, all run against the `combined/` ensemble only. Unlike Step 3
+(**Validation**, above — the WGMS *validation*-split glaciers, used only to pick the
+ensemble), these use data that was never touched during selection at all: GLaMBIE
+post-2020, the WGMS *testing*-split glaciers, and the independent Dussaillant
+regional product.
+
+**Data needed** (all gitignored — rsync separately, not covered by `git pull`):
+- `validation_data/per_gla/reference_benchmark_mb_timeseries.csv` and
+  `reference_benchmark_region_summary.csv` — same two files Step 2 (ensembling) needs.
+- `validation_data/per_gla/mass_balance.csv` — **additionally** required by
+  `test_wgms_glaciers.py` (it re-reads each test glacier's full observed record,
+  including the 2000–2020 years the timeseries CSV above deliberately excludes).
+- `validation_data/regional_wgms_duss/{CODE}.csv` (one per RGI region, WGMS-style
+  abbreviation, e.g. `ISL.csv` for Iceland) — required by `test_regional_duss.py`.
+
+```bash
+# 1. GLaMBIE combined, 2020-2024, regional — two scatter plots (by region, by year)
+python src/test_glambie_regional.py \
+  --ensemble_base outputs/ensemble_pretrain_year \
+  --output_dir outputs/testing_glambie_regional
+
+# 2. WGMS testing-split glaciers — full-record time series + pre-2000/post-2020 metrics
+python src/test_wgms_glaciers.py \
+  --ensemble_base outputs/ensemble_pretrain_year \
+  --output_dir outputs/testing_wgms_glaciers
+
+# 3. Dussaillant regional product, with glacier-count-measured overlay
+python src/test_regional_duss.py \
+  --measured_dir validation_data/regional_wgms_duss \
+  --ensemble_base outputs/ensemble_pretrain_year \
+  --per_gla_dir validation_data/per_gla \
+  --output_dir outputs/testing_regional_duss
+```
+
+All three report the same four metrics — r, RMSE, MAE, and coverage (percentage of
+observed values falling within the model's own ±2σ band) — computed only on each
+script's held-out years (2020-2024 for GLaMBIE; pre-2000/post-2020 for WGMS glaciers;
+full record for Dussaillant, which was never split).
+
+**What to look at:**
+- `outputs/testing_glambie_regional/glambie_scatter_by_region.png` — are specific
+  regions consistently off?
+- `outputs/testing_glambie_regional/glambie_scatter_by_year.png` — is a specific year
+  consistently off across regions?
+- `outputs/testing_wgms_glaciers/wgms_test_metrics_overall.csv` and
+  `wgms_test_metrics_per_glacier.csv` — pooled and per-glacier skill
+- `outputs/testing_wgms_glaciers/timeseries_all_test_glaciers.png` — full records for
+  every held-out test glacier at once (grey band = the 2000-2020 years excluded from
+  the metrics, shown for visual context only)
+- `outputs/testing_regional_duss/regional_duss_metrics.csv` — per-region skill against
+  the independent Dussaillant product
+- `outputs/testing_regional_duss/timeseries_r{nn}_{CODE}.png` — model vs. Dussaillant,
+  with the number of glaciers with in-situ measurements that year as a bar overlay
