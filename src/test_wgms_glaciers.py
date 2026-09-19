@@ -38,14 +38,26 @@ Assumptions (see conversation trail — flag if any of these are wrong):
     glaciers went entirely to validation — see reference_benchmark_region_summary.csv)
     simply contribute nothing here; that's expected, not an error.
 
+Also produces per-glacier metric-vs-geometry scatter plots (accuracy metrics —
+r/RMSE/MAE/coverage — and separately uncertainty metrics — coverage/median 2σ
+interval width — each vs. Area/Aspect/Slope/median elevation, coloured by RGI
+region), using static glacier geometry from data_for_model/r{NN}/main_features_r{NN}.csv
+(confirmed constant per glacier across years, so the first row is used).
+Debris cover and marine- vs. land-terminating are deliberately not included yet
+(data not available at time of writing) — add another entry to GEOMETRY_COLS
+and a matching join once that data exists; everything else is unchanged.
+
 Outputs (to output_dir):
   wgms_test_joined.csv          full per-glacier time series (all years) with
                                  model predictions attached where available
-  wgms_test_metrics_per_glacier.csv   r, RMSE, MAE, coverage_2sig_pct per glacier
-                                       (testing-window years only)
+  wgms_test_metrics_per_glacier.csv   r, RMSE, MAE, coverage_2sig_pct, median
+                                       interval width per glacier (testing-window
+                                       years only), plus Area/Aspect/Slope/Zmed
   wgms_test_metrics_overall.csv       one row: pooled metrics across all test glaciers
   timeseries_all_test_glaciers.png    multi-panel: every test glacier's full record
   individual/timeseries_{slug}.png    one file per test glacier
+  metric_vs_{area,aspect,slope,elevation}.png       r/RMSE/MAE/coverage vs. geometry
+  uncertainty_vs_{area,aspect,slope,elevation}.png  coverage/interval-width vs. geometry
 
 Usage:
     python src/test_wgms_glaciers.py \\
@@ -67,7 +79,27 @@ import pandas as pd
 GLACIERS_CSV     = Path("validation_data/per_gla/reference_benchmark_glaciers.csv")
 TIMESERIES_CSV   = Path("validation_data/per_gla/reference_benchmark_mb_timeseries.csv")
 MASS_BALANCE_CSV = Path("validation_data/per_gla/mass_balance.csv")
+DATA_ROOT        = Path("data_for_model")
 TRAIN_YEAR_MIN, TRAIN_YEAR_MAX = 2000, 2020
+
+# x_col -> (axis label, use_log_x). Static per-glacier geometry from
+# main_features_r{NN}.csv. Debris cover / marine-vs-land-terminating are
+# deferred pending data availability — add another entry here (and to the
+# usecols list in load_glacier_attributes) once that data exists.
+GEOMETRY_COLS = {
+    "Area":   ("Area (km$^2$)", True),
+    "Aspect": ("Aspect (deg)", False),
+    "Slope":  ("Slope (deg)", False),
+    "Zmed":   ("Median elevation (m)", False),
+}
+ACCURACY_Y = [
+    ("corr", "r"), ("rmse", "RMSE (m w.e./yr)"), ("mae", "MAE (m w.e./yr)"),
+    ("coverage_2sig_pct", "Coverage 2σ (%)"),
+]
+UNCERTAINTY_Y = [
+    ("coverage_2sig_pct", "Coverage 2σ (%)"),
+    ("median_interval_width", "Median 2σ interval width (m w.e./yr)"),
+]
 
 
 def load_test_glaciers() -> pd.DataFrame:
@@ -167,11 +199,17 @@ def build(ensemble_base: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     return _attach_model(full_obs), _attach_model(window_obs)
 
 
+def _median_interval_width(std: np.ndarray) -> float:
+    """Median full width of the model's own ±2σ band (4*std) across points."""
+    return float(np.median(4 * std)) if len(std) else float("nan")
+
+
 def compute_metrics(window_joined: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     rows = []
     for glacier_id, grp in window_joined.groupby("glacier_id"):
         valid = grp.dropna(subset=["obs_mwe", "model_mean_mwe", "model_std_total"])
         m = _metrics(valid["obs_mwe"].values, valid["model_mean_mwe"].values, valid["model_std_total"].values)
+        m["median_interval_width"] = _median_interval_width(valid["model_std_total"].values)
         rows.append({
             "glacier_id": glacier_id,
             "name": grp["input_name"].iloc[0],
@@ -183,11 +221,83 @@ def compute_metrics(window_joined: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
     pooled = window_joined.dropna(subset=["obs_mwe", "model_mean_mwe", "model_std_total"])
     overall = _metrics(pooled["obs_mwe"].values, pooled["model_mean_mwe"].values, pooled["model_std_total"].values)
+    overall["median_interval_width"] = _median_interval_width(pooled["model_std_total"].values)
     overall["n_glaciers"] = pooled["glacier_id"].nunique()
     overall["n_glaciers_no_model_data"] = (
         window_joined["glacier_id"].nunique() - pooled["glacier_id"].nunique()
     )
     return per_glacier, overall
+
+
+def load_glacier_attributes(per_glacier: pd.DataFrame) -> pd.DataFrame:
+    """Attach static per-glacier geometry (Area, Aspect, Slope, Zmed) from
+    data_for_model/r{NN}/main_features_r{NN}.csv. Missing regions/columns are
+    left as NaN (with a warning) rather than raising, so plots still cover
+    whatever attributes are available."""
+    cols = list(GEOMETRY_COLS.keys())
+    pieces = []
+    for region_num, grp in per_glacier.groupby("rgi_region"):
+        path = DATA_ROOT / f"r{region_num:02d}" / f"main_features_r{region_num:02d}.csv"
+        if not path.exists():
+            print(f"  WARNING: {path} not found — geometry attributes skipped for r{region_num:02d}")
+            grp = grp.copy()
+            for c in cols:
+                grp[c] = np.nan
+            pieces.append(grp)
+            continue
+        feats = pd.read_csv(path, usecols=["rgi_id"] + cols).drop_duplicates(subset="rgi_id")
+        pieces.append(grp.merge(feats, on="rgi_id", how="left"))
+    return pd.concat(pieces, ignore_index=True) if pieces else per_glacier
+
+
+def plot_metric_vs_attribute(
+    df: pd.DataFrame, x_col: str, x_label: str, use_log_x: bool,
+    y_specs: list[tuple[str, str]], output_path: Path, suptitle_prefix: str,
+) -> None:
+    """One subplot per (y_col, y_label) in y_specs, x=x_col, coloured by rgi_region."""
+    valid = df.dropna(subset=[x_col])
+    if valid.empty:
+        print(f"  SKIP {output_path.name} — no glaciers have a valid '{x_col}' value")
+        return
+
+    regions = sorted(valid["rgi_region"].unique())
+    cmap = matplotlib.colormaps["tab20"].resampled(max(len(regions), 1))
+    color_map = {r: cmap(i) for i, r in enumerate(regions)}
+
+    ncols = len(y_specs)
+    fig, axes = plt.subplots(1, ncols, figsize=(5.2 * ncols, 4.6))
+    axes = np.atleast_1d(axes)
+    for ax, (y_col, y_label) in zip(axes, y_specs):
+        sub = valid.dropna(subset=[y_col])
+        for r in regions:
+            rsub = sub[sub["rgi_region"] == r]
+            if rsub.empty:
+                continue
+            ax.scatter(rsub[x_col], rsub[y_col], color=color_map[r], s=45,
+                       edgecolor="k", linewidth=0.3, alpha=0.85, label=f"r{r:02d}")
+        if use_log_x:
+            ax.set_xscale("log")
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
+    axes[0].legend(fontsize=6, ncol=2, title="Region", loc="best")
+    fig.suptitle(f"{suptitle_prefix} vs. {x_label}  (testing-window years only)", fontsize=10)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved {output_path.name}")
+
+
+def plot_all_geometry(per_glacier_ext: pd.DataFrame, output_dir: Path) -> None:
+    for x_col, (x_label, use_log) in GEOMETRY_COLS.items():
+        suffix = x_col.lower()
+        plot_metric_vs_attribute(
+            per_glacier_ext, x_col, x_label, use_log, ACCURACY_Y,
+            output_dir / f"metric_vs_{suffix}.png", "Per-glacier skill",
+        )
+        plot_metric_vs_attribute(
+            per_glacier_ext, x_col, x_label, use_log, UNCERTAINTY_Y,
+            output_dir / f"uncertainty_vs_{suffix}.png", "Per-glacier uncertainty",
+        )
 
 
 def _slug(name: str) -> str:
@@ -272,15 +382,18 @@ def run(ensemble_base: Path, output_dir: Path) -> None:
           f"{len(full_joined)} total obs rows)")
 
     per_glacier, overall = compute_metrics(window_joined)
+    per_glacier = load_glacier_attributes(per_glacier)
     per_glacier.to_csv(output_dir / "wgms_test_metrics_per_glacier.csv", index=False, float_format="%.4f")
     pd.DataFrame([overall]).to_csv(output_dir / "wgms_test_metrics_overall.csv", index=False, float_format="%.4f")
     print(f"  Saved wgms_test_metrics_per_glacier.csv and wgms_test_metrics_overall.csv")
     print(f"  Overall (pooled, testing years only): n_glaciers={overall['n_glaciers']} "
           f"(+{overall['n_glaciers_no_model_data']} with no model data)  "
           f"n_points={overall['n_years']}  r={overall['corr']:.3f}  RMSE={overall['rmse']:.3f}  "
-          f"MAE={overall['mae']:.3f}  Coverage(2σ)={overall['coverage_2sig_pct']:.0f}%")
+          f"MAE={overall['mae']:.3f}  Coverage(2σ)={overall['coverage_2sig_pct']:.0f}%  "
+          f"MedianIntervalWidth={overall['median_interval_width']:.3f}")
 
     plot_all(full_joined, per_glacier, output_dir)
+    plot_all_geometry(per_glacier, output_dir)
     print(f"\nDone. Outputs written to {output_dir}/")
 
 

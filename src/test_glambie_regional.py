@@ -27,12 +27,15 @@ Assumptions (see conversation trail — flag if any of these are wrong):
     skipped with a printed note, not treated as an error — GLaMBIE combined
     is not available for every region/year (e.g. no 2023/2024 rows for some
     regions in the current data).
-  - "Coverage (2 sigma)" = fraction of GLaMBIE combined values that fall
-    within the model's own [median_mwe - 2*std_total, median_mwe + 2*std_total]
-    band — a one-sided containment check on the model's band, not a
-    band-overlap check against GLaMBIE's own error (the definition given
-    for the per-glacier WGMS testing in src/test_wgms_glaciers.py; applied
-    the same way here for consistency).
+  - "Coverage (2 sigma)" = whether the model's ±2σ band
+    [median_mwe - 2*std_total, median_mwe + 2*std_total] overlaps GLaMBIE's own
+    ±2σ band [glambie_mwe - 2*glambie_mwe_err, glambie_mwe + 2*glambie_mwe_err]
+    — a band-overlap check (same definition as src/test_regional_duss.py),
+    deliberately different from the one-sided containment check used for the
+    per-glacier WGMS testing in src/test_wgms_glaciers.py (WGMS obs there have
+    no per-point uncertainty column to build a second band from). Assumes
+    glambie_mwe_err is 1σ, consistent with every other error column in this
+    codebase.
   - r/RMSE/MAE/coverage are reported once, pooled across all region-years
     (not asked for explicitly here, but computed and annotated the same way
     every other comparison plot in this codebase reports them — flag if you
@@ -59,7 +62,6 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 import numpy as np
 import pandas as pd
 
@@ -124,9 +126,13 @@ def compute_metrics(pairs: pd.DataFrame) -> dict:
     pred = pairs["median_mwe"].values
     obs  = pairs["glambie_mwe"].values
     std  = pairs["std_total"].values
+    err  = pairs["glambie_mwe_err"].values
     diff = pred - obs
     n = len(diff)
-    within = np.sum((obs >= pred - 2 * std) & (obs <= pred + 2 * std))
+    # Band-overlap coverage: model's own ±2σ band vs. GLaMBIE's own ±2σ band.
+    m_lo, m_hi = pred - 2 * std, pred + 2 * std
+    o_lo, o_hi = obs - 2 * err, obs + 2 * err
+    within = np.sum((m_lo <= o_hi) & (o_lo <= m_hi))
     return {
         "n":              n,
         "corr":           float(np.corrcoef(pred, obs)[0, 1]) if n > 2 else float("nan"),
@@ -162,10 +168,11 @@ def plot_by_region(pairs: pd.DataFrame, metrics: dict, output_path: Path) -> Non
     _scatter_common(ax, pairs, metrics)
 
     regions = sorted(pairs["region"].unique())
-    cmap = cm.get_cmap("tab20", max(len(regions), 1))
+    cmap = matplotlib.colormaps["tab20"].resampled(max(len(regions), 1))
     for i, r in enumerate(regions):
         sub = pairs[pairs["region"] == r]
-        ax.errorbar(sub["glambie_mwe"], sub["median_mwe"], yerr=2 * sub["std_total"],
+        ax.errorbar(sub["glambie_mwe"], sub["median_mwe"],
+                    xerr=2 * sub["glambie_mwe_err"], yerr=2 * sub["std_total"],
                     fmt="o", color=cmap(i), ms=6, elinewidth=0.8, capsize=2.0,
                     alpha=0.85, label=r, zorder=3)
     ax.legend(fontsize=6, ncol=2, loc="upper left", title="Region")
@@ -179,7 +186,8 @@ def plot_by_year(pairs: pd.DataFrame, metrics: dict, output_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(7, 7))
     _scatter_common(ax, pairs, metrics)
 
-    ax.errorbar(pairs["glambie_mwe"], pairs["median_mwe"], yerr=2 * pairs["std_total"],
+    ax.errorbar(pairs["glambie_mwe"], pairs["median_mwe"],
+                xerr=2 * pairs["glambie_mwe_err"], yerr=2 * pairs["std_total"],
                 fmt="none", ecolor="gray", elinewidth=0.7, capsize=2.0, alpha=0.5, zorder=2)
     sc = ax.scatter(pairs["glambie_mwe"], pairs["median_mwe"], c=pairs["year"],
                     cmap="viridis", s=40, zorder=3, edgecolor="k", linewidth=0.3)
