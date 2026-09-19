@@ -21,30 +21,34 @@ years rather than averaging out. Treating them as independent understates the
 true cumulative uncertainty, sometimes by several-fold over a multi-decade record
 (empirically ~6-7x for one 86-year regional test case — see CONTEXT.md).
 
-compute_cumulative_gt_variants() computes five scenarios so the difference is
+compute_cumulative_gt_variants() computes four scenarios so the difference is
 visible and auditable rather than silently assumed:
 
   cum_std_total                   (audited default, shown in the sensitivity
                                    comparison) structural=exact persistent,
                                    epistemic=persistent (approx.), aleatoric=independent
-  cum_std_structural_independent  structural=independent (naive), epistemic=persistent,
-                                   aleatoric=independent
+  cum_std_structural_independent  (== the chosen treatment for the operational
+                                   ensemble_cumulative_gt_*.png outputs)
+                                   structural=independent (naive), epistemic=persistent,
+                                   aleatoric=independent. Deliberately different from
+                                   cum_std_total above: structural persistence is
+                                   real (a model's regional bias in one year is not
+                                   independent of its bias in another — same fixed
+                                   weights generate both), so this is a known,
+                                   accepted simplification/underestimate, chosen for
+                                   operational robustness (doesn't need the K models'
+                                   source run directories to still exist on scratch)
+                                   — not because independence is believed correct.
+                                   See compute_preferred_cumulative_gt() below, which
+                                   recomputes this same formula over an arbitrary
+                                   re-zeroed year window (e.g. from the GLaMBIE start
+                                   year) rather than only the single full-record
+                                   window this function uses.
   cum_std_all_correlated          structural=exact persistent, epistemic=persistent,
                                    aleatoric=persistent  (upper bound)
   cum_std_all_independent         structural=independent, epistemic=independent,
                                    aleatoric=independent (equivalent to the old,
                                    pre-fix formula — kept for direct comparison)
-  cum_std_structural_indep_epi_alea_persist
-                                   (chosen treatment for the operational
-                                   ensemble_cumulative_gt_*.png outputs — a
-                                   deliberate, different choice from the
-                                   audited default above) structural=independent,
-                                   epistemic=persistent, aleatoric=persistent.
-                                   See compute_preferred_cumulative_gt() below,
-                                   which recomputes this same formula over an
-                                   arbitrary re-zeroed year window (e.g. from
-                                   the GLaMBIE start year) rather than only the
-                                   single full-record window this function uses.
 
 "structural=exact persistent" is computed from the K ensemble members' own
 regional Gt trajectories (each read from run_dir/regional_annual_gt.csv), not
@@ -255,17 +259,11 @@ def combine_cumulative_scenarios(comp: dict) -> dict:
     cum_std_all_independent = np.sqrt(
         comp["cum_struct_indep"] ** 2 + comp["cum_epi_indep"] ** 2 + comp["cum_alea_indep"] ** 2
     )
-    # Chosen treatment for the operational ensemble_cumulative_gt_*.png plots
-    # (see module docstring) — structural independent, epistemic+aleatoric persistent.
-    cum_std_structural_indep_epi_alea_persist = np.sqrt(
-        comp["cum_struct_indep"] ** 2 + comp["cum_epi_persist"] ** 2 + comp["cum_alea_persist"] ** 2
-    )
     return {
         "cum_std_total":                  cum_std_total,
         "cum_std_structural_independent": cum_std_structural_independent,
         "cum_std_all_correlated":         cum_std_all_correlated,
         "cum_std_all_independent":        cum_std_all_independent,
-        "cum_std_structural_indep_epi_alea_persist": cum_std_structural_indep_epi_alea_persist,
     }
 
 
@@ -280,10 +278,13 @@ def compute_preferred_cumulative_gt(
     """
     Cumulative Gt using the chosen treatment for the operational
     ensemble_cumulative_gt_*.png outputs: structural=independent,
-    epistemic=persistent, aleatoric=persistent (see module docstring — this
-    is a deliberate choice, different from cum_std_total in
-    compute_cumulative_gt_variants(), which is kept as the audited default
-    shown in the sensitivity comparison).
+    epistemic=persistent, aleatoric=independent — i.e. the same formula as
+    cum_std_structural_independent in compute_cumulative_gt_variants(), just
+    recomputed over an arbitrary (optionally re-zeroed) year window instead
+    of only the single full-record window that function uses. See that
+    function's docstring for why structural=independent is a known,
+    accepted simplification rather than a belief that it's correct — the
+    audited default (cum_std_total) uses exact persistence for it instead.
 
     Cheap and self-contained: unlike compute_cumulative_gt_variants(), this
     never needs each ensemble member's own run_dir/regional_annual_gt.csv,
@@ -316,8 +317,8 @@ def compute_preferred_cumulative_gt(
     cum_median       = np.cumsum(median_gt)
     cum_struct_indep = np.sqrt(np.cumsum(std_structural ** 2))
     cum_epi_persist  = np.cumsum(std_epistemic)
-    cum_alea_persist = np.cumsum(std_aleatoric)
-    cum_std = np.sqrt(cum_struct_indep ** 2 + cum_epi_persist ** 2 + cum_alea_persist ** 2)
+    cum_alea_indep   = np.sqrt(np.cumsum(std_aleatoric ** 2))
+    cum_std = np.sqrt(cum_struct_indep ** 2 + cum_epi_persist ** 2 + cum_alea_indep ** 2)
 
     return pd.DataFrame({
         "year": years,

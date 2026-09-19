@@ -140,12 +140,12 @@ def build_global(
 def compute_blocks(global_df: pd.DataFrame, width: int = BLOCK_WIDTH) -> list[dict]:
     """
     Non-overlapping block averages. Uncertainty treatment per block — the
-    same "structural independent, epistemic+aleatoric persistent" choice as
+    same "structural+aleatoric independent, epistemic persistent" choice as
     src/cumulative_uncertainty.py::compute_preferred_cumulative_gt (see that
     module's docstring for the full reasoning trail):
       - structural: independent across years → σ / √T   (mean variance / T)
       - epistemic:  persistent across years  → mean(σ)   (does not shrink)
-      - aleatoric:  persistent across years  → mean(σ)   (does not shrink)
+      - aleatoric:  independent across years → σ / √T   (mean variance / T)
     """
     blocks = []
     y = HIST_MIN
@@ -160,11 +160,11 @@ def compute_blocks(global_df: pd.DataFrame, width: int = BLOCK_WIDTH) -> list[di
             "y0":         y,
             "y1":         y + width,
             "mean_gt":    sub["median_gt"].mean(),
-            # Structural: independent → variance averages, then /T again for mean
+            # Structural & aleatoric: independent → variance averages, then /T again for mean
             "sigma_struct": np.sqrt(sub["var_struct"].mean() / T),
-            # Epistemic & aleatoric: persistent → just take mean σ
+            "sigma_alea":   np.sqrt(sub["var_alea"].mean() / T),
+            # Epistemic: persistent → just take mean σ
             "sigma_epist":  sub["std_epist"].mean(),
-            "sigma_alea":   sub["std_alea"].mean(),
         }
         block["sigma_total"] = np.sqrt(
             block["sigma_alea"]   ** 2

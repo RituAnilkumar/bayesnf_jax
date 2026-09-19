@@ -515,10 +515,10 @@ def plot_ensemble_cumulative_gt(
 ) -> None:
     """
     Two cumulative-Gt plots, both using the chosen operational treatment —
-    structural=independent, epistemic=persistent, aleatoric=persistent (see
+    structural=independent, epistemic=persistent, aleatoric=independent (see
     src/cumulative_uncertainty.py::compute_preferred_cumulative_gt — a
-    deliberate choice, different from the cum_std_total "audited default"
-    shown in ensemble_cumulative_gt_sensitivity.png):
+    deliberate simplification for structural, different from the
+    cum_std_total "audited default" shown in ensemble_cumulative_gt_sensitivity.png):
 
       ensemble_cumulative_gt_vs_glambie.png — cumulative sum re-zeroed at the
           first year GLaMBIE combined data is available (or the first

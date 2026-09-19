@@ -479,10 +479,10 @@ def plot_top_models_cumulative_gt(
     """
     Two cumulative-Gt plots with epistemic, structural, and total uncertainty
     bands, both using the chosen operational treatment — structural=
-    independent, epistemic=persistent, aleatoric=persistent (see
+    independent, epistemic=persistent, aleatoric=independent (see
     src/cumulative_uncertainty.py::compute_preferred_cumulative_gt — a
-    deliberate choice, different from the cum_std_total "audited default"
-    shown in top_models_cumulative_gt_sensitivity.png):
+    deliberate simplification for structural, different from the
+    cum_std_total "audited default" shown in top_models_cumulative_gt_sensitivity.png):
 
       top_models_cumulative_gt_vs_glambie.png — cumulative sum re-zeroed at
           the first year GLaMBIE combined data is available (or the first

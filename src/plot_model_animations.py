@@ -166,14 +166,15 @@ def anim_cumulative(
                    the global cumulative line.
     year_txt_loc : axes-fraction (x, y) for the year counter label.
 
-    Cumulative uncertainty treatment: structural is treated as independent
-    across years (quadrature sum, shrinks), epistemic and aleatoric as
+    Cumulative uncertainty treatment: structural and aleatoric are treated as
+    independent across years (quadrature sum, shrinks), epistemic as
     persistent (linear sum, no shrink). Regions are combined via quadrature
     (valid: each region is its own independently-trained ensemble). This is
-    the same "structural independent, epistemic+aleatoric persistent" choice
+    the same "structural+aleatoric independent, epistemic persistent" choice
     used in compute_blocks() in plot_global_from_glaciers.py,
     plot_acceleration_analysis.py, validate_hma.py::make_cumulative, and
-    src/cumulative_uncertainty.py::compute_preferred_cumulative_gt — see that
+    src/cumulative_uncertainty.py::compute_preferred_cumulative_gt (identical
+    to that module's cum_std_structural_independent scenario) — see that
     module's docstring for the full reasoning trail.
     """
     years   = list(range(start_year, 2026))
@@ -186,8 +187,8 @@ def anim_cumulative(
         cum[r] = s.cumsum().values
     global_cum = np.sum(list(cum.values()), axis=0)
 
-    # Cumulative global ±2σ uncertainty: structural independent (shrink) per
-    # region, epistemic+aleatoric persistent (no shrink) per region, then
+    # Cumulative global ±2σ uncertainty: structural+aleatoric independent
+    # (shrink) per region, epistemic persistent (no shrink) per region, then
     # quadrature-combine across regions (regions are independent).
     global_std_cum = None
     if gt_std:
@@ -198,8 +199,8 @@ def anim_cumulative(
             sd = std_df.reindex(years, fill_value=0.0)
             struct_indep_var = np.cumsum(sd["std_structural"].values ** 2)
             epi_persist      = np.cumsum(sd["std_epistemic"].values)
-            alea_persist     = np.cumsum(sd["std_aleatoric"].values)
-            cum_var += struct_indep_var + epi_persist ** 2 + alea_persist ** 2
+            alea_indep_var   = np.cumsum(sd["std_aleatoric"].values ** 2)
+            cum_var += struct_indep_var + epi_persist ** 2 + alea_indep_var
         global_std_cum = np.sqrt(cum_var)
 
     # Compute zero-aligned axis limits
