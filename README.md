@@ -644,40 +644,56 @@ Years used for the metrics:
 
 ---
 
-### Step 7 — Final refit on held-out data
+### Step 7 — Refit on held-out data (validation-only check, then final)
 
-Once testing (Step 6) is done and reported, the selected `combined/` members are
-re-finetuned on the data that was held out, to produce the final models. **Selection
-is not redone** — `src/refit_final.py` reads `combined/top_runs_info.csv`, reproduces
-each member's exact sweep config from its `.hydra/config.yaml`, keeps its own
-`pretrained_params.pkl` (Stage 1 unchanged), and re-runs Stage 2 + predict with
+Once testing (Step 6) is reported, the selected `combined/` members are refit in two
+steps. **Selection is never redone.** `src/refit_final.py` reads `combined/top_runs_info.csv`,
+reproduces each member's exact sweep config from its `.hydra/config.yaml`, keeps its own
+`pretrained_params.pkl` (Stage 1 is unchanged), and re-runs Stage 2 + predict with
 `model.final_refit=true`. It then combines the refit members with the same equal weights.
 
-What `final_refit=true` adds to the Stage 2 loss (`src/model/finetune.py`, `src/refit_data.py`):
-
-| Term | Data | Reliability filter |
+| | `--mode validation` | `--mode full` |
 |---|---|---|
-| `L_glambie` | GLaMBIE 2020–2024 (previously test) | — (same treatment as 2000–2019) |
-| `L_duss` (`duss_weight`) | Dussaillant regional annual MB | years < 2000 **and** ≥ `duss_min_insitu` (default 1) WGMS glaciers measured in situ in that region-year |
-| `L_wgms` (`wgms_weight`) | WGMS glaciological annual MB, per glacier | WGMS **reference** list only (not benchmark / former reference); both validation and testing split |
+| WGMS reference glaciers (glaciological, per glacier) | validation split only | validation + testing split |
+| GLaMBIE 2020–2024 | held out (still test) | trained on |
+| Dussaillant (regional only, years < 2000, ≥1 WGMS in-situ glacier that region-year) | not used (still test) | trained on |
+| Purpose | honest test score for the refit procedure | final global product |
 
-- Dussaillant 2000–2020 is tied to the Hugonnet geodetic signal, and 2020+ is covered by
-  GLaMBIE (whose combined estimate already includes glaciological input), so neither is used.
-- `L_duss` uses the same area-weighted regional form as `L_glambie`; `L_wgms` is a per
-  (glacier, year) inverse-variance MSE / NLL. Missing WGMS `annual_balance_unc` (~76% of
-  rows) is filled with `wgms_default_unc` (0.3 m w.e./yr).
-- `wgms_exclude_window=true` drops glaciological years 2000–2020 if their overlap with the
-  Hugonnet period mean is a concern.
+1. **Validation-only refit.** This adds only data already used for selection, so the
+   WGMS testing-split glaciers, GLaMBIE 2020+ and Dussaillant stay independent. Re-run
+   the Step 6 scripts with `--ensemble_base outputs/ensemble_refit_val` and compare with
+   the original ensemble. This checks that adding glaciological data does not hurt.
+2. **Full refit** for the global results. After this, GLaMBIE 2020+, all reference glaciers
+   and pre-2000 Dussaillant are in-sample, so quote performance from step 1 (and the
+   original ensemble), framed as a conservative estimate for the final product.
+
+Details (`src/model/finetune.py`, `src/refit_data.py`):
+- Dussaillant enters only as a regional annual series (`L_duss`, same area-weighted form as
+  `L_glambie`), never per glacier. 2000–2020 is tied to the Hugonnet signal and 2020+ is
+  covered by GLaMBIE, so neither is used.
+- `L_wgms` is a per (glacier, year) inverse-variance MSE / NLL over WGMS **reference**-list
+  glaciers only (not benchmark / former reference). Missing `annual_balance_unc` (~76% of
+  rows) is filled with `wgms_default_unc` (0.3 m w.e./yr). `wgms_exclude_window=true`
+  drops glaciological years 2000–2020.
 - Each refit run writes `refit_obs_used.csv`, listing every non-Hugonnet observation that entered the loss.
-- **After the refit, GLaMBIE 2020+, the WGMS reference glaciers and pre-2000 Dussaillant
-  are in-sample.** Quote test metrics from the original ensemble, not the refit one.
 
 **Data needed:** `validation_data/regional_wgms_duss/*.csv` (Dussaillant regional files,
-same as `test_regional_duss.py`) and `validation_data/per_gla/{mass_balance,glacier,reference_benchmark_glaciers}.csv`.
+same as `test_regional_duss.py`) and `validation_data/per_gla/{mass_balance,glacier,reference_benchmark_glaciers,reference_benchmark_mb_timeseries}.csv`.
 
 ```bash
 for i in $(seq -w 1 19); do
-  python src/refit_final.py \
+  python src/refit_final.py --mode validation \
+    --ensemble_dir outputs/ensemble_pretrain_year/r${i}/combined \
+    --output_root  /scratch/b5at/ranil.b5at/bayesnf_jax/refit_val/r${i} \
+    --ensemble_out outputs/ensemble_refit_val/r${i}/combined
+done
+# Step 6 testing against the validation-only refit
+python src/test_wgms_glaciers.py   --ensemble_base outputs/ensemble_refit_val --output_dir outputs/testing_wgms_glaciers_refit_val
+python src/test_regional_duss.py   --ensemble_base outputs/ensemble_refit_val --output_dir outputs/testing_regional_duss_refit_val
+python src/test_glambie_regional.py --ensemble_base outputs/ensemble_refit_val --output_dir outputs/testing_glambie_regional_refit_val
+
+for i in $(seq -w 1 19); do
+  python src/refit_final.py --mode full \
     --ensemble_dir outputs/ensemble_pretrain_year/r${i}/combined \
     --output_root  /scratch/b5at/ranil.b5at/bayesnf_jax/refit_final/r${i} \
     --ensemble_out outputs/ensemble_final_refit/r${i}/combined

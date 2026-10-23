@@ -18,9 +18,12 @@ Reliability filters (per instruction):
     years and its combined estimate already includes glaciological input.
   - WGMS glaciological series: only glaciers on the WGMS *reference* list
     (source_list=="reference", status=="kept" in reference_benchmark_glaciers.csv)
-    — not benchmark or former-reference glaciers. Both validation- and
-    testing-split reference glaciers are used. Optionally restricted to years
-    outside the 2000-2020 Hugonnet window (wgms_exclude_window).
+    — not benchmark or former-reference glaciers. Optionally restricted to the
+    validation and/or testing split (whole-glacier split from
+    reference_benchmark_mb_timeseries.csv) and to years outside the 2000-2020
+    Hugonnet window (wgms_exclude_window).
+  - Dussaillant is only ever used as a regional annual series (one value per
+    region-year), never per glacier.
 
 All values are MWE/yr; Dussaillant mwe/mwe_sigma and WGMS annual_balance /
 annual_balance_unc are already in m w.e. (see build_reference_timeseries.py).
@@ -75,9 +78,13 @@ def load_wgms_reference(
     region_num: int,
     default_unc: float = 0.3,
     exclude_window: bool = False,
+    splits: list[str] | None = None,
 ) -> pd.DataFrame | None:
     """
     Glaciological annual MB for WGMS reference glaciers in one RGI region.
+
+    splits: e.g. ["validation"] keeps only glaciers assigned to those splits in
+    reference_benchmark_mb_timeseries.csv; None keeps every reference glacier.
 
     annual_balance_unc is reported for only ~1/4 of rows; missing values are
     filled with default_unc (m w.e./yr).
@@ -88,6 +95,11 @@ def load_wgms_reference(
     meta = pd.read_csv(per_gla_dir / "reference_benchmark_glaciers.csv")
     meta = meta[(meta["status"] == "kept") & (meta["source_list"] == "reference")
                 & (meta["rgi_region"] == region_num)]
+    if splits is not None:
+        ts = pd.read_csv(per_gla_dir / "reference_benchmark_mb_timeseries.csv",
+                         usecols=["glacier_id", "split"])
+        keep_ids = ts.loc[ts["split"].isin(splits), "glacier_id"].unique()
+        meta = meta[meta["glacier_id"].isin(keep_ids)]
     if meta.empty:
         return None
 

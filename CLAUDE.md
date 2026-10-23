@@ -228,6 +228,10 @@ architectural components are needed.
   that region-year; same area-weighted form as L_glambie) and `wgms_weight * L_wgms`
   (WGMS *reference*-list glaciers, per glacier-year). n_data includes these
   observations. Loaders and filters: `src/refit_data.py`. Off by default.
+  `--mode validation` first adds only WGMS validation-split reference glaciers (no
+  Dussaillant, GLaMBIE 2020+ still held out) so Step 6 can score the refit procedure;
+  `--mode full` then adds everything for the global product. Dussaillant is used only
+  as a regional series, never per glacier.
 - GLaMBIE may be absent for some regions (e.g. High Mountain Asia has no
   gravimetry) — handle gracefully, do not error if glambie file is missing
   or empty for a given source

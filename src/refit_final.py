@@ -1,7 +1,14 @@
 """
 src/refit_final.py
 
-Final refit of the selected ensemble members on (almost) all available data.
+Refit of the selected ensemble members on previously held-out data, in two modes:
+
+  --mode validation   Adds only data that was already used for selection: WGMS
+                      validation-split reference glaciers. GLaMBIE 2020+, WGMS
+                      testing-split glaciers and Dussaillant stay held out, so the
+                      Step 6 test scripts give an honest score for the refit procedure
+                      (point them at --ensemble_out's parent as --ensemble_base).
+  --mode full         Final global product: everything below, nothing held out.
 
 Model/ensemble selection is already done (top_runs_info.csv of the combined
 ensemble, chosen by WGMS validation-split correlation — see
@@ -10,24 +17,31 @@ each selected member it re-runs Stage 2 + inference with model.final_refit=true,
 starting from that member's own pretrained_params.pkl (Stage 1 is unchanged), then
 combines the refit members into a new ensemble with the same equal weights.
 
-Final refit adds to the Stage 2 loss (see src/model/finetune.py, src/refit_data.py):
+Full mode adds to the Stage 2 loss (see src/model/finetune.py, src/refit_data.py):
   - GLaMBIE 2020+ (previously held out as test)
-  - Dussaillant regional MB, years <2000 with in-situ support
-  - WGMS reference-list glaciers, glaciological annual MB
+  - Dussaillant regional (not per-glacier) MB, years <2000, only region-years
+    with >=1 WGMS in-situ measured glacier
+  - WGMS reference-list glaciers (both splits), glaciological annual MB
 
 Every member's exact sweep config is reproduced from its .hydra/config.yaml;
 only final_refit, the paths, and any --set overrides change.
 
-Consequence: GLaMBIE 2020+, the WGMS reference glaciers (validation AND testing
-split) and pre-2000 Dussaillant are no longer independent of the refit model, so
-Step 6 testing metrics computed against the refit ensemble are in-sample for
-those sources. Report test metrics from the original (pre-refit) ensemble.
+Consequence of full mode: GLaMBIE 2020+, all WGMS reference glaciers and
+pre-2000 Dussaillant are no longer independent of the refit model, so Step 6
+metrics against the full-refit ensemble are in-sample for those sources. Report
+test metrics from the original and the validation-mode ensembles instead.
 
 Usage (from the repo root, where the sweep was launched, so relative data paths
 in the stored configs resolve the same way):
 
-    # all members sequentially, then combine
-    python src/refit_final.py \\
+    # 1) validation-only refit, then Step 6 testing on outputs/ensemble_refit_val
+    python src/refit_final.py --mode validation \\
+        --ensemble_dir  outputs/ensemble_pretrain_year/r11/combined \\
+        --output_root   /scratch/.../refit_val/r11 \\
+        --ensemble_out  outputs/ensemble_refit_val/r11/combined
+
+    # 2) full refit for the global results
+    python src/refit_final.py --mode full \\
         --ensemble_dir  outputs/ensemble_pretrain_year/r11/combined \\
         --output_root   /scratch/.../refit_final/r11 \\
         --ensemble_out  outputs/ensemble_final_refit/r11/combined
@@ -53,6 +67,20 @@ import pandas as pd
 from omegaconf import OmegaConf
 
 REQUIRED_PRETRAIN_FILES = ("pretrained_params.pkl", "scaler.pkl", "target_scaler.pkl")
+
+# Model overrides per refit mode; --set overrides are applied after these.
+MODE_OVERRIDES = {
+    "validation": [
+        "model.use_duss=false",
+        "model.wgms_splits=[validation]",
+        "model.refit_glambie_all_years=false",
+    ],
+    "full": [
+        "model.use_duss=true",
+        "model.wgms_splits=null",
+        "model.refit_glambie_all_years=true",
+    ],
+}
 
 
 def build_member_cfg(run_dir: Path, out_dir: Path, overrides: list[str]):
@@ -112,6 +140,9 @@ def combine(top: pd.DataFrame, output_root: Path, ensemble_out: Path) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Refit selected ensemble members with final_refit=true.")
+    p.add_argument("--mode", choices=sorted(MODE_OVERRIDES), required=True,
+                   help="validation: add WGMS validation-split glaciers only (test sets stay held out); "
+                        "full: add everything for the final global product")
     p.add_argument("--ensemble_dir", required=True,
                    help="Existing ensemble dir containing top_runs_info.csv (e.g. .../r11/combined)")
     p.add_argument("--output_root", required=True, help="Where per-member refit run dirs are written")
@@ -126,13 +157,14 @@ def main() -> None:
 
     top = pd.read_csv(Path(args.ensemble_dir) / "top_runs_info.csv")
     output_root, ensemble_out = Path(args.output_root), Path(args.ensemble_out)
-    print(f"{len(top)} selected members in {args.ensemble_dir}")
+    overrides = MODE_OVERRIDES[args.mode] + args.overrides
+    print(f"{len(top)} selected members in {args.ensemble_dir}  (mode={args.mode})")
 
     if not args.combine_only:
         rows = top if args.member is None else top.iloc[[args.member]]
         for _, row in rows.iterrows():
             refit_member(Path(row["run_dir"]), output_root / str(row["run_id"]),
-                         args.overrides, args.skip_existing)
+                         overrides, args.skip_existing)
         if args.member is not None:
             return
 

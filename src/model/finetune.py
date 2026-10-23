@@ -14,8 +14,10 @@ GLaMBIE test evaluation:
   - Early stopping monitors training loss, not a validation set.
 
 Final refit (model.final_refit=true; driven by src/refit_final.py):
-  - Nothing is held out: GLaMBIE 2020+ joins the GLaMBIE training loss, so no
-    metrics_glambie_test.csv is written.
+  - Full mode: nothing is held out — GLaMBIE 2020+ joins the GLaMBIE training
+    loss, so no metrics_glambie_test.csv is written.
+  - Validation mode (refit_final.py --mode validation): GLaMBIE 2020+ stays held
+    out (refit_glambie_all_years=false), use_duss=false, wgms_splits=[validation].
   - Two extra likelihood terms, from data previously used only for testing /
     validation (reliability filters in src/refit_data.py):
       L_duss — Dussaillant regional annual MB, years < 2000 with in-situ
@@ -640,7 +642,7 @@ def load_refit_obs(
     years / (glacier, year) pairs on the model grid (e.g. pre-1940 dropped). Config keys
     (all optional; defaults shown in conf/model/bnf_regional_seasonal.yaml):
         use_duss, refit_duss_dir, duss_year_max, duss_min_insitu
-        use_wgms, refit_per_gla_dir, wgms_default_unc, wgms_exclude_window
+        use_wgms, refit_per_gla_dir, wgms_default_unc, wgms_exclude_window, wgms_splits
     """
     region_num = int(cfg.model.reg_subdir.lstrip("r"))
     per_gla_dir = os.path.join(orig, cfg.model.get("refit_per_gla_dir", "validation_data/per_gla"))
@@ -661,18 +663,22 @@ def load_refit_obs(
         print(f"  Dussaillant (pre-{cfg.model.get('duss_year_max', 2000)}, in-situ supported): {n} years{yrs}")
 
     wgms_df = None
+    wgms_splits = cfg.model.get("wgms_splits", None)
+    wgms_splits = list(wgms_splits) if wgms_splits else None
     if bool(cfg.model.get("use_wgms", True)):
         wgms_df = load_wgms_reference(
             per_gla_dir, region_num,
             default_unc=float(cfg.model.get("wgms_default_unc", 0.3)),
             exclude_window=bool(cfg.model.get("wgms_exclude_window", False)),
+            splits=wgms_splits,
         )
         if wgms_df is not None:
             wgms_df = wgms_df.merge(oggm_df[["rgi_id", "year"]], on=["rgi_id", "year"], how="inner")
             wgms_df = wgms_df if not wgms_df.empty else None
         n_g = 0 if wgms_df is None else wgms_df["rgi_id"].nunique()
         n_o = 0 if wgms_df is None else len(wgms_df)
-        print(f"  WGMS reference glaciers: {n_g} glaciers, {n_o} glacier-years")
+        print(f"  WGMS reference glaciers ({wgms_splits or 'all splits'}): "
+              f"{n_g} glaciers, {n_o} glacier-years")
 
     return duss_df, wgms_df
 
@@ -780,8 +786,11 @@ def run_finetune(cfg: DictConfig) -> None:
     # Use all_feature_years so GLaMBIE years 2023/2024 aren't silently dropped
     # when OGGM targets don't extend that far but features do.
     final_refit = bool(cfg.model.get("final_refit", False))
+    # refit_glambie_all_years=false keeps GLaMBIE 2020+ held out even in a refit
+    # (validation-only refit, scored on the untouched test sets)
+    glambie_all_years = final_refit and bool(cfg.model.get("refit_glambie_all_years", True))
     glambie_train_df, glambie_test_df = load_glambie(
-        cfg, all_feature_years, temporal_avg_end_year, hold_out_test=not final_refit,
+        cfg, all_feature_years, temporal_avg_end_year, hold_out_test=not glambie_all_years,
     )
 
     # --- Final refit: previously held-out Dussaillant / WGMS reference-glacier data ---
