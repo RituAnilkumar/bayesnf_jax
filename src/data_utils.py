@@ -30,6 +30,16 @@ from sklearn.preprocessing import StandardScaler
 
 from src.model.bnf_module import T_MIN
 
+
+def original_cwd() -> str:
+    """
+    Hydra's original working directory when running under @hydra.main, else the
+    plain cwd (e.g. when src/refit_final.py calls run_finetune/run_predict directly).
+    """
+    from hydra.core.hydra_config import HydraConfig
+    from hydra.utils import get_original_cwd
+    return get_original_cwd() if HydraConfig.initialized() else os.getcwd()
+
 # ---------------------------------------------------------------------------
 # Feature scaling
 # ---------------------------------------------------------------------------

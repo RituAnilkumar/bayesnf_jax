@@ -1005,7 +1005,7 @@ def load_config(config_path: str) -> dict:
 def _run(cfg: dict, output_dir: Path) -> None:
     """Core analysis logic, called inside the LogTee context."""
     multirun_root  = Path(cfg["multirun_root"])
-    test_years     = list(cfg.get("glambie_test_years", [2021, 2022, 2023]))
+    test_years     = list(cfg.get("glambie_test_years", [2020, 2021, 2022, 2023, 2024]))
     loyo_weight    = float(cfg.get("loyo_weight",   0.5))
     glambie_weight = float(cfg.get("glambie_weight", 0.5))
     min_runs       = int(cfg.get("min_runs_per_region", 5))

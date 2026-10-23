@@ -36,10 +36,26 @@ Assumptions (see conversation trail — flag if any of these are wrong):
   - Metrics: added MAE alongside the original script's RMSE/r/coverage(2sigma),
     for consistency with the other testing scripts in this batch (the
     original script did not report MAE).
+  - Metrics are split by year window, using the same window as the WGMS
+    reference/benchmark split (build_reference_timeseries.py):
+      outside — years <2000 or >2020 (pre-2000 and post-2020 merged). PRIMARY
+                test metric: no Hugonnet/GLaMBIE finetuning target overlaps.
+      inside  — years 2000-2020 inclusive. Reported separately because, over
+                this window, the Dussaillant product is tied to the Hugonnet
+                geodetic signal that is also a finetuning target, so it is not
+                an independent test there.
+    A pooled "ALL" row per window (all regions together) is also reported.
+  - Model value is the ensemble mean (stored in the median_mwe column of
+    ensemble_regional_mwe.csv — see ensemble_uncertainty.py::_ensemble_components).
+  - Dussaillant was never used to build or select the ensemble; the Step 3
+    regional plots (validate_regional_pretrain_year.py) read the same files
+    for visualisation only.
 
 Outputs (to output_dir):
   regional_duss_joined.csv        stacked per-region joined table (all years)
-  regional_duss_metrics.csv       per-region RMSE, MAE, r, coverage_2sig_pct, n
+  regional_duss_metrics.csv       per-region (and pooled ALL) RMSE, MAE, r,
+                                  coverage_2sig_pct, n — one row per
+                                  (region, window), window in {outside, inside}
   timeseries_r{NN}_{CODE}.png     model vs. measured, + glacier-count bar overlay
   scatter_r{NN}_{CODE}.png        model vs. measured scatter, coloured by year
 
@@ -65,6 +81,18 @@ import numpy as np
 import pandas as pd
 
 MEASURED_LABEL = "Dussaillant et al."
+
+# Same training window as build_reference_timeseries.py (WGMS split).
+TRAIN_YEAR_MIN, TRAIN_YEAR_MAX = 2000, 2020
+WINDOWS = {
+    "outside": "<2000 & >2020",
+    "inside":  "2000-2020",
+}
+
+
+def _window(year: pd.Series) -> pd.Series:
+    inside = (year >= TRAIN_YEAR_MIN) & (year <= TRAIN_YEAR_MAX)
+    return pd.Series(np.where(inside, "inside", "outside"), index=year.index)
 
 # RGI region key ('01'..'19') -> (rgi_subdir, WGMS abbreviation, name)
 REGION_META = {
@@ -159,12 +187,13 @@ def build_joined(measured_by_region: dict[int, pd.DataFrame], ensemble_base: Pat
         model = load_model_regional(ensemble_base, region_num)
         if model is None:
             continue
-        model = model.rename(columns={"median_mwe": "model_median_mwe", "std_total": "model_std_total"})
+        model = model.rename(columns={"median_mwe": "model_mean_mwe", "std_total": "model_std_total"})
         joined = measured.merge(model, on="year", how="left")
         assert len(joined) == len(measured)
         code = REGION_META[f"{region_num:02d}"][1]
         joined.insert(0, "region_code", code)
         joined.insert(0, "region_num", region_num)
+        joined["window"] = _window(joined["year"])
         frames.append(joined)
     if not frames:
         raise RuntimeError("No regions matched — check measured_dir and ensemble_base.")
@@ -176,10 +205,10 @@ def build_joined(measured_by_region: dict[int, pd.DataFrame], ensemble_base: Pat
 # ---------------------------------------------------------------------------
 
 def _compute_metrics(sub: pd.DataFrame) -> dict:
-    val = sub.dropna(subset=["model_median_mwe", "mwe"])
+    val = sub.dropna(subset=["model_mean_mwe", "mwe"])
     n_points = len(val)
     if n_points >= 2:
-        obs, pred = val["mwe"].values, val["model_median_mwe"].values
+        obs, pred = val["mwe"].values, val["model_mean_mwe"].values
         resid = pred - obs
         rmse = float(np.sqrt(np.mean(resid ** 2)))
         mae  = float(np.mean(np.abs(resid)))
@@ -187,10 +216,10 @@ def _compute_metrics(sub: pd.DataFrame) -> dict:
     else:
         rmse, mae, r = np.nan, np.nan, np.nan
 
-    unc = sub.dropna(subset=["model_median_mwe", "model_std_total", "mwe", "mwe_sigma"])
+    unc = sub.dropna(subset=["model_mean_mwe", "model_std_total", "mwe", "mwe_sigma"])
     n_overlap_pairs = len(unc)
     if n_overlap_pairs > 0:
-        pred, pstd = unc["model_median_mwe"].values, unc["model_std_total"].values
+        pred, pstd = unc["model_mean_mwe"].values, unc["model_std_total"].values
         obs, ounc  = unc["mwe"].values, unc["mwe_sigma"].values
         m_lo, m_hi = pred - 2 * pstd, pred + 2 * pstd
         o_lo, o_hi = obs - 2 * ounc, obs + 2 * ounc
@@ -211,11 +240,20 @@ def _fmt_pct(val: float) -> str:
     return "N/A" if val is None or np.isnan(val) else f"{val:.0f}%"
 
 
-def _annotate_metrics(ax, metrics: dict, loc: str = "bottom") -> None:
-    text = (f"RMSE={_fmt(metrics['rmse'], '.2f')}  MAE={_fmt(metrics['mae'], '.2f')}  |  "
-            f"r={_fmt(metrics['r'], '.2f')}  |  Coverage (2σ)={_fmt_pct(metrics['coverage_2sig_pct'])}")
+def _metrics_by_window(sub: pd.DataFrame) -> dict[str, dict]:
+    return {w: _compute_metrics(sub[sub["window"] == w]) for w in WINDOWS}
+
+
+def _annotate_metrics(ax, metrics_by_window: dict[str, dict], loc: str = "bottom",
+                      fontsize: float = 10) -> None:
+    lines = []
+    for w, label in WINDOWS.items():
+        m = metrics_by_window[w]
+        lines.append(f"{label} (n={m['n_points']}):  RMSE={_fmt(m['rmse'], '.2f')}  "
+                     f"MAE={_fmt(m['mae'], '.2f')}  |  r={_fmt(m['r'], '.2f')}  |  "
+                     f"Coverage (2σ)={_fmt_pct(m['coverage_2sig_pct'])}")
     y, va = (0.04, "bottom") if loc == "bottom" else (0.96, "top")
-    ax.text(0.02, y, text, transform=ax.transAxes, fontsize=12, fontweight="bold", va=va, ha="left")
+    ax.text(0.02, y, "\n".join(lines), transform=ax.transAxes, fontsize=fontsize, va=va, ha="left")
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +264,7 @@ def _draw_timeseries(ax, sub: pd.DataFrame, counts: pd.DataFrame, region_key: st
                       title: str, metrics: dict) -> None:
     sub = sub.sort_values("year")
     yr = sub["year"].values
-    model_pred = sub["model_median_mwe"].values
+    model_pred = sub["model_mean_mwe"].values
     model_std  = sub["model_std_total"].values
     obs        = sub["mwe"].values
     obs_unc    = sub["mwe_sigma"].values
@@ -241,6 +279,7 @@ def _draw_timeseries(ax, sub: pd.DataFrame, counts: pd.DataFrame, region_key: st
                     color="steelblue", alpha=0.20, zorder=3)
     ax.plot(yr[valid], model_pred[valid], "-", color="steelblue", lw=1.6, zorder=4)
     ax.axhline(0, color="black", lw=0.5, ls="--", zorder=0)
+    ax.axvspan(TRAIN_YEAR_MIN - 0.5, TRAIN_YEAR_MAX + 0.5, color="gold", alpha=0.10, zorder=0)
 
     ax.set_title(title, fontsize=11)
     ax.set_xlabel("Year")
@@ -258,7 +297,7 @@ def _draw_timeseries(ax, sub: pd.DataFrame, counts: pd.DataFrame, region_key: st
 
     model_handle = (mpatches.Patch(facecolor="steelblue", alpha=0.20), Line2D([0], [0], color="steelblue", lw=1.6))
     handles = [model_handle]
-    labels = ["Model (±2σ)"]
+    labels = ["Ensemble mean (±2σ)"]
     if has_obs_unc:
         obs_handle = (mpatches.Patch(facecolor="firebrick", alpha=0.20), Line2D([0], [0], color="firebrick", lw=1.4))
         labels.append(f"{MEASURED_LABEL} (±2σ)")
@@ -268,6 +307,8 @@ def _draw_timeseries(ax, sub: pd.DataFrame, counts: pd.DataFrame, region_key: st
     handles.append(obs_handle)
     handles.append(mpatches.Patch(facecolor="gray", alpha=0.25))
     labels.append("# glaciers measured")
+    handles.append(mpatches.Patch(facecolor="gold", alpha=0.10))
+    labels.append(f"{TRAIN_YEAR_MIN}-{TRAIN_YEAR_MAX} (finetune window)")
     ax.legend(handles, labels, handler_map={tuple: HandlerTuple(ndivide=None)}, loc="upper right", fontsize=9)
 
     ax.set_zorder(ax2.get_zorder() + 1)
@@ -276,7 +317,7 @@ def _draw_timeseries(ax, sub: pd.DataFrame, counts: pd.DataFrame, region_key: st
 
 def _draw_scatter(ax, sub: pd.DataFrame, title: str, metrics: dict) -> None:
     obs, obs_unc = sub["mwe"].values, sub["mwe_sigma"].values
-    pred, pred_std = sub["model_median_mwe"].values, sub["model_std_total"].values
+    pred, pred_std = sub["model_mean_mwe"].values, sub["model_std_total"].values
     years = sub["year"].values
 
     valid = ~(np.isnan(obs) | np.isnan(pred))
@@ -289,16 +330,23 @@ def _draw_scatter(ax, sub: pd.DataFrame, title: str, metrics: dict) -> None:
 
     ax.errorbar(obs, pred, xerr=2 * obs_unc, yerr=2 * pred_std, fmt="none", ecolor="gray",
                 elinewidth=0.8, capsize=2.5, alpha=0.6, zorder=2, label="±2σ")
-    sc = ax.scatter(obs, pred, c=years, cmap="viridis", s=28, zorder=3)
+    out = (sub["window"] == "outside").values
+    norm = plt.Normalize(np.nanmin(years), np.nanmax(years))
+    sc = ax.scatter(obs[out], pred[out], c=years[out], cmap="viridis", norm=norm, s=28, zorder=3)
+    ax.scatter(obs[~out], pred[~out], facecolors="none", edgecolors=plt.cm.viridis(norm(years[~out])),
+               s=28, linewidths=1.0, zorder=3)
+    ax.scatter([], [], color="gray", s=28, label=f"{WINDOWS['outside']} (filled)")
+    ax.scatter([], [], facecolors="none", edgecolors="gray", s=28, linewidths=1.0,
+               label=f"{WINDOWS['inside']} (hollow)")
     plt.colorbar(sc, ax=ax, shrink=0.8, label="Year")
 
     ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("Measured regional MB (MWE/yr)")
-    ax.set_ylabel("Model regional MB (MWE/yr)")
+    ax.set_ylabel("Ensemble mean regional MB (MWE/yr)")
     ax.set_title(title, fontsize=11)
-    ax.legend(loc="upper left")
-    _annotate_metrics(ax, metrics, loc="bottom")
+    ax.legend(loc="upper left", fontsize=8)
+    _annotate_metrics(ax, metrics, loc="bottom", fontsize=7)
 
 
 def plot_regions(joined: pd.DataFrame, counts: pd.DataFrame, output_dir: Path) -> pd.DataFrame:
@@ -312,8 +360,10 @@ def plot_regions(joined: pd.DataFrame, counts: pd.DataFrame, output_dir: Path) -
         name = REGION_META[region_key][2]
         title = f"r{region_num:02d} {code} — {name}"
 
-        metrics = _compute_metrics(sub)
-        metrics_rows.append({"region_num": region_num, "region_code": code, "region_name": name, **metrics})
+        metrics = _metrics_by_window(sub)
+        for w, m in metrics.items():
+            metrics_rows.append({"region_num": region_num, "region_code": code, "region_name": name,
+                                 "window": w, "window_years": WINDOWS[w], **m})
 
         fig, ax = plt.subplots(figsize=(12, 5.5))
         _draw_timeseries(ax, sub, counts, region_key, title, metrics)
@@ -327,9 +377,18 @@ def plot_regions(joined: pd.DataFrame, counts: pd.DataFrame, output_dir: Path) -
         fig.savefig(output_dir / f"scatter_r{region_num:02d}_{code}.png", dpi=150)
         plt.close(fig)
 
-        print(f"  [{title}] n={metrics['n_points']} r={_fmt(metrics['r'], '.2f')} "
-              f"RMSE={_fmt(metrics['rmse'], '.2f')} MAE={_fmt(metrics['mae'], '.2f')} "
-              f"Cov2σ={_fmt_pct(metrics['coverage_2sig_pct'])}")
+        for w, m in metrics.items():
+            print(f"  [{title}] {w:7s} n={m['n_points']} r={_fmt(m['r'], '.2f')} "
+                  f"RMSE={_fmt(m['rmse'], '.2f')} MAE={_fmt(m['mae'], '.2f')} "
+                  f"Cov2σ={_fmt_pct(m['coverage_2sig_pct'])}")
+
+    for w in WINDOWS:
+        m = _compute_metrics(joined[joined["window"] == w])
+        metrics_rows.append({"region_num": np.nan, "region_code": "ALL", "region_name": "All regions pooled",
+                             "window": w, "window_years": WINDOWS[w], **m})
+        print(f"  [ALL pooled] {w:7s} n={m['n_points']} r={_fmt(m['r'], '.2f')} "
+              f"RMSE={_fmt(m['rmse'], '.2f')} MAE={_fmt(m['mae'], '.2f')} "
+              f"Cov2σ={_fmt_pct(m['coverage_2sig_pct'])}")
 
     return pd.DataFrame(metrics_rows)
 
@@ -344,7 +403,7 @@ def run(measured_dir: Path, ensemble_base: Path, per_gla_dir: Path, output_dir: 
     print(f"  Loaded {len(measured_by_region)} regions (17=SA1+SA2 combined)")
 
     joined = build_joined(measured_by_region, ensemble_base)
-    n_matched = joined["model_median_mwe"].notna().sum()
+    n_matched = joined["model_mean_mwe"].notna().sum()
     print(f"  Matched {n_matched}/{len(joined)} rows to model predictions")
 
     output_dir.mkdir(parents=True, exist_ok=True)

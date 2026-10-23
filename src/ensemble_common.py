@@ -93,7 +93,20 @@ def _run_top_n_group(
               f"glambie_rmse(test)={row.get('glambie_rmse', float('nan')):.4f}")
 
     top.to_csv(output_dir / "top_runs_info.csv", index=False)
+    return _combine_runs(top, output_dir, min_runs)
 
+
+def _combine_runs(top: pd.DataFrame, output_dir: Path, min_runs: int) -> bool:
+    """
+    Combine an already-chosen set of runs (top["run_dir"]) into ensemble_glacier.csv /
+    ensemble_regional_*.csv with full uncertainty decomposition. No selection is
+    done here — used directly by src/refit_final.py to rebuild the ensemble from
+    refit members without re-selecting.
+
+    Returns:
+        True if the group was processed successfully, False if skipped.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
     run_dirs = [Path(d) for d in top["run_dir"].values]
     K        = len(run_dirs)
     weights  = np.ones(K) / K    # equal weights

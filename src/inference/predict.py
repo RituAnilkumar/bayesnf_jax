@@ -28,7 +28,6 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
 
 from src.model.bnf_module import BayesianNeuralField, T_MIN, mc_predict_chunked
@@ -41,6 +40,7 @@ from src.data_utils import (
     apply_scaler,
     extract_hugonnet_region,
     FEATURE_COLS,
+    original_cwd,
 )
 from src import area_rates
 
@@ -655,7 +655,7 @@ def run_predict(cfg: DictConfig) -> None:
     rng = jax.random.PRNGKey(cfg.model.seed)
 
     # --- Resolve relative paths against original cwd (Hydra chdir moves us to output dir) ---
-    orig = get_original_cwd()
+    orig = original_cwd()
     cfg_mutable = OmegaConf.to_container(cfg, resolve=True)
     for key in ("finetuned_params_path", "pretrained_params_path", "inp_dir",
                 "temporal_avg_path", "glambie_path"):

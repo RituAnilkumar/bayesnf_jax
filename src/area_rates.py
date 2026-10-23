@@ -159,6 +159,7 @@ def plot_fixed_vs_variable_area(
     ax.set_title(title)
     ax.legend(fontsize=9)
     fig.tight_layout()
+    output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)

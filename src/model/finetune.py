@@ -9,14 +9,25 @@ Observation data:
   - GLaMBIE regional annual means (gravimetry + altimetry, where available)
 
 GLaMBIE test evaluation:
-  - All post-temporal_avg GLaMBIE years (2021+) are withheld from training
+  - All GLaMBIE years >= temporal_avg end year (2020+) are withheld from training
     and used to assess finetuned model fit.
   - Early stopping monitors training loss, not a validation set.
+
+Final refit (model.final_refit=true; driven by src/refit_final.py):
+  - Nothing is held out: GLaMBIE 2020+ joins the GLaMBIE training loss, so no
+    metrics_glambie_test.csv is written.
+  - Two extra likelihood terms, from data previously used only for testing /
+    validation (reliability filters in src/refit_data.py):
+      L_duss — Dussaillant regional annual MB, years < 2000 with in-situ
+               support; same area-weighted regional form as L_glambie.
+      L_wgms — WGMS reference-glacier glaciological annual MB, per (glacier, year).
+  - Observations actually used are written to refit_obs_used.csv.
 
 Outputs written to cfg.model.output_dir:
   - finetuned_params.pkl          (tuple of mu_dict, log_sigma_dict)
   - training_loss.png
   - metrics_glambie_test.csv      (held-out GLaMBIE years, if glambie_test_years set)
+  - refit_obs_used.csv            (final refit only)
 """
 
 import os
@@ -27,7 +38,6 @@ import cloudpickle
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from hydra.utils import get_original_cwd
 from omegaconf import DictConfig
 
 from src.model.bnf_module import (
@@ -37,7 +47,11 @@ from src.model.bnf_module import (
     mc_predict_chunked,
 )
 from src.loss.elbo import finetune_elbo, make_beta_schedule
-from src.loss.likelihood import temporal_avg_loss, glambie_loss, temporal_avg_nll, glambie_nll
+from src.loss.likelihood import (
+    temporal_avg_loss, glambie_loss, temporal_avg_nll, glambie_nll,
+    glacier_point_loss, glacier_point_nll,
+)
+from src.refit_data import load_dussaillant_insitu, load_wgms_reference
 from src.loss.aggregation import regional_annual_mean
 from src.data_utils import (
     load_features,
@@ -51,6 +65,7 @@ from src.data_utils import (
     apply_scaler,
     extract_hugonnet_region,
     FEATURE_COLS,
+    original_cwd,
 )
 
 
@@ -84,7 +99,7 @@ def load_oggm_full(cfg: DictConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
         including years beyond OGGM coverage (e.g. 2023/2024 for GLaMBIE evaluation).
     """
     region = cfg.model.reg_subdir
-    base   = os.path.join(get_original_cwd(), cfg.model.inp_dir, region)
+    base   = os.path.join(original_cwd(), cfg.model.inp_dir, region)
 
     features_df = load_features(os.path.join(base, f"main_features_{region}.csv"))
     targets_df  = load_oggm(os.path.join(base, f"oggm_targets_{region}.csv"))
@@ -109,7 +124,7 @@ def load_temporal_avg(cfg: DictConfig, rgi_ids_ordered: np.ndarray) -> pd.DataFr
     path = cfg.model.temporal_avg_path
     if not os.path.exists(path):
         reg_int = int(cfg.model.reg_subdir.lstrip("r"))
-        all_csv = os.path.join(get_original_cwd(), cfg.model.inp_dir, "dmdtda_all.csv")
+        all_csv = os.path.join(original_cwd(), cfg.model.inp_dir, "dmdtda_all.csv")
         print(f"  temporal_avg_path not found — generating from {all_csv} for reg={reg_int}")
         extract_hugonnet_region(all_csv, reg_int, path, period=None)
 
@@ -137,6 +152,7 @@ def load_glambie(
     cfg: DictConfig,
     feature_years: set,
     temporal_avg_end_year: int,
+    hold_out_test: bool = True,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """
     Load and two-way split GLaMBIE data for the configured region.
@@ -144,6 +160,7 @@ def load_glambie(
     Splits:
       train — years < temporal_avg_end_year  (used in finetuning loss)
       test  — years >= temporal_avg_end_year  (reported metrics only)
+    With hold_out_test=False (final refit) every year goes to train and test is None.
 
     GLaMBIE years not present in feature_years (the full features file, not just
     OGGM-merged rows) are dropped with a warning. Using feature_years instead of
@@ -174,6 +191,11 @@ def load_glambie(
     if df.empty:
         return None, None
 
+    if not hold_out_test:
+        print(f"  GLaMBIE: all years used for training (final refit): "
+              f"{sorted(df['year'].unique().tolist())}")
+        return df, None
+
     # Use strict < so that the Hugonnet end year (e.g. 2020, exclusive in the
     # period convention) goes to test rather than being silently dropped from train.
     # OGGM only covers up to end_year-1 (e.g. 2019), so year==end_year has no
@@ -195,12 +217,102 @@ def load_glambie(
 # Array preparation (outside JIT)
 # ---------------------------------------------------------------------------
 
+def _floor_errs(errs: np.ndarray, label: str) -> np.ndarray:
+    """Floor non-finite / non-positive uncertainties at 0.001 MWE/yr (prevents loss=inf)."""
+    n_bad = (~np.isfinite(errs) | (errs <= 0)).sum()
+    if n_bad > 0:
+        print(f"  WARNING: {n_bad} {label} training observations have non-finite "
+              f"or non-positive error_mwe. Applying floor of 0.001 MWE/yr.")
+    return np.where(np.isfinite(errs) & (errs > 0), errs, 0.001)
+
+
+def _regional_obs_arrays(
+    oggm_df: pd.DataFrame,
+    time_index: np.ndarray,
+    covariates: np.ndarray,
+    obs_df: pd.DataFrame | None,
+    label: str,
+) -> dict | None:
+    """
+    Arrays for an area-weighted regional annual-mean likelihood (GLaMBIE, Dussaillant).
+
+    obs_df columns: year, value_mwe, error_mwe (several rows per year allowed,
+    e.g. GLaMBIE altimetry + gravimetry). Returns None if no usable observations.
+
+    Returned keys:
+        time_index, covariates   — OGGM-grid rows whose year has an observation
+        year_ids, n_years        — per-row year code in [0, n_years)
+        areas                    — per-row glacier area (area-weighted regional mean)
+        obs_year_idx             — per-observation index into those years
+        means, errs              — targets / uncertainties [MWE/yr]
+    """
+    if obs_df is None:
+        return None
+    # Restrict to years present in oggm_df. A year with zero OGGM rows would give
+    # 0/0 = NaN in the area-weighted segment mean and NaN gradients throughout.
+    oggm_years_set = set(oggm_df["year"].unique().tolist())
+    obs_df = obs_df[obs_df["year"].isin(oggm_years_set)].reset_index(drop=True)
+    if obs_df.empty:
+        return None
+
+    years       = sorted(obs_df["year"].unique().tolist())
+    year_to_idx = {y: i for i, y in enumerate(years)}
+    row_mask    = oggm_df["year"].isin(years).to_numpy()
+
+    return {
+        "time_index":   jnp.array(time_index[row_mask]),
+        "covariates":   jnp.array(covariates[row_mask]),
+        "year_ids":     jnp.array(oggm_df.loc[row_mask, "year"].map(year_to_idx).to_numpy(dtype=np.int32)),
+        # Area weights for area-weighted regional mean (MWE/yr requires area weighting)
+        "areas":        jnp.array(oggm_df.loc[row_mask, "Area"].to_numpy(dtype=np.float32)),
+        "n_years":      len(years),
+        "obs_year_idx": jnp.array(obs_df["year"].map(year_to_idx).to_numpy(dtype=np.int32)),
+        "means":        jnp.array(obs_df["value_mwe"].to_numpy(dtype=np.float32)),
+        "errs":         jnp.array(_floor_errs(obs_df["error_mwe"].to_numpy(dtype=np.float32), label)),
+    }
+
+
+def _point_obs_arrays(
+    oggm_df: pd.DataFrame,
+    time_index: np.ndarray,
+    covariates: np.ndarray,
+    obs_df: pd.DataFrame | None,
+    label: str,
+) -> dict | None:
+    """
+    Arrays for a per-(glacier, year) point likelihood (WGMS reference glaciers).
+
+    obs_df columns: rgi_id, year, value_mwe, error_mwe. Observations whose
+    (rgi_id, year) is not on the OGGM grid (e.g. pre-1940 years) are dropped.
+    """
+    if obs_df is None:
+        return None
+    grid = oggm_df[["rgi_id", "year"]].reset_index(drop=True)
+    grid["_row"] = np.arange(len(grid))
+    matched = obs_df.merge(grid, on=["rgi_id", "year"], how="inner")
+    n_dropped = len(obs_df) - len(matched)
+    if n_dropped:
+        print(f"  {label}: {n_dropped}/{len(obs_df)} observations not on the model grid — dropped")
+    if matched.empty:
+        return None
+    rows = matched["_row"].to_numpy()
+    return {
+        "time_index": jnp.array(time_index[rows]),
+        "covariates": jnp.array(covariates[rows]),
+        "targets":    jnp.array(matched["value_mwe"].to_numpy(dtype=np.float32)),
+        "errs":       jnp.array(_floor_errs(matched["error_mwe"].to_numpy(dtype=np.float32), label)),
+        "n_obs":      len(matched),
+    }
+
+
 def prepare_finetune_arrays(
     oggm_df: pd.DataFrame,
     temporal_avg_df: pd.DataFrame,
     glambie_train_df: pd.DataFrame | None,
     ft_cols: list[str],
     scaler=None,
+    duss_df: pd.DataFrame | None = None,
+    wgms_df: pd.DataFrame | None = None,
 ) -> dict:
     """
     Build all JAX arrays needed for the finetuning train_step.
@@ -209,14 +321,11 @@ def prepare_finetune_arrays(
 
     Returns dict with keys:
         time_index, covariates              — full OGGM grid
-        period_mask                         — bool mask selecting period-window rows
-        temporal_avg_glacier_ids            — int glacier codes for period rows
-        temporal_avg_targets, temporal_avg_errs, n_glaciers
-        has_glambie                         — bool
-        glambie_time_index, glambie_covariates  — rows matching GLaMBIE years
-        glambie_year_ids, n_glambie_years   — per-row year code in [0, n_glambie_years)
-        obs_year_idx                        — per-GLaMBIE-obs index into glambie years
-        glambie_means, glambie_errs         — GLaMBIE targets
+        hugonnet_periods, n_hugonnet_periods — per-period mask, glacier codes, targets, errs
+        n_glaciers
+        glambie, duss                       — _regional_obs_arrays() dicts, or None
+        wgms                                — _point_obs_arrays() dict, or None
+    duss_df / wgms_df are only passed in final-refit mode.
     """
     # Full OGGM grid arrays
     time_index, covariates, _, _ = build_model_inputs(oggm_df, ft_cols)
@@ -272,62 +381,16 @@ def prepare_finetune_arrays(
             "ta_errs":     jnp.array(p_errs),
         })
 
-    out = {
+    return {
         "time_index":         jnp.array(time_index),
         "covariates":         jnp.array(covariates),
         "hugonnet_periods":   hugonnet_periods,
         "n_hugonnet_periods": len(hugonnet_periods),
         "n_glaciers":         n_glaciers,
-        "has_glambie":        glambie_train_df is not None,
+        "glambie": _regional_obs_arrays(oggm_df, time_index, covariates, glambie_train_df, "GLaMBIE"),
+        "duss":    _regional_obs_arrays(oggm_df, time_index, covariates, duss_df, "Dussaillant"),
+        "wgms":    _point_obs_arrays(oggm_df, time_index, covariates, wgms_df, "WGMS reference"),
     }
-
-    # GLaMBIE arrays
-    if glambie_train_df is not None:
-        # Restrict GLaMBIE train years to those present in oggm_df.
-        # Years like 2020 can appear in glambie_train_df (year <= temporal_avg_end_year)
-        # but be absent from oggm_df (OGGM targets end at 2019). Including them
-        # would produce zero OGGM rows for that year, causing 0/0 = NaN in the
-        # area-weighted segment mean and NaN gradients throughout.
-        oggm_years_set = set(oggm_df["year"].unique().tolist())
-        glambie_train_df = glambie_train_df[glambie_train_df["year"].isin(oggm_years_set)].reset_index(drop=True)
-        if glambie_train_df.empty:
-            out["has_glambie"] = False
-            return out
-
-        glambie_years = sorted(glambie_train_df["year"].unique().tolist())
-        year_to_idx   = {y: i for i, y in enumerate(glambie_years)}
-        n_glambie_years = len(glambie_years)
-
-        # OGGM rows whose year appears in GLaMBIE train years
-        glambie_row_mask = oggm_df["year"].isin(glambie_years).to_numpy()
-        g_time_idx   = time_index[glambie_row_mask]
-        g_covariates = covariates[glambie_row_mask]
-        g_year_ids   = oggm_df.loc[glambie_row_mask, "year"].map(year_to_idx).to_numpy(dtype=np.int32)
-        # Area weights for area-weighted regional mean (MWE/yr requires area weighting)
-        g_areas      = oggm_df.loc[glambie_row_mask, "Area"].to_numpy(dtype=np.float32)
-
-        # Per-observation year index (one per GLaMBIE row)
-        obs_year_idx = glambie_train_df["year"].map(year_to_idx).to_numpy(dtype=np.int32)
-
-        g_errs = glambie_train_df["error_mwe"].to_numpy(dtype=np.float32)
-        n_bad_g = (~np.isfinite(g_errs) | (g_errs <= 0)).sum()
-        if n_bad_g > 0:
-            print(f"  WARNING: {n_bad_g} GLaMBIE training observations have non-finite "
-                  f"or non-positive error_mwe. Applying floor of 0.001 MWE/yr.")
-        g_errs = np.where(np.isfinite(g_errs) & (g_errs > 0), g_errs, 0.001)
-
-        out.update({
-            "glambie_time_index":  jnp.array(g_time_idx),
-            "glambie_covariates":  jnp.array(g_covariates),
-            "glambie_year_ids":    jnp.array(g_year_ids),
-            "glambie_areas":       jnp.array(g_areas),
-            "n_glambie_years":     n_glambie_years,
-            "obs_year_idx":        jnp.array(obs_year_idx),
-            "glambie_means":       jnp.array(glambie_train_df["value_mwe"].to_numpy(dtype=np.float32)),
-            "glambie_errs":        jnp.array(g_errs),
-        })
-
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +408,8 @@ def make_train_step(
     target_std: float = 1.0,
     glambie_weight: float = 1.0,
     kl_weight: float = 1.0,
+    duss_weight: float = 1.0,
+    wgms_weight: float = 1.0,
 ):
     """
     Factory: returns a JIT-compiled finetune train_step.
@@ -366,81 +431,81 @@ def make_train_step(
     weaken the OGGM prior's regularising influence, letting the posterior be shaped
     more by the Hugonnet/GLaMBIE observations. Default 1.0 (standard BCL).
 
+    duss_weight / wgms_weight: relative weights of the final-refit Dussaillant
+    (regional, pre-2000) and WGMS reference-glacier (point) terms. Unused when
+    sa["duss"] / sa["wgms"] is None.
+
     Returned function signature:
         train_step(params, opt_state, rng, beta)
         -> (params, opt_state, loss_scalar)
     """
-    has_glambie     = sa["has_glambie"]
     heteroscedastic = model.heteroscedastic
+
+    def _unscale(raw):
+        """Model output (scaled) → (mu, sigma_or_None) in physical MWE/yr."""
+        if heteroscedastic:
+            mu_scaled, sigma_scaled = raw
+            return mu_scaled * target_std + target_mean, sigma_scaled * target_std  # sigma: scale only
+        return raw * target_std + target_mean, None
+
+    def _regional_term(params, src, rng):
+        """Area-weighted regional annual-mean loss (GLaMBIE or Dussaillant)."""
+        mu, sigma = _unscale(model.apply(params, src["time_index"], src["covariates"], rng))
+        args = (src["year_ids"], src["n_years"], src["obs_year_idx"],
+                src["means"], src["errs"], src["areas"])
+        if heteroscedastic:
+            return glambie_nll(mu, sigma, *args)
+        return glambie_loss(mu, *args)
+
+    def _point_term(params, src, rng):
+        """Per-(glacier, year) loss (WGMS reference glaciers)."""
+        mu, sigma = _unscale(model.apply(params, src["time_index"], src["covariates"], rng))
+        if heteroscedastic:
+            return glacier_point_nll(mu, sigma, src["targets"], src["errs"])
+        return glacier_point_loss(mu, src["targets"], src["errs"])
 
     @jax.jit
     def train_step(params, opt_state, rng, beta):
         def loss_fn(params):
             rng_period, rng_glambie = jax.random.split(rng)
+            # Separate stream for the final-refit terms, so non-refit runs keep
+            # exactly the same random draws as before these terms existed.
+            rng_duss, rng_wgms = jax.random.split(jax.random.fold_in(rng, 1))
 
             # --- Temporal-avg loss (single Hugonnet period) ---
             l_ta = jnp.array(0.0)
             for period in sa["hugonnet_periods"]:
-                raw = model.apply(
+                mu, sigma = _unscale(model.apply(
                     params,
                     sa["time_index"][period["period_mask"]],
                     sa["covariates"][period["period_mask"]],
                     rng_period,
-                )
+                ))
+                args = (period["glacier_ids"], period["n_glaciers"],
+                        period["ta_targets"],  period["ta_errs"])
                 if heteroscedastic:
-                    mu_scaled, sigma_scaled = raw
-                    period_mu    = mu_scaled    * target_std + target_mean
-                    period_sigma = sigma_scaled * target_std          # scale only
-                    l_ta += temporal_avg_nll(
-                        period_mu, period_sigma,
-                        period["glacier_ids"], period["n_glaciers"],
-                        period["ta_targets"],  period["ta_errs"],
-                    )
+                    l_ta += temporal_avg_nll(mu, sigma, *args)
                 else:
-                    period_preds = raw * target_std + target_mean
-                    l_ta += temporal_avg_loss(
-                        period_preds,
-                        period["glacier_ids"], period["n_glaciers"],
-                        period["ta_targets"],  period["ta_errs"],
-                    )
+                    l_ta += temporal_avg_loss(mu, *args)
             l_ta = l_ta / sa["n_hugonnet_periods"]
 
             # --- GLaMBIE loss ---
-            if has_glambie:
-                raw_g = model.apply(
-                    params,
-                    sa["glambie_time_index"],
-                    sa["glambie_covariates"],
-                    rng_glambie,
-                )
-                if heteroscedastic:
-                    gmu_scaled, gsigma_scaled = raw_g
-                    glambie_mu    = gmu_scaled    * target_std + target_mean
-                    glambie_sigma = gsigma_scaled * target_std
-                    l_glambie = glambie_nll(
-                        glambie_mu, glambie_sigma,
-                        sa["glambie_year_ids"], sa["n_glambie_years"],
-                        sa["obs_year_idx"],
-                        sa["glambie_means"], sa["glambie_errs"],
-                        sa["glambie_areas"],
-                    )
-                else:
-                    glambie_preds = raw_g * target_std + target_mean
-                    l_glambie = glambie_loss(
-                        glambie_preds,
-                        sa["glambie_year_ids"], sa["n_glambie_years"],
-                        sa["obs_year_idx"],
-                        sa["glambie_means"], sa["glambie_errs"],
-                        sa["glambie_areas"],
-                    )
-            else:
-                l_glambie = jnp.array(0.0)
+            l_glambie = (_regional_term(params, sa["glambie"], rng_glambie)
+                         if sa["glambie"] is not None else jnp.array(0.0))
+
+            # --- Final-refit terms (None outside final-refit mode) ---
+            l_duss = (_regional_term(params, sa["duss"], rng_duss)
+                      if sa["duss"] is not None else jnp.array(0.0))
+            l_wgms = (_point_term(params, sa["wgms"], rng_wgms)
+                      if sa["wgms"] is not None else jnp.array(0.0))
 
             # --- KL against pretrained prior ---
             mu_dict, log_sigma_dict = extract_vi_params(params["params"])
             kl = compute_total_kl(mu_dict, log_sigma_dict, prior_mu, prior_log_sigma)
 
-            return finetune_elbo(l_ta, l_glambie, kl, beta, n_data, glambie_weight, kl_weight)
+            return finetune_elbo(l_ta, l_glambie, kl, beta, n_data, glambie_weight, kl_weight,
+                                 duss_loss_val=l_duss, wgms_loss_val=l_wgms,
+                                 duss_weight=duss_weight, wgms_weight=wgms_weight)
 
         loss, grads = jax.value_and_grad(loss_fn)(params)
         updates, opt_state_new = optimizer.update(grads, opt_state, params)
@@ -563,6 +628,80 @@ def evaluate_glambie_test(
 
 
 # ---------------------------------------------------------------------------
+# Final refit — extra observations
+# ---------------------------------------------------------------------------
+
+def load_refit_obs(
+    cfg: DictConfig, orig: str, oggm_df: pd.DataFrame,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """
+    Load the final-refit Dussaillant (pre-2000, in-situ supported) and WGMS
+    reference-glacier observations for the configured region, restricted to
+    years / (glacier, year) pairs on the model grid (e.g. pre-1940 dropped). Config keys
+    (all optional; defaults shown in conf/model/bnf_regional_seasonal.yaml):
+        use_duss, refit_duss_dir, duss_year_max, duss_min_insitu
+        use_wgms, refit_per_gla_dir, wgms_default_unc, wgms_exclude_window
+    """
+    region_num = int(cfg.model.reg_subdir.lstrip("r"))
+    per_gla_dir = os.path.join(orig, cfg.model.get("refit_per_gla_dir", "validation_data/per_gla"))
+
+    duss_df = None
+    if bool(cfg.model.get("use_duss", True)):
+        duss_df = load_dussaillant_insitu(
+            os.path.join(orig, cfg.model.get("refit_duss_dir", "validation_data/regional_wgms_duss")),
+            per_gla_dir, region_num,
+            year_max=int(cfg.model.get("duss_year_max", 2000)),
+            min_insitu=int(cfg.model.get("duss_min_insitu", 1)),
+        )
+        if duss_df is not None:
+            duss_df = duss_df[duss_df["year"].isin(set(oggm_df["year"].unique()))].reset_index(drop=True)
+            duss_df = duss_df if not duss_df.empty else None
+        n = 0 if duss_df is None else len(duss_df)
+        yrs = "" if duss_df is None else f" ({duss_df['year'].min()}-{duss_df['year'].max()})"
+        print(f"  Dussaillant (pre-{cfg.model.get('duss_year_max', 2000)}, in-situ supported): {n} years{yrs}")
+
+    wgms_df = None
+    if bool(cfg.model.get("use_wgms", True)):
+        wgms_df = load_wgms_reference(
+            per_gla_dir, region_num,
+            default_unc=float(cfg.model.get("wgms_default_unc", 0.3)),
+            exclude_window=bool(cfg.model.get("wgms_exclude_window", False)),
+        )
+        if wgms_df is not None:
+            wgms_df = wgms_df.merge(oggm_df[["rgi_id", "year"]], on=["rgi_id", "year"], how="inner")
+            wgms_df = wgms_df if not wgms_df.empty else None
+        n_g = 0 if wgms_df is None else wgms_df["rgi_id"].nunique()
+        n_o = 0 if wgms_df is None else len(wgms_df)
+        print(f"  WGMS reference glaciers: {n_g} glaciers, {n_o} glacier-years")
+
+    return duss_df, wgms_df
+
+
+def write_refit_obs_used(
+    output_dir: str,
+    glambie_df: pd.DataFrame | None,
+    duss_df: pd.DataFrame | None,
+    wgms_df: pd.DataFrame | None,
+    static_arrays: dict,
+) -> None:
+    """Record exactly which non-Hugonnet observations entered the final-refit loss."""
+    frames = []
+    if glambie_df is not None and static_arrays["glambie"] is not None:
+        frames.append(glambie_df.assign(dataset="glambie"))
+    if duss_df is not None and static_arrays["duss"] is not None:
+        frames.append(duss_df.assign(dataset="dussaillant", source="regional"))
+    if wgms_df is not None and static_arrays["wgms"] is not None:
+        frames.append(wgms_df.assign(dataset="wgms_reference", source="glaciological"))
+    if not frames:
+        return
+    used = pd.concat(frames, ignore_index=True)
+    cols = ["dataset", "source", "rgi_id", "glacier_name", "year", "value_mwe", "error_mwe", "n_insitu"]
+    used = used.reindex(columns=cols)
+    used.to_csv(os.path.join(output_dir, "refit_obs_used.csv"), index=False)
+    print(f"  Saved refit_obs_used.csv — counts: {used.groupby('dataset').size().to_dict()}")
+
+
+# ---------------------------------------------------------------------------
 # Main finetuning function
 # ---------------------------------------------------------------------------
 
@@ -581,7 +720,7 @@ def run_finetune(cfg: DictConfig) -> None:
     ft_cols = [c for c in ft_cols if c not in rm_fts]
 
     # --- Resolve relative paths against original cwd (Hydra chdir moves us to output dir) ---
-    orig = get_original_cwd()
+    orig = original_cwd()
     from omegaconf import OmegaConf
     cfg_mutable = OmegaConf.to_container(cfg, resolve=True)
     for key in ("pretrained_params_path", "temporal_avg_path", "glambie_path"):
@@ -640,12 +779,23 @@ def run_finetune(cfg: DictConfig) -> None:
     temporal_avg_end_year = int(temporal_avg_df["end_date"].max())
     # Use all_feature_years so GLaMBIE years 2023/2024 aren't silently dropped
     # when OGGM targets don't extend that far but features do.
-    glambie_train_df, glambie_test_df = load_glambie(cfg, all_feature_years, temporal_avg_end_year)
+    final_refit = bool(cfg.model.get("final_refit", False))
+    glambie_train_df, glambie_test_df = load_glambie(
+        cfg, all_feature_years, temporal_avg_end_year, hold_out_test=not final_refit,
+    )
+
+    # --- Final refit: previously held-out Dussaillant / WGMS reference-glacier data ---
+    duss_df, wgms_df = None, None
+    if final_refit:
+        duss_df, wgms_df = load_refit_obs(cfg, orig, oggm_df)
 
     # --- Prepare static arrays (factorize outside JIT) ---
     static_arrays = prepare_finetune_arrays(
-        oggm_df, temporal_avg_df, glambie_train_df, ft_cols, scaler=scaler
+        oggm_df, temporal_avg_df, glambie_train_df, ft_cols, scaler=scaler,
+        duss_df=duss_df, wgms_df=wgms_df,
     )
+    if final_refit:
+        write_refit_obs_used(cfg.model.output_dir, glambie_train_df, duss_df, wgms_df, static_arrays)
 
     # --- Model init (warm-start from pretrained posterior mean) ---
     model = BayesianNeuralField(
@@ -696,8 +846,11 @@ def run_finetune(cfg: DictConfig) -> None:
     # GLaMBIE observation count is added as before.
     _period_counts = [p["n_glaciers"] for p in static_arrays["hugonnet_periods"]]
     n_finetune_obs = _period_counts[0] if _period_counts else 0
-    if static_arrays["has_glambie"]:
-        n_finetune_obs += int(static_arrays["obs_year_idx"].shape[0])
+    for key in ("glambie", "duss"):
+        if static_arrays[key] is not None:
+            n_finetune_obs += int(static_arrays[key]["obs_year_idx"].shape[0])
+    if static_arrays["wgms"] is not None:
+        n_finetune_obs += static_arrays["wgms"]["n_obs"]
 
     t_mean, t_std = target_scaler if target_scaler is not None else (0.0, 1.0)
 
@@ -705,12 +858,18 @@ def run_finetune(cfg: DictConfig) -> None:
     kl_weight      = float(cfg.model.get("kl_weight", 1.0))
     print(f"  GLaMBIE weight: {glambie_weight:.4f} (relative to Hugonnet temporal-avg loss)")
     print(f"  KL weight:      {kl_weight:.4f} (OGGM prior strength; <1.0 = weaker prior)")
+    duss_weight = float(cfg.model.get("duss_weight", 1.0))
+    wgms_weight = float(cfg.model.get("wgms_weight", 1.0))
+    if final_refit:
+        print(f"  Dussaillant weight: {duss_weight:.4f}   WGMS reference weight: {wgms_weight:.4f}")
+    print(f"  n_data (KL normalisation): {n_finetune_obs}")
 
     beta_schedule = make_beta_schedule(cfg.model.model_nepochs, cfg.model.beta_anneal_epochs)
     train_step    = make_train_step(
         model, optimizer, prior_mu, prior_log_sigma, static_arrays,
         n_data=n_finetune_obs, target_mean=t_mean, target_std=t_std,
         glambie_weight=glambie_weight, kl_weight=kl_weight,
+        duss_weight=duss_weight, wgms_weight=wgms_weight,
     )
 
     # --- Early stopping setup (monitors training loss, not validation) ---
@@ -791,7 +950,7 @@ def run_finetune(cfg: DictConfig) -> None:
     fig.savefig(os.path.join(cfg.model.output_dir, "training_loss.png"), dpi=150)
     plt.close(fig)
 
-    # --- GLaMBIE test evaluation (all post-temporal_avg years: 2021+) ---
+    # --- GLaMBIE test evaluation (all years >= temporal_avg end year: 2020+) ---
     if glambie_test_df is not None:
         eval_kwargs = dict(
             features_df=features_df, ft_cols=ft_cols,

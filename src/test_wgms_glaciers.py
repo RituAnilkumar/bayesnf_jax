@@ -24,6 +24,8 @@ model_mean + 2*std_total].
 Assumptions (see conversation trail — flag if any of these are wrong):
   - Model source: outputs/ensemble_pretrain_year/r{NN}/combined/ensemble_glacier.csv
     (the pooled ensemble across all pretrain-year groups), keyed by (rgi_id, year).
+    The model value is the ensemble mean, stored in the median_mwe column (see
+    ensemble_uncertainty.py::_ensemble_components).
   - The FULL WGMS record for plotting is re-read fresh from
     validation_data/per_gla/mass_balance.csv (annual_balance is already m w.e., no conversion)
     for exactly the glacier_ids in the "testing" split — this file is NOT the
@@ -318,7 +320,7 @@ def _draw_glacier(ax, sub: pd.DataFrame, name: str, rgi_id: str, metrics_row: di
     if has_pred.any():
         ax.fill_between(yr[has_pred], (pred - 2 * std)[has_pred], (pred + 2 * std)[has_pred],
                         alpha=0.20, color="steelblue", label="Model ±2σ")
-        ax.plot(yr[has_pred], pred[has_pred], color="steelblue", lw=1.6, label="Model median")
+        ax.plot(yr[has_pred], pred[has_pred], color="steelblue", lw=1.6, label="Ensemble mean")
     ax.plot(yr, obs, color="black", lw=1.3, marker="o", ms=3, label="WGMS observed")
     ax.axhline(0, color="black", lw=0.5, ls="--", zorder=0)
 

@@ -14,6 +14,12 @@ Requires one extra config key:
 
 All plotting, metrics, and config options are identical to validate_regional.py.
 
+Compares against the Dussaillant regional product (validation_dir) for
+visualisation only — Dussaillant was never used to build or select the
+ensemble. Its metrics of record, split into years outside (<2000, >2020) and
+inside (2000-2020) the finetuning window, come from src/test_regional_duss.py.
+The model value plotted is the ensemble mean (stored in the median_mwe column).
+
 Usage:
     python src/validate_regional_pretrain_year.py \\
         --config conf/config_validate_regional.yaml \\
@@ -137,6 +143,8 @@ def _parse_args() -> argparse.Namespace:
                         help="Which pretrain_year subfolder to validate (overrides config).")
     parser.add_argument("--ensemble_base_dir", default=None)
     parser.add_argument("--output_dir", default=None)
+    parser.add_argument("--validation_dir", default=None,
+                        help="Directory with Dussaillant {WGMS_ABBREV}.csv files (overrides config).")
     parser.add_argument("--ensemble_filename", default=None,
                         help="CSV filename to load from each region/pretrain_year_group/ dir "
                              "(default: ensemble_regional_mwe.csv).")
@@ -159,6 +167,8 @@ def main() -> None:
         cfg["ensemble_base_dir"] = args.ensemble_base_dir
     if args.output_dir is not None:
         cfg["output_dir"] = args.output_dir
+    if args.validation_dir is not None:
+        cfg["validation_dir"] = args.validation_dir
     if args.ensemble_filename is not None:
         cfg["ensemble_filename"] = args.ensemble_filename
 

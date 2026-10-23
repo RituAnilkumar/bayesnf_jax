@@ -5,9 +5,9 @@ Validates ensemble regional MWE predictions against WGMS / Dussaillant et al.
 regional reference series.
 
 For each matched region the script produces (files named by RGI number, e.g. r06):
-  - timeseries_{rgi}.png     ensemble median ± N×σ bands vs. WGMS ±1σ error bars;
+  - timeseries_{rgi}.png     ensemble mean ± N×σ bands vs. WGMS ±1σ error bars;
                               title includes RMSE, bias, r, and % years within bounds
-  - scatter_{rgi}.png        per-region scatter: ensemble median vs. WGMS with
+  - scatter_{rgi}.png        per-region scatter: ensemble mean vs. WGMS with
                               ±N×σ ensemble error bars and WGMS uncertainty band
   - residuals_all_regions.png residual bars per region with ±N×σ WGMS uncertainty band
   - summary_multipanel.png   all regions in one figure
@@ -153,8 +153,8 @@ def _plot_timeseries(
         label=f"±{sigma_mult:g}σ total",
     )
 
-    # Ensemble median line
-    ax.plot(years, mu, color="steelblue", lw=1.8, label="Ensemble median")
+    # Ensemble mean line (stored in the median_mwe column)
+    ax.plot(years, mu, color="steelblue", lw=1.8, label="Ensemble mean")
 
     # WGMS 2026: line + error bar dots
     ax.plot(merged["year"].values, merged["mwe"].values,
@@ -263,7 +263,7 @@ def _plot_scatter_region(
     output_path: Path,
 ) -> None:
     """
-    Scatter plot for a single region: ensemble median vs. WGMS MWE.
+    Scatter plot for a single region: ensemble mean vs. WGMS MWE.
 
     - Grey shaded band around the 1:1 line = ±sigma_mult × mwe_sigma (per-year
       WGMS observational uncertainty), showing where each observation "should" lie.
@@ -315,7 +315,7 @@ def _plot_scatter_region(
     ax.set_xlim(lo, hi)
     ax.set_ylim(lo, hi)
     ax.set_xlabel("WGMS/Dussaillant MWE/yr (m w.e.)")
-    ax.set_ylabel("Ensemble median MWE/yr (m w.e.)")
+    ax.set_ylabel("Ensemble mean MWE/yr (m w.e.)")
     ax.legend(fontsize=7, loc="upper left")
     ax.set_aspect("equal", adjustable="box")
     fig.tight_layout()
@@ -371,7 +371,7 @@ def _plot_residuals(
         axes_flat[idx].set_visible(False)
 
     fig.suptitle(
-        f"Residuals: ensemble median − WGMS/Dussaillant (MWE/yr)\n"
+        f"Residuals: ensemble mean − WGMS/Dussaillant (MWE/yr)\n"
         f"Grey band: ±{sigma_mult}σ WGMS observational uncertainty",
         fontsize=9,
     )

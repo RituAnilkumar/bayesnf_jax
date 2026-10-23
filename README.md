@@ -280,8 +280,8 @@ outputs/
 
 **Stage 2 (finetune):**
 - No held-out data from temporal_avg (longest Hugonnet period fully used)
-- GLaMBIE years < temporal_avg end year → training loss
-- GLaMBIE years > temporal_avg end year (typically 2021–2024) → test, automatically held out by construction
+- GLaMBIE years < temporal_avg end year (2000–2019) → training loss
+- GLaMBIE years >= temporal_avg end year (2020–2024) → test, automatically held out by construction
 - Early stopping monitors training loss only (no validation set); activates after beta annealing completes
 
 ---
@@ -469,15 +469,22 @@ Each subdirectory contains:
 
 ### Step 3 — Validation
 
-Validates all 5 groups against WGMS/Dussaillant (regional) and WGMS in-situ
+Validates all 5 groups against Dussaillant (regional) and WGMS in-situ
 (per-glacier). Console log saved in each output directory as `run.log`.
 
-> **Note:** `validate_per_glacier_pretrain_year.py` here still uses the original
-> 6-glacier `validation_data/per_gla/ref_mb_timeseries.csv` as a quick, broad sanity
-> check. It has since been superseded for anything rigorous by the larger,
-> region-representative reference/benchmark glacier set with an explicit
-> validation/testing split (see **Step 6 — Testing** below) — that testing-split
-> comparison, not this one, is what now actually held out data from selection.
+- **Per-glacier:** `validate_per_glacier_pretrain_year.py` uses the **validation**
+  split of the WGMS reference/benchmark glaciers
+  (`validation_data/per_gla/reference_benchmark_mb_timeseries.csv`, `split=="validation"`,
+  years <2000 or >2020) — the same glaciers and years that drive ensemble selection
+  in Step 2. The **testing**-split glaciers are used only in Step 6.
+- **Regional:** `validate_regional_pretrain_year.py` plots against the Dussaillant
+  regional product for visualisation only (Dussaillant is never used to build or
+  select the ensemble). Its metrics of record come from Step 6
+  (`test_regional_duss.py`), split by finetuning window.
+- The model value everywhere is the **ensemble mean** (stored in the `median_mwe`
+  column of the ensemble CSVs — the name is historical).
+- Coverage here is at **±1σ** (`sigma_mult: 1`): per-glacier = WGMS value inside the
+  model's ±1σ band; regional = model ±1σ band overlaps Dussaillant's ±1σ band.
 
 ```bash
 for group in pt1940 pt1960 pt1980 pt2000 combined; do   python src/validate_regional_pretrain_year.py     --config conf/config_validate_regional.yaml     --pretrain_year_group ${group}     --ensemble_base_dir outputs/ensemble_pretrain_year     --output_dir outputs/validation_regional_${group};    python src/validate_per_glacier_pretrain_year.py     --pretrain_year_group ${group}     --ensemble_base_dir outputs/ensemble_pretrain_year     --output_dir outputs/validation_pergla_${group}; done
@@ -565,10 +572,9 @@ Outputs land in `outputs/explain_pretrain_year/r{nn}/{group}/`:
 ### Step 6 — Testing
 
 Three scripts, all run against the `combined/` ensemble only. Unlike Step 3
-(**Validation**, above — the WGMS *validation*-split glaciers, used only to pick the
+(**Validation**, above — the WGMS *validation*-split glaciers, used to pick the
 ensemble), these use data that was never touched during selection at all: GLaMBIE
-post-2020, the WGMS *testing*-split glaciers, and the independent Dussaillant
-regional product.
+2020–2024, the WGMS *testing*-split glaciers, and the Dussaillant regional product.
 
 **Data needed** (all gitignored — rsync separately, not covered by `git pull`):
 - `validation_data/per_gla/reference_benchmark_mb_timeseries.csv` and
@@ -603,10 +609,22 @@ python src/test_regional_duss.py \
   --output_dir outputs/testing_regional_duss
 ```
 
-All three report the same four metrics — r, RMSE, MAE, and coverage (percentage of
-observed values falling within the model's own ±2σ band) — computed only on each
-script's held-out years (2020-2024 for GLaMBIE; pre-2000/post-2020 for WGMS glaciers;
-full record for Dussaillant, which was never split).
+All three report the same four metrics — r, RMSE, MAE and coverage (2σ) — using
+the ensemble mean. Coverage is defined differently depending on whether the
+observation has its own uncertainty:
+- **WGMS glaciers** (no per-point obs uncertainty): % of observed values inside the
+  model's ±2σ band.
+- **GLaMBIE** and **Dussaillant**: % of points where the model's ±2σ band overlaps
+  the observation's own ±2σ band.
+
+Years used for the metrics:
+- GLaMBIE: 2020–2024.
+- WGMS testing glaciers: years <2000 or >2020 only.
+- Dussaillant: reported separately for **outside** the finetuning window (years
+  <2000 and >2020, merged — the primary test metric) and **inside** it (2000–2020).
+  Inside the window Dussaillant is tied to the same Hugonnet geodetic signal used as
+  a finetuning target, so it is not an independent test there. A pooled `ALL` row
+  per window is also written.
 
 **What to look at:**
 - `outputs/testing_glambie_regional/glambie_scatter_by_region.png` — are specific
@@ -618,7 +636,54 @@ full record for Dussaillant, which was never split).
 - `outputs/testing_wgms_glaciers/timeseries_all_test_glaciers.png` — full records for
   every held-out test glacier at once (grey band = the 2000-2020 years excluded from
   the metrics, shown for visual context only)
-- `outputs/testing_regional_duss/regional_duss_metrics.csv` — per-region skill against
-  the independent Dussaillant product
+- `outputs/testing_regional_duss/regional_duss_metrics.csv` — per-region (and pooled
+  `ALL`) skill against Dussaillant, one row per window (`outside` = <2000 & >2020,
+  `inside` = 2000–2020)
 - `outputs/testing_regional_duss/timeseries_r{nn}_{CODE}.png` — model vs. Dussaillant,
   with the number of glaciers with in-situ measurements that year as a bar overlay
+
+---
+
+### Step 7 — Final refit on held-out data
+
+Once testing (Step 6) is done and reported, the selected `combined/` members are
+re-finetuned on the data that was held out, to produce the final models. **Selection
+is not redone** — `src/refit_final.py` reads `combined/top_runs_info.csv`, reproduces
+each member's exact sweep config from its `.hydra/config.yaml`, keeps its own
+`pretrained_params.pkl` (Stage 1 unchanged), and re-runs Stage 2 + predict with
+`model.final_refit=true`. It then combines the refit members with the same equal weights.
+
+What `final_refit=true` adds to the Stage 2 loss (`src/model/finetune.py`, `src/refit_data.py`):
+
+| Term | Data | Reliability filter |
+|---|---|---|
+| `L_glambie` | GLaMBIE 2020–2024 (previously test) | — (same treatment as 2000–2019) |
+| `L_duss` (`duss_weight`) | Dussaillant regional annual MB | years < 2000 **and** ≥ `duss_min_insitu` (default 1) WGMS glaciers measured in situ in that region-year |
+| `L_wgms` (`wgms_weight`) | WGMS glaciological annual MB, per glacier | WGMS **reference** list only (not benchmark / former reference); both validation and testing split |
+
+- Dussaillant 2000–2020 is tied to the Hugonnet geodetic signal, and 2020+ is covered by
+  GLaMBIE (whose combined estimate already includes glaciological input), so neither is used.
+- `L_duss` uses the same area-weighted regional form as `L_glambie`; `L_wgms` is a per
+  (glacier, year) inverse-variance MSE / NLL. Missing WGMS `annual_balance_unc` (~76% of
+  rows) is filled with `wgms_default_unc` (0.3 m w.e./yr).
+- `wgms_exclude_window=true` drops glaciological years 2000–2020 if their overlap with the
+  Hugonnet period mean is a concern.
+- Each refit run writes `refit_obs_used.csv`, listing every non-Hugonnet observation that entered the loss.
+- **After the refit, GLaMBIE 2020+, the WGMS reference glaciers and pre-2000 Dussaillant
+  are in-sample.** Quote test metrics from the original ensemble, not the refit one.
+
+**Data needed:** `validation_data/regional_wgms_duss/*.csv` (Dussaillant regional files,
+same as `test_regional_duss.py`) and `validation_data/per_gla/{mass_balance,glacier,reference_benchmark_glaciers}.csv`.
+
+```bash
+for i in $(seq -w 1 19); do
+  python src/refit_final.py \
+    --ensemble_dir outputs/ensemble_pretrain_year/r${i}/combined \
+    --output_root  /scratch/b5at/ranil.b5at/bayesnf_jax/refit_final/r${i} \
+    --ensemble_out outputs/ensemble_final_refit/r${i}/combined
+done
+```
+
+To parallelise members, run with `--member ${SLURM_ARRAY_TASK_ID}` (one 0-based row of
+`top_runs_info.csv` per array task), then once more with `--combine_only`. Use `--set`
+to override refit settings for all members, e.g. `--set model.duss_min_insitu=3 model.duss_weight=2.0`.

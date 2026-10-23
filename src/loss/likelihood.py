@@ -246,3 +246,34 @@ def glambie_loss(
     pred_regional_means = regional_annual_mean(preds, year_ids, n_years, glacier_areas)  # (n_years,)
     pred_at_obs = pred_regional_means[obs_year_idx]                                       # (N_obs,)
     return jnp.mean(((pred_at_obs - glambie_means) / glambie_errs) ** 2)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (final refit only) — per-glacier annual point observations (WGMS)
+# ---------------------------------------------------------------------------
+
+def glacier_point_loss(
+    preds: jax.Array,   # shape (N_obs,)  predictions at observed (glacier, year) rows [MWE/yr]
+    targets: jax.Array, # shape (N_obs,)  glaciological annual balance [MWE/yr]
+    errs: jax.Array,    # shape (N_obs,)  observation uncertainty [MWE/yr]
+) -> jax.Array:
+    """
+    Inverse-variance weighted MSE for per-glacier annual observations.
+
+    L_wgms = (1/N_obs) * sum_k [ (pred_k - obs_k)^2 / err_k^2 ]
+    """
+    return jnp.mean(((preds - targets) / errs) ** 2)
+
+
+def glacier_point_nll(
+    mu: jax.Array,      # shape (N_obs,)  [MWE/yr]
+    sigma: jax.Array,   # shape (N_obs,)  aleatoric std [MWE/yr]
+    targets: jax.Array, # shape (N_obs,)  [MWE/yr]
+    errs: jax.Array,    # shape (N_obs,)  [MWE/yr]
+) -> jax.Array:
+    """
+    Gaussian NLL for per-glacier annual observations; aleatoric sigma and
+    observation uncertainty combined in quadrature (same form as temporal_avg_nll).
+    """
+    combined_var = sigma ** 2 + errs ** 2
+    return jnp.mean(0.5 * (mu - targets) ** 2 / combined_var + 0.5 * jnp.log(combined_var))

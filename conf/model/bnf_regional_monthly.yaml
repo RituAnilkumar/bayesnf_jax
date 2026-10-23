@@ -85,6 +85,21 @@ glambie_path: ???
 pretrained_params_path: ???
 finetuned_params_path: ???
 
+# --- Final refit (Stage 2 only; set by src/refit_final.py) ---
+# When true, nothing is held out: GLaMBIE 2020+ joins training, and two extra
+# likelihood terms are added from previously held-out data (src/refit_data.py).
+final_refit: false
+use_duss: true                # Dussaillant regional MB, years < duss_year_max with in-situ support
+refit_duss_dir: validation_data/regional_wgms_duss
+duss_year_max: 2000           # exclusive; 2000-2020 is tied to Hugonnet, 2020+ is covered by GLaMBIE
+duss_min_insitu: 1            # min # WGMS glaciers measured in situ in that region-year
+duss_weight: 1.0              # relative to Hugonnet temporal-avg loss (per-observation normalised)
+use_wgms: true                # WGMS reference-list glaciers only (not benchmark / former reference)
+refit_per_gla_dir: validation_data/per_gla
+wgms_default_unc: 0.3         # MWE/yr, used where annual_balance_unc is missing (~76% of rows)
+wgms_exclude_window: false    # true = drop glaciological years 2000-2020 (Hugonnet window)
+wgms_weight: 1.0
+
 # --- GLaMBIE validation ---
 # Test years are automatically derived as GLaMBIE years > temporal_avg end year.
 # No manual configuration needed.

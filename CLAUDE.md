@@ -221,6 +221,13 @@ architectural components are needed.
   to years where OGGM's calibration-Hugonnet overlap is weakest, but that
   change is intentionally out of scope for now; the blanket kl_weight=0.5
   discount is considered sufficient.
+- Final refit mode (`model.final_refit=true`, driven by `src/refit_final.py`): after
+  testing, the already-selected ensemble members are re-finetuned (no re-selection,
+  same pretrained prior) with nothing held out. GLaMBIE 2020+ joins `L_glambie`, plus
+  `duss_weight * L_duss` (Dussaillant regional MB, years <2000 with ≥1 in-situ glacier
+  that region-year; same area-weighted form as L_glambie) and `wgms_weight * L_wgms`
+  (WGMS *reference*-list glaciers, per glacier-year). n_data includes these
+  observations. Loaders and filters: `src/refit_data.py`. Off by default.
 - GLaMBIE may be absent for some regions (e.g. High Mountain Asia has no
   gravimetry) — handle gracefully, do not error if glambie file is missing
   or empty for a given source

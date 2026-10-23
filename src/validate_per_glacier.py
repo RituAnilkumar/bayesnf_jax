@@ -181,7 +181,7 @@ def _draw_timeseries_ax(ax, sub: pd.DataFrame, name: str, rgi: str,
     if s_epi is not None:
         ax.fill_between(yr, pred - s_epi, pred + s_epi,
                         alpha=0.35, color="darkorange", label="±1σ epistemic")
-    ax.plot(yr, pred, color="steelblue", lw=1.6, label="Model median")
+    ax.plot(yr, pred, color="steelblue", lw=1.6, label="Ensemble mean")
     ax.plot(yr, obs,  color="black",     lw=1.4, label="WGMS in-situ")
 
     m = _metrics(valid)
@@ -234,7 +234,7 @@ def _draw_scatter_ax(ax, sub: pd.DataFrame, name: str) -> None:
     )
     ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
     ax.set_xlabel("WGMS in-situ (MWE/yr)", fontsize=7)
-    ax.set_ylabel("Model median (MWE/yr)", fontsize=7)
+    ax.set_ylabel("Ensemble mean (MWE/yr)", fontsize=7)
     ax.set_aspect("equal", adjustable="box")
     ax.tick_params(labelsize=6)
 
@@ -288,7 +288,7 @@ def plot_timeseries(joined: pd.DataFrame, output_path: Path) -> None:
         axes_flat[idx].set_visible(False)
     fig.suptitle(
         "Per-glacier model vs. WGMS in-situ (MWE/yr)\n"
-        "Blue: ±2σ total  |  Purple: ±2σ structural  |  Orange: ±2σ epistemic",
+        "Blue: ±1σ total  |  Purple: ±1σ structural  |  Orange: ±1σ epistemic",
         fontsize=9,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -311,8 +311,8 @@ def plot_scatter(joined: pd.DataFrame, output_path: Path) -> None:
     for idx in range(len(glaciers), len(axes_flat)):
         axes_flat[idx].set_visible(False)
     fig.suptitle(
-        "Per-glacier scatter: model median vs. WGMS in-situ\n"
-        "Error bars: ±2σ model total  |  Colour: year",
+        "Per-glacier scatter: ensemble mean vs. WGMS in-situ\n"
+        "Error bars: ±1σ model total  |  Colour: year",
         fontsize=9,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -335,8 +335,8 @@ def plot_residuals(joined: pd.DataFrame, output_path: Path) -> None:
     for idx in range(len(glaciers), len(axes_flat)):
         axes_flat[idx].set_visible(False)
     fig.suptitle(
-        "Residuals: model median − WGMS in-situ (MWE/yr)\n"
-        "Blue band: ±2σ model total uncertainty",
+        "Residuals: ensemble mean − WGMS in-situ (MWE/yr)\n"
+        "Blue band: ±1σ model total uncertainty",
         fontsize=9,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])

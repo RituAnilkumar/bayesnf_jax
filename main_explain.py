@@ -530,7 +530,7 @@ def main(cfg: DictConfig) -> None:
         else:
             loyo_w         = float(ex.get("loyo_weight", 0.0))
             glambie_w_cfg  = float(ex.get("glambie_weight", 1.0))
-            test_years_cfg = list(ex.get("glambie_test_years") or [2021, 2022, 2023])
+            test_years_cfg = list(ex.get("glambie_test_years") or [2020, 2021, 2022, 2023, 2024])
             min_runs_cfg   = int(ex.get("min_runs", 5))
             ensemble_weights = _compute_ensemble_weights(
                 compatible_dirs, weighting, temperature,

@@ -6,6 +6,7 @@ The relationship is:  loss = -ELBO / n_data  (up to constants).
 
 Stage 1 loss:  L_oggm  + (beta / n_data) * KL(q || N(0,1))
 Stage 2 loss:  L_temporal_avg + glambie_weight * L_glambie + kl_weight * (beta / n_data) * KL(q || q_pretrained)
+               (+ duss_weight * L_duss + wgms_weight * L_wgms in final-refit mode)
 
 Beta is annealed linearly from 0 → 1 over the first `beta_anneal_epochs`
 epochs (default 20% of total epochs). This prevents posterior collapse
@@ -84,6 +85,10 @@ def finetune_elbo(
     n_data: int,
     glambie_weight: float = 1.0,
     kl_weight: float = 1.0,
+    duss_loss_val=0.0,            # scalar (final refit only; 0.0 otherwise)
+    wgms_loss_val=0.0,            # scalar (final refit only; 0.0 otherwise)
+    duss_weight: float = 1.0,
+    wgms_weight: float = 1.0,
 ) -> jnp.ndarray:
     """
     ELBO = L_temporal_avg + glambie_weight * L_glambie + kl_weight * (beta / n_data) * KL(q || q_pretrained)
@@ -110,8 +115,15 @@ def finetune_elbo(
         n_data:                Number of observations (n_glaciers + n_glambie_obs)
         glambie_weight:        Relative weight of GLaMBIE loss vs Hugonnet (default 1.0)
         kl_weight:             Relative weight of KL term vs data likelihood (default 1.0)
+        duss_loss_val:         Scalar Dussaillant pre-2000 regional loss (final refit; 0.0 if absent)
+        wgms_loss_val:         Scalar WGMS reference-glacier point loss (final refit; 0.0 if absent)
+        duss_weight, wgms_weight: Relative weights of those two terms (default 1.0)
 
     Returns:
         Scalar ELBO (to be minimised)
     """
-    return temporal_avg_loss_val + glambie_weight * glambie_loss_val + kl_weight * beta * (kl_val / n_data)
+    return (temporal_avg_loss_val
+            + glambie_weight * glambie_loss_val
+            + duss_weight * duss_loss_val
+            + wgms_weight * wgms_loss_val
+            + kl_weight * beta * (kl_val / n_data))

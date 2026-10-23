@@ -563,7 +563,7 @@ def run_ensemble_uncertainty(cfg: dict) -> None:
 
     weighting    = cfg.get("weighting", "performance")
     temperature  = float(cfg.get("softmax_temperature", 0.1))
-    test_years   = list(cfg.get("glambie_test_years", [2021, 2022, 2023]))
+    test_years   = list(cfg.get("glambie_test_years", [2020, 2021, 2022, 2023, 2024]))
     min_runs     = int(cfg.get("min_runs_per_region", 5))
     loyo_r2_min   = cfg.get("loyo_r2_min", 0.0)
     logo_r2_min   = cfg.get("logo_r2_min", 0.0)

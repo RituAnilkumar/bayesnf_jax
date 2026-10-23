@@ -404,7 +404,7 @@ def main(cfg: DictConfig) -> None:
     temperature   = float(ex.get("softmax_temperature", 0.1))
     loyo_w        = float(ex.get("loyo_weight", 0.0))
     glambie_w_cfg = float(ex.get("glambie_weight", 1.0))
-    test_years_cfg = list(ex.get("glambie_test_years") or [2021, 2022, 2023])
+    test_years_cfg = list(ex.get("glambie_test_years") or [2020, 2021, 2022, 2023, 2024])
     min_runs_cfg  = int(ex.get("min_runs", 5))
     top_k_models  = ex.get("top_k_models")
     top_k_models  = int(top_k_models) if top_k_models else None

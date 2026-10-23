@@ -12,7 +12,17 @@ ensemble_uncertainty_pretrain_year.py, which writes into nested subdirectories:
 Requires one extra config key:
     pretrain_year_group: "pt2000"   # or pt1940, pt1960, pt1980
 
-All plotting, metrics, and config options are identical to validate_per_glacier.py.
+Reference data: the "validation" split of the WGMS reference/benchmark glacier
+set (validation_data/per_gla/reference_benchmark_mb_timeseries.csv, built by
+build_reference_timeseries.py) — the same glaciers and years (<2000 or >2020)
+that drive ensemble selection in src/wgms_validation.py. The "testing" split is
+deliberately excluded here; it is only used in src/test_wgms_glaciers.py.
+obs_mwe in that file is already m w.e. (no conversion).
+
+The model value compared is the ensemble mean (stored in the median_mwe
+column of ensemble_glacier.csv — see ensemble_uncertainty.py::_ensemble_components).
+
+All plotting and metrics are shared with validate_per_glacier.py.
 
 Usage:
     python src/validate_per_glacier_pretrain_year.py \\
@@ -36,8 +46,6 @@ import pandas as pd
 import yaml
 
 from src.validate_per_glacier import (
-    REF_CSV,
-    MM_TO_MWE,
     _rgi_to_subdir,
     _metrics,
     plot_timeseries,
@@ -47,6 +55,17 @@ from src.validate_per_glacier import (
 )
 
 _VALID_GROUPS = ["pt1940", "pt1960", "pt1980", "pt2000", "combined"]
+REF_CSV = Path("validation_data/per_gla/reference_benchmark_mb_timeseries.csv")
+REF_SPLIT = "validation"
+
+
+def load_validation_split(ref_csv: Path) -> pd.DataFrame:
+    """split=='validation' rows of the WGMS reference/benchmark timeseries,
+    renamed to the columns the shared plotting helpers expect (rgi_id, NAME, YEAR, obs_mwe)."""
+    ts = pd.read_csv(ref_csv)
+    ref = ts[ts["split"] == REF_SPLIT].copy()
+    ref = ref.rename(columns={"RGI_ID": "rgi_id"})
+    return ref[["rgi_region", "glacier_id", "rgi_id", "NAME", "YEAR", "obs_mwe"]].reset_index(drop=True)
 
 
 def _load_glacier_csv(ensemble_base: Path, subdir: str, pretrain_year_group: str,
@@ -67,38 +86,27 @@ def _load_glacier_csv(ensemble_base: Path, subdir: str, pretrain_year_group: str
 
 def build_joined(ref: pd.DataFrame, ensemble_base: Path, pretrain_year_group: str,
                  glacier_filename: str = "ensemble_glacier.csv") -> pd.DataFrame:
-    region_cache: dict[str, pd.DataFrame] = {}
-
-    model_rows = []
-    for _, row in ref.iterrows():
-        subdir = _rgi_to_subdir(row["rgi_id"])
-        if subdir not in region_cache:
-            gl = _load_glacier_csv(ensemble_base, subdir, pretrain_year_group, glacier_filename)
-            region_cache[subdir] = gl
-
-        gl = region_cache[subdir]
+    model_cols = {
+        "median_mwe":     "model_mean_mwe",   # ensemble mean, despite the column name
+        "total_std":      "model_total_std",
+        "epistemic_std":  "model_epistemic_std",
+        "structural_std": "model_structural_std",
+        "aleatoric_std":  "model_aleatoric_std",
+    }
+    parts = []
+    for subdir in sorted(ref["rgi_id"].map(_rgi_to_subdir).unique()):
+        gl = _load_glacier_csv(ensemble_base, subdir, pretrain_year_group, glacier_filename)
         if gl is None:
-            model_rows.append({})
             continue
+        ids = ref.loc[ref["rgi_id"].map(_rgi_to_subdir) == subdir, "rgi_id"].unique()
+        gl = gl[gl["rgi_id"].isin(ids)]
+        keep = ["rgi_id", "year"] + [c for c in model_cols if c in gl.columns]
+        parts.append(gl[keep].rename(columns={"year": "YEAR", **model_cols}))
 
-        match = gl[(gl["rgi_id"] == row["rgi_id"]) & (gl["year"] == row["YEAR"])]
-        if match.empty:
-            model_rows.append({})
-            continue
-
-        r = match.iloc[0]
-        model_rows.append({
-            "model_mean_mwe":       r.get("median_mwe", r.get("mean_mwe", np.nan)),
-            "model_total_std":      r.get("total_std",      np.nan),
-            "model_epistemic_std":  r.get("epistemic_std",  np.nan),
-            "model_structural_std": r.get("structural_std", np.nan),
-            "model_aleatoric_std":  r.get("aleatoric_std",  np.nan),
-        })
-
-    model_cols = ["model_mean_mwe", "model_total_std", "model_epistemic_std",
-                  "model_structural_std", "model_aleatoric_std"]
-    model_df = pd.DataFrame(model_rows, index=ref.index).reindex(columns=model_cols)
-    return pd.concat([ref, model_df], axis=1)
+    joined = ref.copy()
+    if parts:
+        joined = joined.merge(pd.concat(parts, ignore_index=True), on=["rgi_id", "YEAR"], how="left")
+    return joined.reindex(columns=list(ref.columns) + list(model_cols.values()))
 
 
 def run(cfg: dict) -> None:
@@ -116,8 +124,7 @@ def run(cfg: dict) -> None:
 
     glacier_filename = cfg.get("glacier_filename", "ensemble_glacier.csv")
 
-    ref = pd.read_csv(ref_csv)
-    ref["obs_mwe"] = ref["ANNUAL_BALANCE"] * MM_TO_MWE
+    ref = load_validation_split(ref_csv)
 
     print(f"  Reference: {len(ref)} rows | "
           f"{ref['rgi_id'].nunique()} glaciers | "
@@ -147,7 +154,7 @@ def run(cfg: dict) -> None:
               f"RMSE={m.get('rmse', float('nan')):.3f}  "
               f"bias={m.get('bias', float('nan')):+.3f}  "
               f"r={m.get('corr', float('nan')):.2f}  "
-              f"cov1s={m.get('coverage_pct', float('nan')):.0f}%")
+              f"cov1σ={m.get('coverage_pct', float('nan')):.0f}%")
 
     pd.DataFrame(metrics_rows).to_csv(
         output_dir / "per_glacier_metrics.csv", index=False, float_format="%.4f"

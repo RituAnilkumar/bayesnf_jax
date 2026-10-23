@@ -17,7 +17,9 @@ instruction, rather than a per-region mix of source types.
 Assumptions (see conversation trail — flag if any of these are wrong):
   - Model source: {ensemble_base}/r{NN}/combined/ensemble_regional_mwe.csv
     (the pooled ensemble across all pretrain-year groups — the ensembling
-    script's "combined" output, not any single pt{year} group).
+    script's "combined" output, not any single pt{year} group). The model
+    value is the ensemble mean, stored in the median_mwe column (see
+    ensemble_uncertainty.py::_ensemble_components).
   - GLaMBIE source: {data_root}/r{NN}/glambie_targets_r{NN}.csv, combined_mwe
     column only; year = floor(end_date), matching the convention used
     elsewhere in this codebase (data_utils.py::load_glambie).
@@ -28,7 +30,7 @@ Assumptions (see conversation trail — flag if any of these are wrong):
     is not available for every region/year (e.g. no 2023/2024 rows for some
     regions in the current data).
   - "Coverage (2 sigma)" = whether the model's ±2σ band
-    [median_mwe - 2*std_total, median_mwe + 2*std_total] overlaps GLaMBIE's own
+    [mean - 2*std_total, mean + 2*std_total] overlaps GLaMBIE's own
     ±2σ band [glambie_mwe - 2*glambie_mwe_err, glambie_mwe + 2*glambie_mwe_err]
     — a band-overlap check (same definition as src/test_regional_duss.py),
     deliberately different from the one-sided containment check used for the
@@ -153,7 +155,7 @@ def _scatter_common(ax, pairs: pd.DataFrame, metrics: dict) -> tuple[float, floa
     ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("GLaMBIE combined MWE/yr (m w.e.)")
-    ax.set_ylabel("Model median MWE/yr (m w.e.)")
+    ax.set_ylabel("Ensemble mean MWE/yr (m w.e.)")
     ax.set_title(
         f"Model vs. GLaMBIE combined ({TEST_YEARS[0]}–{TEST_YEARS[-1]})\n"
         f"n={metrics['n']}  r={metrics['corr']:.2f}  RMSE={metrics['rmse']:.3f}  "
