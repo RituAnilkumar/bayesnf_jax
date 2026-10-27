@@ -23,8 +23,16 @@ which lives only on /scratch.
 
 Correlation assumptions used here (as given by the project):
   - aleatoric:          independent across glaciers -> quadrature, within each run
-  - epistemic (param):  fully correlated across glaciers -> linear (area-weighted mean),
-                         within each run
+  - epistemic (param):  within each run, glaciers share ONE average (equi-)correlation rho,
+                         calibrated per run and year so that the full glacier set reproduces
+                         that run's own regional epistemic std exactly (regional_annual_mwe.csv,
+                         the std of the area-weighted mean over the run's MC weight samples):
+                           A = sum_g w_g^2 s_g^2,  B = (sum_g w_g s_g)^2
+                           s_R^2 = A + rho (B - A)  ->  rho = (s_R^2 - A) / (B - A), clipped to [0, 1]
+                         The same rho is then applied to the exorheic subset (its own A, B).
+                         Assumption: exorheic glaciers are as correlated with each other as the
+                         region's glaciers are on average. (Full correlation, rho = 1, inflated
+                         the regional epistemic std 1.5-3.7x relative to the MC samples.)
   - structural:         independent across ensemble members (runs) -> this is exactly
                          _ensemble_components' existing std_structural formula
                          (spread of each run's own regional mean around the ensemble
@@ -64,7 +72,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.ensemble_uncertainty import _ensemble_components, _load_glacier_preds
+from src.ensemble_uncertainty import _ensemble_components, _load_glacier_preds, _load_regional_mwe
 
 YEAR_MIN, YEAR_MAX = 1940, 2025
 YEARS = np.arange(YEAR_MIN, YEAR_MAX + 1)
@@ -89,11 +97,20 @@ def _area_weighted_quadrature(df: pd.DataFrame, value_col: str, area_col: str = 
     return out.reindex(YEARS)
 
 
+def _epistemic_terms(df: pd.DataFrame, col: str, area_col: str = "Area") -> tuple[np.ndarray, np.ndarray]:
+    """Per year: A = sum_g w_g^2 s_g^2 (independent limit) and B = (sum_g w_g s_g)^2 (fully correlated limit)."""
+    w = df[area_col] / df.groupby("year")[area_col].transform("sum")
+    A = ((w * df[col]) ** 2).groupby(df["year"]).sum().reindex(YEARS).values
+    B = ((w * df[col]).groupby(df["year"]).sum() ** 2).reindex(YEARS).values
+    return A, B
+
+
 def _total_area_by_year(df: pd.DataFrame, area_col: str = "Area") -> pd.Series:
     return df.groupby("year")[area_col].sum().reindex(YEARS)
 
 
-def _one_run_regional_series(preds_df: pd.DataFrame, area_df: pd.DataFrame, glacier_mask: pd.Series | None) -> dict:
+def _one_run_regional_series(preds_df: pd.DataFrame, area_df: pd.DataFrame, glacier_mask: pd.Series | None,
+                             regional_epi_std: np.ndarray | None) -> dict:
     """
     Restrict one run's preds_full.csv to the glacier subset (if glacier_mask given,
     a boolean Series indexed by rgi_id that is True for glaciers to KEEP), then
@@ -110,14 +127,24 @@ def _one_run_regional_series(preds_df: pd.DataFrame, area_df: pd.DataFrame, glac
         )
 
     df = preds_df.merge(area_df, on="rgi_id", how="inner")
+    df = df[(df["year"] >= YEAR_MIN) & (df["year"] <= YEAR_MAX)]
+
+    # calibrate the within-run glacier correlation on the FULL set
+    A_full, B_full = _epistemic_terms(df, epistemic_col)
+    if regional_epi_std is None:
+        rho = np.ones(len(YEARS))                     # no regional file: fall back to full correlation
+    else:
+        with np.errstate(invalid="ignore", divide="ignore"):
+            rho = (regional_epi_std ** 2 - A_full) / (B_full - A_full)
+        rho = np.clip(np.where(np.isfinite(rho), rho, 1.0), 0.0, 1.0)
+
     if glacier_mask is not None:
         keep_ids = glacier_mask[glacier_mask].index
         df = df[df["rgi_id"].isin(keep_ids)]
 
-    df = df[(df["year"] >= YEAR_MIN) & (df["year"] <= YEAR_MAX)]
-
     mean_region = _area_weighted_mean(df, "mean")
-    epi_region = _area_weighted_mean(df, epistemic_col)          # linear: fully correlated within a run
+    A_s, B_s = _epistemic_terms(df, epistemic_col)
+    epi_region = pd.Series(np.sqrt(A_s + rho * (B_s - A_s)), index=YEARS)
     alea_region = _area_weighted_quadrature(df, "aleatoric_std")  # quadrature: independent within a run
     area_region = _total_area_by_year(df)
 
@@ -126,6 +153,7 @@ def _one_run_regional_series(preds_df: pd.DataFrame, area_df: pd.DataFrame, glac
         "epistemic_std": epi_region.values,
         "aleatoric_std": alea_region.values,
         "total_area_km2": area_region.values,
+        "rho": rho,
     }
 
 
@@ -148,14 +176,21 @@ def build_region(region: str, top_runs_csv: Path, area_df: pd.DataFrame,
     epi_mat = np.full((K, len(YEARS)), np.nan)
     alea_mat = np.full((K, len(YEARS)), np.nan)
     area_mat = np.full((K, len(YEARS)), np.nan)
+    rho_mat = np.full((K, len(YEARS)), np.nan)
     n_ok = 0
 
     for i, run_dir in enumerate(run_dirs):
         preds = _load_glacier_preds(run_dir)
         if preds is None:
             continue
+        reg = _load_regional_mwe(run_dir)
+        if reg is None:
+            warnings.warn(f"  {region} run {run_dir}: no regional_annual_mwe.csv -- epistemic falls back to rho = 1.")
+            reg_std = None
+        else:
+            reg_std = reg.set_index("year")["std"].reindex(YEARS).values
         try:
-            series = _one_run_regional_series(preds, area_df, glacier_mask)
+            series = _one_run_regional_series(preds, area_df, glacier_mask, reg_std)
         except ValueError as exc:
             warnings.warn(f"  {region} run {run_dir}: {exc} -- excluded.")
             continue
@@ -163,6 +198,7 @@ def build_region(region: str, top_runs_csv: Path, area_df: pd.DataFrame,
         epi_mat[i] = series["epistemic_std"]
         alea_mat[i] = series["aleatoric_std"]
         area_mat[i] = series["total_area_km2"]
+        rho_mat[i] = series["rho"]
         n_ok += 1
 
     if n_ok == 0:
@@ -191,6 +227,7 @@ def build_region(region: str, top_runs_csv: Path, area_df: pd.DataFrame,
         "std_total": comps["std_total"],
         "total_area_km2": total_area_km2,
         "n_runs_used": ok.sum(),
+        "rho_median_across_runs": np.nanmedian(rho_mat[ok], axis=0),
     })
     # same column names as the live ensemble_regional_gt.csv, so existing draw code can read it
     gt_df = pd.DataFrame({
@@ -260,10 +297,12 @@ def main():
                 # mean annual std per component, rebuilt / live (1.00 = reproduced)
                 for c in ["std_structural", "std_epistemic", "std_aleatoric", "std_total"]:
                     row[f"ratio_{c}"] = np.nanmean(mg[f"{c}_rebuilt"]) / np.nanmean(mg[f"{c}_live"])
+                row["rho_mean"] = float(np.nanmean(mwe_u["rho_median_across_runs"]))
                 repro_rows.append(row)
                 print("  Reproduction: cum Gt diff {:.3f}% | std ratios struct {:.2f} epist {:.2f} "
-                      "alea {:.2f} total {:.2f}".format(row["pct_diff_cum_gt"], row["ratio_std_structural"],
-                      row["ratio_std_epistemic"], row["ratio_std_aleatoric"], row["ratio_std_total"]))
+                      "alea {:.2f} total {:.2f} | mean rho {:.2f}".format(row["pct_diff_cum_gt"], row["ratio_std_structural"],
+                      row["ratio_std_epistemic"], row["ratio_std_aleatoric"], row["ratio_std_total"],
+                      float(np.nanmean(mwe_u["rho_median_across_runs"]))))
 
         if res_exo is not None:
             mwe_e, gt_e = res_exo
@@ -278,8 +317,9 @@ def main():
         print("\n=== Reproduction check summary (saved to reproduction_check.csv) ===")
         print(repro_df.to_string(index=False))
         print(
-            "\nRead: pct_diff_cum_gt should be < ~1% for every region (mean reproduced); ratio_std_* close to 1.00 "
-            "means that uncertainty component is reproduced. Trust the exorheic files only where they are.")
+            "\nRead: pct_diff_cum_gt should be < ~1% and every ratio_std_* close to 1.00. ratio_std_epistemic is now "
+            "1.00 by construction (rho is calibrated on the full set) unless rho had to be clipped to [0, 1]. "
+            "rho_mean is the average within-run glacier correlation used for the exorheic subset.")
 
 
 if __name__ == "__main__":
