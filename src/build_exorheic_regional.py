@@ -46,7 +46,7 @@ to validate this script before trusting the masked numbers) and one restricted
 to exorheic glaciers only.
 
 Outputs per region, in --output-dir:
-    {region}_unmasked_regional_mwe.csv   (reproduction check)
+    {region}_unmasked_regional_mwe.csv   (reproduction check; columns as ensemble_regional_*.csv)
     {region}_unmasked_regional_gt.csv
     {region}_exorheic_regional_mwe.csv   (the actual result)
     {region}_exorheic_regional_gt.csv
@@ -192,21 +192,22 @@ def build_region(region: str, top_runs_csv: Path, area_df: pd.DataFrame,
         "total_area_km2": total_area_km2,
         "n_runs_used": ok.sum(),
     })
-    gt_df = mwe_df.copy()
-    for col in ["median_mwe", "std_structural", "std_epistemic", "std_aleatoric", "std_total"]:
-        gt_df[col.replace("mwe", "gt")] = mwe_df[col] * scale
-    gt_df = gt_df.rename(columns={"median_mwe": "median_gt_src", "std_structural": "std_structural_src",
-                                    "std_epistemic": "std_epistemic_src", "std_aleatoric": "std_aleatoric_src",
-                                    "std_total": "std_total_src"})
-    # Keep only the *_gt columns plus year/area/n_runs (median_gt etc. created above)
-    gt_cols = ["year", "median_gt", "std_structural_gt", "std_epistemic_gt",
-               "std_aleatoric_gt", "std_total_gt", "total_area_km2", "n_runs_used"]
-    gt_df = gt_df[gt_cols]
+    # same column names as the live ensemble_regional_gt.csv, so existing draw code can read it
+    gt_df = pd.DataFrame({
+        "year": YEARS,
+        "median_gt": mwe_df["median_mwe"] * scale,
+        "std_structural": mwe_df["std_structural"] * scale,
+        "std_epistemic": mwe_df["std_epistemic"] * scale,
+        "std_aleatoric": mwe_df["std_aleatoric"] * scale,
+        "std_total": mwe_df["std_total"] * scale,
+        "total_area_km2": total_area_km2,
+        "n_runs_used": ok.sum(),
+    })
 
     return mwe_df, gt_df
 
 
-def load_area(region: str, inp_dir: str = "data_for_model") -> pd.DataFrame:
+def load_area(region: str, inp_dir: str) -> pd.DataFrame:
     path = os.path.join(inp_dir, region, f"main_features_{region}.csv")
     df = pd.read_csv(path, usecols=["rgi_id", "Area"]).drop_duplicates("rgi_id")
     return df
@@ -218,6 +219,7 @@ def main():
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--top-runs-root", default="outputs/ensemble_pretrain_year")
     ap.add_argument("--group", default="combined", help="pretrain-year group subfolder name")
+    ap.add_argument("--inp-dir", default="data_for_model", help="folder holding r{nn}/main_features_r{nn}.csv")
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -226,7 +228,7 @@ def main():
     flags = pd.read_csv(args.flags_csv)[["rgi_id", "region", "endorheic_final"]]
 
     regions = sorted(
-        d.parent.name for d in Path(args.top_runs_root).glob(f"*/{args.group}/top_runs_info.csv")
+        d.parent.parent.name for d in Path(args.top_runs_root).glob(f"*/{args.group}/top_runs_info.csv")
     )
     print(f"Found {len(regions)} regions with {args.group}/top_runs_info.csv")
 
@@ -234,7 +236,7 @@ def main():
     for region in regions:
         print(f"\n=== {region} ===")
         top_runs_csv = Path(args.top_runs_root) / region / args.group / "top_runs_info.csv"
-        area_df = load_area(region)
+        area_df = load_area(region, args.inp_dir)
         region_flags = flags[flags.region == region].set_index("rgi_id")["endorheic_final"]
         exorheic_mask = ~region_flags  # True = keep (exorheic)
 
@@ -251,18 +253,17 @@ def main():
             live_path = Path(args.top_runs_root) / region / args.group / "ensemble_regional_gt.csv"
             if live_path.exists():
                 live = pd.read_csv(live_path)
-                merged = gt_u.merge(live, on="year", suffixes=("_rebuilt", "_live"))
-                cum_rebuilt = merged["median_gt"].cumsum().iloc[-1]
-                cum_live = merged["median_gt_live"].cumsum().iloc[-1] if "median_gt_live" in merged else np.nan
-                std2025_rebuilt = merged["std_total_gt"].iloc[-1]
-                std2025_live = merged["std_total_live"].iloc[-1] if "std_total_live" in merged else np.nan
-                print(f"  Reproduction: rebuilt cum_gt(2025)={cum_rebuilt:.2f}  live={cum_live:.2f}  "
-                      f"diff={100*abs(cum_rebuilt-cum_live)/abs(cum_live):.3f}%")
-                repro_rows.append({
-                    "region": region, "rebuilt_cum_gt_2025": cum_rebuilt, "live_cum_gt_2025": cum_live,
-                    "pct_diff_mean": 100 * abs(cum_rebuilt - cum_live) / abs(cum_live),
-                    "rebuilt_std_total_2025": std2025_rebuilt, "live_std_total_2025": std2025_live,
-                })
+                mg = gt_u.merge(live, on="year", suffixes=("_rebuilt", "_live"))
+                cum_r, cum_l = mg["median_gt_rebuilt"].sum(), mg["median_gt_live"].sum()
+                row = {"region": region, "rebuilt_cum_gt_2025": cum_r, "live_cum_gt_2025": cum_l,
+                       "pct_diff_cum_gt": 100 * abs(cum_r - cum_l) / abs(cum_l)}
+                # mean annual std per component, rebuilt / live (1.00 = reproduced)
+                for c in ["std_structural", "std_epistemic", "std_aleatoric", "std_total"]:
+                    row[f"ratio_{c}"] = np.nanmean(mg[f"{c}_rebuilt"]) / np.nanmean(mg[f"{c}_live"])
+                repro_rows.append(row)
+                print("  Reproduction: cum Gt diff {:.3f}% | std ratios struct {:.2f} epist {:.2f} "
+                      "alea {:.2f} total {:.2f}".format(row["pct_diff_cum_gt"], row["ratio_std_structural"],
+                      row["ratio_std_epistemic"], row["ratio_std_aleatoric"], row["ratio_std_total"]))
 
         if res_exo is not None:
             mwe_e, gt_e = res_exo
@@ -277,11 +278,8 @@ def main():
         print("\n=== Reproduction check summary (saved to reproduction_check.csv) ===")
         print(repro_df.to_string(index=False))
         print(
-            "\nIf pct_diff_mean is small (<1%) for every region, the rebuild method is validated "
-            "for the mean. Compare rebuilt_std_total_2025 vs live_std_total_2025 directly -- "
-            "these should now also match closely (unlike the local glacier-level approximation), "
-            "since both aggregation steps now happen in the correct order with real per-run data."
-        )
+            "\nRead: pct_diff_cum_gt should be < ~1% for every region (mean reproduced); ratio_std_* close to 1.00 "
+            "means that uncertainty component is reproduced. Trust the exorheic files only where they are.")
 
 
 if __name__ == "__main__":
